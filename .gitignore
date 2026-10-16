@@ -1,0 +1,5 @@
+/minicrm
+/data/
+*.test
+*.out
+.DS_Store

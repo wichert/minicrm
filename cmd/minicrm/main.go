@@ -1,0 +1,148 @@
+// Command minicrm runs the MiniCRM HTTP server and background IMAP/SMTP workers.
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/alexedwards/scs/pgxstore"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/wichert/minicrm/internal/assignment"
+	"github.com/wichert/minicrm/internal/audit"
+	"github.com/wichert/minicrm/internal/auth"
+	"github.com/wichert/minicrm/internal/config"
+	"github.com/wichert/minicrm/internal/db/migrations"
+	"github.com/wichert/minicrm/internal/db/sqlc"
+	"github.com/wichert/minicrm/internal/mail"
+	"github.com/wichert/minicrm/internal/storage"
+	"github.com/wichert/minicrm/internal/threading"
+	"github.com/wichert/minicrm/internal/web"
+	"github.com/wichert/minicrm/internal/workflow"
+)
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
+
+	if err := run(logger); err != nil {
+		logger.Error("minicrm_fatal", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+}
+
+func run(logger *slog.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	poolCfg.ConnConfig.Tracer = sqlc.NewStructuredQueryTracer(logger)
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	sqlDB := stdlib.OpenDBFromPool(pool)
+	if err := migrations.Up(ctx, sqlDB); err != nil {
+		_ = sqlDB.Close()
+		return err
+	}
+	_ = sqlDB.Close()
+
+	queries := sqlc.New(pool)
+	auditLogger := audit.NewLogger(queries, logger)
+
+	attStore, err := storage.NewStore(cfg.AttachmentsDir, logger)
+	if err != nil {
+		return err
+	}
+
+	oidcProvider, err := auth.NewOIDCProvider(
+		ctx,
+		cfg.OIDCIssuerURL,
+		cfg.OIDCClientID,
+		cfg.OIDCClientSecret,
+		cfg.OIDCRedirectURL,
+	)
+	if err != nil {
+		return err
+	}
+
+	sessions := auth.NewSessionManager(cfg.CookieSecure)
+	sessions.Store = pgxstore.New(pool)
+
+	authSvc := auth.NewService(queries, auditLogger, sessions, oidcProvider, cfg.BootstrapAdminMail)
+	if _, _, err := authSvc.SeedBootstrapAdminAndSettings(ctx, cfg.BootstrapAdminMail, cfg.BootstrapAdminName, cfg.DisplayTimezone); err != nil {
+		return err
+	}
+
+	assignEngine := assignment.NewEngine(0.5, assignment.NewDefaultAssigneeResolver(queries))
+	matcher := threading.NewMatcher(queries, assignEngine, auditLogger)
+
+	imapJobWakeCh := make(chan struct{}, 16)
+	wfSvc := workflow.NewService(workflow.QueriesAdapter{Queries: queries}, auditLogger, imapJobWakeCh)
+
+	imapDialer := func(_ context.Context) (mail.IMAPClient, error) {
+		return mail.DialIMAP(cfg.IMAPHost, cfg.IMAPPort, cfg.IMAPUsername, cfg.IMAPPassword, cfg.IMAPImplicitTLS)
+	}
+	syncWorker := mail.NewIMAPSyncWorker(queries, matcher, attStore, imapDialer, cfg.IMAPPollInterval, logger)
+	actionWorker := mail.NewIMAPActionWorker(queries, attStore, imapDialer, imapJobWakeCh, logger)
+
+	smtpTransport := mail.NewGoMailTransport(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPTLSMode)
+	outboxWorker := mail.NewOutboxWorker(
+		queries,
+		attStore,
+		smtpTransport,
+		auditLogger,
+		cfg.SMTPFromAddress,
+		cfg.SMTPFromName,
+		cfg.MailDomain,
+		imapJobWakeCh,
+		logger,
+	)
+
+	go syncWorker.Run(ctx)
+	go actionWorker.Run(ctx)
+	go outboxWorker.Run(ctx)
+
+	webSrv := web.NewServer(queries, authSvc, wfSvc, outboxWorker, attStore, auditLogger)
+	router := web.NewRouter(webSrv, authSvc, sessions)
+
+	httpServer := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+	}()
+
+	logger.Info("minicrm_listening", slog.String("addr", cfg.HTTPAddr))
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
