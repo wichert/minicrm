@@ -1,4 +1,6 @@
 /minicrm
+/dev-oidc
+/bin/
 /data/
 *.test
 *.out

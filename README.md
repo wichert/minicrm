@@ -2,7 +2,9 @@
 
 **MiniCRM** is a lightweight, self-contained email CRM built in Go. It connects to a shared IMAP/SMTP mailbox, links incoming and outgoing emails into conversation threads, assigns every thread to a team member, and tracks threads through a strict workflow (`new -> in-progress -> completed` or `new -> spam`).
 
-For detailed technical and security design documentation, see [`docs/architecture.md`](./docs/architecture.md).
+For detailed technical and security design documentation, see:
+- [`docs/architecture.md`](./docs/architecture.md) — System architecture, data model, IMAP/SMTP workers, threading, and HTML/HTTP security controls.
+- [`docs/authentication.md`](./docs/authentication.md) — Production OAuth2/OIDC configuration, user provisioning flow, and local development with the dummy OIDC server (`cmd/dev-oidc`).
 
 ---
 
@@ -80,6 +82,36 @@ go build -o minicrm ./cmd/minicrm
 ./minicrm
 ```
 
+### Running Locally with the Dummy OIDC Server (`cmd/dev-oidc`)
+
+For local development and testing without an external OIDC identity server, MiniCRM ships with a standalone dummy OIDC + PKCE server (`cmd/dev-oidc`) that automatically signs in with fixed credentials (`admin@example.com` by default):
+
+```bash
+# 1. Start the dummy OIDC server on 127.0.0.1:9000
+go run ./cmd/dev-oidc \
+  -addr 127.0.0.1:9000 \
+  -email admin@example.com \
+  -name "Dev Admin"
+
+# 2. Point MiniCRM at the dummy OIDC server
+export MINICRM_COOKIE_SECURE=false
+export MINICRM_BOOTSTRAP_ADMIN_EMAIL=admin@example.com
+export MINICRM_OIDC_ISSUER_URL=http://127.0.0.1:9000
+export MINICRM_OIDC_CLIENT_ID=minicrm-dev
+export MINICRM_OIDC_CLIENT_SECRET=minicrm-dev-secret
+export MINICRM_OIDC_REDIRECT_URL=http://localhost:8080/auth/callback
+go run ./cmd/minicrm
+```
+
+`cmd/dev-oidc` flags / environment variables:
+- `-addr` / `DEV_OIDC_ADDR` (default `127.0.0.1:9000`)
+- `-issuer` / `DEV_OIDC_ISSUER_URL` (default `http://<addr>`)
+- `-client-id` / `DEV_OIDC_CLIENT_ID` (optional expected `client_id`)
+- `-client-secret` / `DEV_OIDC_CLIENT_SECRET` (optional expected `client_secret`)
+- `-sub` / `DEV_OIDC_SUB` (default `dev-admin-sub`)
+- `-email` / `DEV_OIDC_EMAIL` (default `admin@example.com`)
+- `-name` / `DEV_OIDC_NAME` (default `Dev Admin`)
+
 ---
 
 ## Basic Usage
@@ -102,8 +134,11 @@ go build -o minicrm ./cmd/minicrm
 ## Development & Testing
 
 ```bash
-# Run unit and integration tests with race detector
+# Run unit, integration, and self-contained E2E tests with race detector
 go test -v -race ./...
+
+# Run E2E tests against a live running MiniCRM + dev-oidc stack
+MINICRM_E2E_BASE_URL=http://127.0.0.1:8080 go test -v -race ./e2e/...
 
 # Run golangci-lint
 golangci-lint run ./...

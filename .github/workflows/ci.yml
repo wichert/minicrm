@@ -57,3 +57,86 @@ jobs:
 
       - name: Run unit & integration tests
         run: go test -v -race ./...
+
+  e2e:
+    name: End-to-End Tests (MiniCRM + dev-oidc)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: minicrm
+          POSTGRES_PASSWORD: minicrm_test_password
+          POSTGRES_DB: minicrm_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MINICRM_HTTP_ADDR: "127.0.0.1:8080"
+      MINICRM_DATABASE_URL: "postgres://minicrm:minicrm_test_password@127.0.0.1:5432/minicrm_e2e?sslmode=disable"
+      MINICRM_BOOTSTRAP_ADMIN_EMAIL: "admin@example.com"
+      MINICRM_BOOTSTRAP_ADMIN_NAME: "Dev Admin"
+      MINICRM_COOKIE_SECURE: "false"
+      MINICRM_IMAP_HOST: "127.0.0.1"
+      MINICRM_IMAP_PORT: "1993"
+      MINICRM_IMAP_USERNAME: "support@example.com"
+      MINICRM_IMAP_PASSWORD: "secret"
+      MINICRM_SMTP_HOST: "127.0.0.1"
+      MINICRM_SMTP_PORT: "1587"
+      MINICRM_SMTP_USERNAME: "support@example.com"
+      MINICRM_SMTP_PASSWORD: "secret"
+      MINICRM_SMTP_FROM_ADDRESS: "support@example.com"
+      MINICRM_OIDC_ISSUER_URL: "http://127.0.0.1:9000"
+      MINICRM_OIDC_CLIENT_ID: "minicrm-e2e"
+      MINICRM_OIDC_CLIENT_SECRET: "minicrm-e2e-secret"
+      MINICRM_OIDC_REDIRECT_URL: "http://127.0.0.1:8080/auth/callback"
+      MINICRM_E2E_BASE_URL: "http://127.0.0.1:8080"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: Build dev-oidc and minicrm binaries
+        run: |
+          go build -o bin/dev-oidc ./cmd/dev-oidc
+          go build -o bin/minicrm ./cmd/minicrm
+
+      - name: Start dev-oidc and minicrm services & run E2E tests
+        run: |
+          ./bin/dev-oidc \
+            -addr 127.0.0.1:9000 \
+            -issuer http://127.0.0.1:9000 \
+            -client-id minicrm-e2e \
+            -client-secret minicrm-e2e-secret \
+            -email admin@example.com \
+            -name "Dev Admin" &
+          DEV_OIDC_PID=$!
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9000/.well-known/openid-configuration >/dev/null; then
+              break
+            fi
+            sleep 0.2
+          done
+
+          ./bin/minicrm &
+          MINICRM_PID=$!
+
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/static/app.css; then
+              break
+            fi
+            sleep 0.2
+          done
+
+          go test -v -race ./e2e/...
+
+          kill $MINICRM_PID $DEV_OIDC_PID || true

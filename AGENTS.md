@@ -6,6 +6,7 @@ Read these documents before making architectural or functional changes:
 
 - **[`README.md`](./README.md)** — Overview, environment variable reference, build/run instructions, and basic usage.
 - **[`docs/architecture.md`](./docs/architecture.md)** — Detailed system architecture, technology stack, PostgreSQL schema, IMAP/SMTP worker mechanics, reply threading & reopen/merge flow, pluggable assignment engine, and HTML/HTTP security controls.
+- **[`docs/authentication.md`](./docs/authentication.md)** — Production OAuth2/OIDC setup, PKCE authentication flow, pre-created user resolution, dummy OIDC server (`cmd/dev-oidc` / `internal/auth/devidm`), and E2E testing.
 
 ---
 

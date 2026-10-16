@@ -150,7 +150,9 @@ All transitions outside `new -> in_progress`, `new -> spam`, `in_progress -> com
 1. `OutboxWorker.ComposeAndQueueReply` creates an `outbound` `emails` record with a unique `<uuid@mailDomain>` `Message-ID`, sets `In-Reply-To` and `References` from the latest email in the thread, prefixes `Re:` on the subject if needed, stores uploaded attachments on disk, queues an `outbox_emails` row, and auto-transitions a `new` thread to `in_progress`.
 2. `OutboxWorker.ProcessPending` serializes the RFC 5322 message via `wneessen/go-mail`, delivers it through the SMTP server (`username + password` auth), marks the outbox item `sent`, and enqueues an `append_to_sent` job in `imap_jobs`.
 
-### 4.5 OAuth2 / OIDC Authentication (`internal/auth/`)
+### 4.5 OAuth2 / OIDC Authentication & Local Dummy IDM (`internal/auth/`, `cmd/dev-oidc`)
+
+See **[`docs/authentication.md`](./authentication.md)** for the complete OAuth2/OIDC setup guide, sequence diagram, and `cmd/dev-oidc` reference.
 
 - Uses OIDC discovery (`.well-known/openid-configuration`) and OAuth2 Authorization Code flow with PKCE (`S256`).
 - On callback (`/auth/callback`), verifies the ID Token signature and `nonce`, then resolves the user:
@@ -158,6 +160,11 @@ All transitions outside `new -> in_progress`, `new -> spam`, `in_progress -> com
   2. If not found, matches by `email` (binding `oidc_sub` to users **pre-created by an admin** via `/settings/users`).
   3. Otherwise auto-provisions a new `agent` user (or `admin` if matching `MINICRM_BOOTSTRAP_ADMIN_EMAIL`).
 - All user creations, pre-creations, updates, logins, failed logins, and logouts are recorded in `audit_logs`.
+- **Local Dummy OIDC Identity Server (`internal/auth/devidm`, `cmd/dev-oidc`)**:
+  - For local development and CI end-to-end testing without an external identity server, `internal/auth/devidm` implements a standards-compliant OIDC provider (`/.well-known/openid-configuration`, `/jwks`, `/authorize`, `/token`) using an ephemeral 2048-bit RSA keypair and `github.com/go-jose/v4`.
+  - `/authorize` validates the PKCE `S256` challenge and immediately redirects back to `redirect_uri` with a single-use authorization code for the configured fixed identity (`sub`, `email`, `name`).
+  - `/token` verifies the PKCE `code_verifier` and returns an RS256-signed `id_token`.
+  - In CI (`.github/workflows/ci.yml`, `e2e` job), `cmd/dev-oidc` and `cmd/minicrm` are started as background services against PostgreSQL 16, and `e2e/auth_e2e_test.go` verifies the complete HTTP redirect chain, session cookie authentication, and `user_login` audit trail.
 
 ### 4.6 Pluggable Assignment Engine (`internal/assignment/`)
 
@@ -199,7 +206,11 @@ To safely display untrusted HTML emails, MiniCRM applies four defense-in-depth l
 ## 6. Package Structure
 
 ```text
-cmd/minicrm/main.go             # Binary entrypoint (DB pool, migrations, workers, HTTP server)
+cmd/
+  minicrm/main.go               # Main CRM binary entrypoint (DB pool, migrations, workers, HTTP server)
+  dev-oidc/main.go              # Standalone dummy OIDC identity server for local dev & CI E2E
+e2e/
+  auth_e2e_test.go              # End-to-end authentication tests against MiniCRM + dev-oidc
 internal/
   config/                       # Environment variable configuration & validation
   db/
@@ -208,6 +219,7 @@ internal/
     sqlc/                       # Typed database models, queries, and pgx StructuredQueryTracer
   audit/                        # Audit trail service (audit_logs, thread_events, slog data_access/data_change)
   auth/                         # OIDC provider (coreos/go-oidc + oauth2 PKCE), SCS sessions, user pre-creation
+    devidm/                     # Reusable dummy OIDC + PKCE identity provider (RS256 JWT + JWKS)
   assignment/                   # Pluggable assignee resolution engine & DefaultAssigneeResolver
   threading/                    # Subject/Message-ID normalizer and reply-to-thread matcher
   workflow/                     # Thread state machine, Archive/Junk move queueing, Reopen & Merge
