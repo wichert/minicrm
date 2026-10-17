@@ -2,6 +2,8 @@ package mail_test
 
 import (
 	"context"
+	"io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -78,29 +80,43 @@ func (s *fakeIMAPServer) AppendMessage(_ context.Context, targetMailbox string, 
 func (s *fakeIMAPServer) Close() error { return nil }
 
 type memCRMStore struct {
-	defaultUser  sqlc.User
-	syncStates   map[string]sqlc.IMAPSyncState
-	threads      map[uuid.UUID]sqlc.Thread
-	emails       map[uuid.UUID]sqlc.Email
-	attachments  []sqlc.Attachment
-	jobs         []sqlc.IMAPJob
-	threadEvents []sqlc.ThreadEvent
-	auditLogs    []sqlc.AuditLog
+	defaultUser     sqlc.User
+	syncStates      map[string]sqlc.IMAPSyncState
+	accountSettings map[string]sqlc.AccountSettings
+	threads         map[uuid.UUID]sqlc.Thread
+	emails          map[uuid.UUID]sqlc.Email
+	attachments     []sqlc.Attachment
+	jobs            []sqlc.IMAPJob
+	threadEvents    []sqlc.ThreadEvent
+	auditLogs       []sqlc.AuditLog
 }
 
 func newMemCRMStore() *memCRMStore {
-	u := sqlc.User{ID: uuid.New(), Email: "agent@example.com", IsActive: true}
+	u := sqlc.User{ID: uuid.New(), Email: "agent@example.com", IsActive: true, AllowedAccounts: []string{"support", "sales"}}
 	return &memCRMStore{
-		defaultUser: u,
-		syncStates:  make(map[string]sqlc.IMAPSyncState),
-		threads:     make(map[uuid.UUID]sqlc.Thread),
-		emails:      make(map[uuid.UUID]sqlc.Email),
+		defaultUser:     u,
+		syncStates:      make(map[string]sqlc.IMAPSyncState),
+		accountSettings: make(map[string]sqlc.AccountSettings),
+		threads:         make(map[uuid.UUID]sqlc.Thread),
+		emails:          make(map[uuid.UUID]sqlc.Email),
 	}
+}
+
+func (m *memCRMStore) GetAccountSettings(_ context.Context, accountID string) (sqlc.AccountSettings, error) {
+	s, ok := m.accountSettings[accountID]
+	if !ok {
+		return sqlc.AccountSettings{}, pgx.ErrNoRows
+	}
+	return s, nil
+}
+
+func (m *memCRMStore) UpsertAccountSettings(_ context.Context, s sqlc.AccountSettings) (sqlc.AccountSettings, error) {
+	m.accountSettings[s.AccountID] = s
+	return s, nil
 }
 
 func (m *memCRMStore) GetSystemSettings(_ context.Context) (sqlc.SystemSettings, error) {
 	return sqlc.SystemSettings{
-		DefaultAssigneeID:      m.defaultUser.ID,
 		DisplayTimezone:        "UTC",
 		IMAPInboxMailbox:       "INBOX",
 		IMAPArchiveMailbox:     "Archive",
@@ -121,8 +137,8 @@ func (m *memCRMStore) ListUsers(_ context.Context) ([]sqlc.User, error) {
 	return []sqlc.User{m.defaultUser}, nil
 }
 
-func (m *memCRMStore) GetIMAPSyncState(_ context.Context, mailbox string) (sqlc.IMAPSyncState, error) {
-	st, ok := m.syncStates[mailbox]
+func (m *memCRMStore) GetIMAPSyncState(_ context.Context, accountID, mailbox string) (sqlc.IMAPSyncState, error) {
+	st, ok := m.syncStates[accountID+"/"+mailbox]
 	if !ok {
 		return sqlc.IMAPSyncState{}, pgx.ErrNoRows
 	}
@@ -130,23 +146,23 @@ func (m *memCRMStore) GetIMAPSyncState(_ context.Context, mailbox string) (sqlc.
 }
 
 func (m *memCRMStore) UpsertIMAPSyncState(_ context.Context, s sqlc.IMAPSyncState) error {
-	m.syncStates[s.Mailbox] = s
+	m.syncStates[s.AccountID+"/"+s.Mailbox] = s
 	return nil
 }
 
-func (m *memCRMStore) GetEmailByMessageID(_ context.Context, msgID string) (sqlc.Email, error) {
+func (m *memCRMStore) GetEmailByMessageID(_ context.Context, accountID, msgID string) (sqlc.Email, error) {
 	for _, em := range m.emails {
-		if em.MessageID == msgID {
+		if em.AccountID == accountID && em.MessageID == msgID {
 			return em, nil
 		}
 	}
 	return sqlc.Email{}, pgx.ErrNoRows
 }
 
-func (m *memCRMStore) FindEmailByMessageIDs(_ context.Context, msgIDs []string) (sqlc.Email, error) {
+func (m *memCRMStore) FindEmailByMessageIDs(_ context.Context, accountID string, msgIDs []string) (sqlc.Email, error) {
 	for _, id := range msgIDs {
 		for _, em := range m.emails {
-			if em.MessageID == id {
+			if em.AccountID == accountID && em.MessageID == id {
 				return em, nil
 			}
 		}
@@ -174,9 +190,10 @@ func (m *memCRMStore) GetThreadByID(_ context.Context, id uuid.UUID) (sqlc.Threa
 	return t, nil
 }
 
-func (m *memCRMStore) FindThreadBySubjectAndParticipant(_ context.Context, normSubject, customerEmail string, since time.Time) (sqlc.Thread, error) {
+func (m *memCRMStore) FindThreadBySubjectAndParticipant(_ context.Context, accountID, normSubject, customerEmail string, since time.Time) (sqlc.Thread, error) {
 	for _, t := range m.threads {
-		if strings.EqualFold(t.SubjectNormalized, normSubject) &&
+		if t.AccountID == accountID &&
+			strings.EqualFold(t.SubjectNormalized, normSubject) &&
 			strings.EqualFold(t.CustomerEmail, customerEmail) &&
 			!t.LastMessageAt.Before(since) &&
 			t.Status != sqlc.ThreadStatusSpam {
@@ -208,10 +225,29 @@ func (m *memCRMStore) UpdateThreadStatus(_ context.Context, id uuid.UUID, status
 
 func (m *memCRMStore) UpdateThreadAssignee(_ context.Context, id, assigneeID uuid.UUID, source string) error {
 	t := m.threads[id]
-	t.AssigneeID = assigneeID
+	assignee := assigneeID
+	t.AssigneeID = &assignee
 	t.AssignmentSource = source
 	m.threads[id] = t
 	return nil
+}
+
+func (m *memCRMStore) AssignUnassignedThreadsByAccount(_ context.Context, accountID string, assigneeID uuid.UUID, source string) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	for id, t := range m.threads {
+		if t.AccountID != accountID || t.AssigneeID != nil {
+			continue
+		}
+		if t.Status != sqlc.ThreadStatusNew && t.Status != sqlc.ThreadStatusInProgress {
+			continue
+		}
+		assignee := assigneeID
+		t.AssigneeID = &assignee
+		t.AssignmentSource = source
+		m.threads[id] = t
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func (m *memCRMStore) ListEmailsByThread(_ context.Context, threadID uuid.UUID) ([]sqlc.Email, error) {
@@ -319,9 +355,10 @@ func TestIMAPSyncArchiveDeleteSafetyAndReopen(t *testing.T) {
 	assigner := assignment.NewEngine(0.5, assignment.NewDefaultAssigneeResolver(store))
 	matcher := threading.NewMatcher(store, assigner, auditLogger)
 
-	dialer := func(_ context.Context) (mail.IMAPClient, error) { return imapSrv, nil }
-	syncWorker := mail.NewIMAPSyncWorker(store, matcher, attStore, dialer, time.Minute, nil)
-	actionWorker := mail.NewIMAPActionWorker(store, attStore, dialer, nil, nil)
+	syncDialer := func(_ context.Context) (mail.IMAPClient, error) { return imapSrv, nil }
+	accountDialer := func(_ context.Context, _ string) (mail.IMAPClient, error) { return imapSrv, nil }
+	syncWorker := mail.NewIMAPSyncWorker("support", store, matcher, attStore, syncDialer, time.Minute, nil)
+	actionWorker := mail.NewIMAPActionWorker(store, attStore, accountDialer, nil, nil)
 	wfService := workflow.NewService(wfStoreAdapter{store}, auditLogger, nil)
 
 	ctx := context.Background()
@@ -395,5 +432,88 @@ func TestIMAPSyncArchiveDeleteSafetyAndReopen(t *testing.T) {
 	emails, _ := store.ListEmailsByThread(ctx, threadID)
 	if len(emails) != 2 {
 		t.Fatalf("expected both original and follow-up emails preserved in DB, got %d", len(emails))
+	}
+}
+
+func TestIMAPSyncSameEmailTwoAccountsCreatesTwoThreadsAndOneBlob(t *testing.T) {
+	imapSrv := newFakeIMAPServer()
+	// A simple multipart message with an attachment delivered to both accounts.
+	const msgText = "From: Customer <cust@client.com>\r\n" +
+		"To: Support <support@company.com>\r\n" +
+		"Subject: Shared Attachment\r\n" +
+		"Message-ID: <shared-1@client.com>\r\n" +
+		"Date: Sun, 12 Apr 2026 10:00:00 +0000\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=BOUND\r\n\r\n" +
+		"--BOUND\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+		"See attached.\r\n" +
+		"--BOUND\r\n" +
+		"Content-Type: text/plain; name=notes.txt\r\n" +
+		"Content-Disposition: attachment; filename=notes.txt\r\n\r\n" +
+		"shared attachment payload\r\n" +
+		"--BOUND--\r\n"
+	imapSrv.mailboxes["INBOX"][20] = []byte(msgText)
+
+	store := newMemCRMStore()
+	baseDir := t.TempDir()
+	attStore, err := storage.NewStore(baseDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	auditLogger := audit.NewLogger(store, nil)
+	matcher := threading.NewMatcher(store, assignment.NewEngine(0.5, assignment.NewDefaultAssigneeResolver(store)), auditLogger)
+	dialer := func(_ context.Context) (mail.IMAPClient, error) { return imapSrv, nil }
+
+	supportWorker := mail.NewIMAPSyncWorker("support", store, matcher, attStore, dialer, time.Minute, nil)
+	salesWorker := mail.NewIMAPSyncWorker("sales", store, matcher, attStore, dialer, time.Minute, nil)
+
+	ctx := context.Background()
+	if n, err := supportWorker.SyncOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("support SyncOnce: n=%d err=%v", n, err)
+	}
+	if n, err := salesWorker.SyncOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("sales SyncOnce: n=%d err=%v", n, err)
+	}
+
+	// Two independent threads, one per account.
+	if len(store.threads) != 2 {
+		t.Fatalf("expected 2 threads (one per account), got %d", len(store.threads))
+	}
+	accounts := map[string]bool{}
+	for _, th := range store.threads {
+		accounts[th.AccountID] = true
+	}
+	if !accounts["support"] || !accounts["sales"] {
+		t.Fatalf("expected one thread per account, got %v", accounts)
+	}
+
+	// Each account's email has its own attachment row, but only one blob exists on disk.
+	if len(store.attachments) != 2 {
+		t.Fatalf("expected 2 attachment rows, got %d", len(store.attachments))
+	}
+	paths := map[string]bool{}
+	for _, a := range store.attachments {
+		paths[a.StorageRelPath] = true
+	}
+	if len(paths) != 1 {
+		t.Fatalf("expected a single content-addressed blob path, got %v", paths)
+	}
+
+	fileCount := 0
+	err = filepath.WalkDir(baseDir, func(_ string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			fileCount++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDir: %v", err)
+	}
+	if fileCount != 1 {
+		t.Fatalf("expected exactly 1 attachment blob on disk, found %d", fileCount)
 	}
 }

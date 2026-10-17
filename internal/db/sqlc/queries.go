@@ -33,42 +33,19 @@ func (q *Queries) WithTx(tx pgx.Tx) *Queries {
 	return &Queries{db: tx}
 }
 
-// GetUserByID fetches a user by UUID.
-func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
-	const query = `SELECT id, oidc_sub, email, display_name, role, is_active FROM users WHERE id = $1`
+const userColumns = `id, oidc_sub, email, display_name, role, is_active, allowed_accounts`
+
+func scanUser(row pgx.Row) (User, error) {
 	var u User
-	err := q.db.QueryRow(ctx, query, id).Scan(&u.ID, &u.OIDCSub, &u.Email, &u.DisplayName, &u.Role, &u.IsActive)
+	err := row.Scan(&u.ID, &u.OIDCSub, &u.Email, &u.DisplayName, &u.Role, &u.IsActive, &u.AllowedAccounts)
 	return u, err
 }
 
-// GetUserByOIDCSub fetches a user by OIDC subject identifier.
-func (q *Queries) GetUserByOIDCSub(ctx context.Context, sub string) (User, error) {
-	const query = `SELECT id, oidc_sub, email, display_name, role, is_active FROM users WHERE oidc_sub = $1`
-	var u User
-	err := q.db.QueryRow(ctx, query, sub).Scan(&u.ID, &u.OIDCSub, &u.Email, &u.DisplayName, &u.Role, &u.IsActive)
-	return u, err
-}
-
-// GetUserByEmail fetches a user by email (case-insensitive via CITEXT).
-func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
-	const query = `SELECT id, oidc_sub, email, display_name, role, is_active FROM users WHERE email = $1`
-	var u User
-	err := q.db.QueryRow(ctx, query, email).Scan(&u.ID, &u.OIDCSub, &u.Email, &u.DisplayName, &u.Role, &u.IsActive)
-	return u, err
-}
-
-// ListUsers returns all users ordered by display_name.
-func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
-	const query = `SELECT id, oidc_sub, email, display_name, role, is_active FROM users ORDER BY display_name ASC`
-	rows, err := q.db.Query(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+func scanUsers(rows pgx.Rows) ([]User, error) {
 	var users []User
 	for rows.Next() {
-		var u User
-		if err := rows.Scan(&u.ID, &u.OIDCSub, &u.Email, &u.DisplayName, &u.Role, &u.IsActive); err != nil {
+		u, err := scanUser(rows)
+		if err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -76,49 +53,78 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return users, rows.Err()
 }
 
+// GetUserByID fetches a user by UUID.
+func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
+	return scanUser(q.db.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE id = $1`, id))
+}
+
+// GetUserByOIDCSub fetches a user by OIDC subject identifier.
+func (q *Queries) GetUserByOIDCSub(ctx context.Context, sub string) (User, error) {
+	return scanUser(q.db.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE oidc_sub = $1`, sub))
+}
+
+// GetUserByEmail fetches a user by email (case-insensitive via CITEXT).
+func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
+	return scanUser(q.db.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE email = $1`, email))
+}
+
+// ListUsers returns all users ordered by display_name.
+func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := q.db.Query(ctx, `SELECT `+userColumns+` FROM users ORDER BY display_name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanUsers(rows)
+}
+
 // CreateUserParams holds parameters for creating a user.
 type CreateUserParams struct {
-	OIDCSub     *string
-	Email       string
-	DisplayName string
-	Role        string
-	IsActive    bool
+	OIDCSub         *string
+	Email           string
+	DisplayName     string
+	Role            string
+	IsActive        bool
+	AllowedAccounts []string
 }
 
 // CreateUser inserts a new user row.
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
+	allowed := arg.AllowedAccounts
+	if allowed == nil {
+		allowed = []string{}
+	}
 	const query = `
-		INSERT INTO users (oidc_sub, email, display_name, role, is_active)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, oidc_sub, email, display_name, role, is_active`
-	var u User
-	err := q.db.QueryRow(ctx, query, arg.OIDCSub, arg.Email, arg.DisplayName, arg.Role, arg.IsActive).
-		Scan(&u.ID, &u.OIDCSub, &u.Email, &u.DisplayName, &u.Role, &u.IsActive)
-	return u, err
+		INSERT INTO users (oidc_sub, email, display_name, role, is_active, allowed_accounts)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING ` + userColumns
+	return scanUser(q.db.QueryRow(ctx, query,
+		arg.OIDCSub, arg.Email, arg.DisplayName, arg.Role, arg.IsActive, allowed))
 }
 
-// UpdateUserOIDC binds an OIDC sub and updated display_name to an existing pre-created user.
-func (q *Queries) UpdateUserOIDC(ctx context.Context, id uuid.UUID, oidcSub, displayName string) (User, error) {
+// UpdateUserOIDC binds an OIDC sub, updated display_name, and resolved account access to an existing user.
+func (q *Queries) UpdateUserOIDC(ctx context.Context, id uuid.UUID, oidcSub, displayName string, allowedAccounts []string) (User, error) {
+	allowed := allowedAccounts
+	if allowed == nil {
+		allowed = []string{}
+	}
 	const query = `
 		UPDATE users
-		SET oidc_sub = $2, display_name = $3
+		SET oidc_sub = $2, display_name = $3, allowed_accounts = $4
 		WHERE id = $1
-		RETURNING id, oidc_sub, email, display_name, role, is_active`
-	var u User
-	err := q.db.QueryRow(ctx, query, id, oidcSub, displayName).
-		Scan(&u.ID, &u.OIDCSub, &u.Email, &u.DisplayName, &u.Role, &u.IsActive)
-	return u, err
+		RETURNING ` + userColumns
+	return scanUser(q.db.QueryRow(ctx, query, id, oidcSub, displayName, allowed))
 }
 
 // GetSystemSettings returns the singleton system_settings row.
 func (q *Queries) GetSystemSettings(ctx context.Context) (SystemSettings, error) {
 	const query = `
-		SELECT id, default_assignee_id, display_timezone, imap_inbox_mailbox,
+		SELECT id, display_timezone, imap_inbox_mailbox,
 		       imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox, subject_match_window_days
 		FROM system_settings WHERE id = 1`
 	var s SystemSettings
 	err := q.db.QueryRow(ctx, query).Scan(
-		&s.ID, &s.DefaultAssigneeID, &s.DisplayTimezone,
+		&s.ID, &s.DisplayTimezone,
 		&s.IMAPInboxMailbox, &s.IMAPArchiveMailbox, &s.IMAPJunkMailbox, &s.IMAPSentMailbox,
 		&s.SubjectMatchWindowDays,
 	)
@@ -129,29 +135,94 @@ func (q *Queries) GetSystemSettings(ctx context.Context) (SystemSettings, error)
 func (q *Queries) UpsertSystemSettings(ctx context.Context, s SystemSettings) (SystemSettings, error) {
 	const query = `
 		INSERT INTO system_settings (
-			id, default_assignee_id, display_timezone, imap_inbox_mailbox,
+			id, display_timezone, imap_inbox_mailbox,
 			imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox, subject_match_window_days
-		) VALUES (1, $1, $2, $3, $4, $5, $6, $7)
+		) VALUES (1, $1, $2, $3, $4, $5, $6)
 		ON CONFLICT (id) DO UPDATE SET
-			default_assignee_id = EXCLUDED.default_assignee_id,
 			display_timezone = EXCLUDED.display_timezone,
 			imap_inbox_mailbox = EXCLUDED.imap_inbox_mailbox,
 			imap_archive_mailbox = EXCLUDED.imap_archive_mailbox,
 			imap_junk_mailbox = EXCLUDED.imap_junk_mailbox,
 			imap_sent_mailbox = EXCLUDED.imap_sent_mailbox,
 			subject_match_window_days = EXCLUDED.subject_match_window_days
-		RETURNING id, default_assignee_id, display_timezone, imap_inbox_mailbox,
+		RETURNING id, display_timezone, imap_inbox_mailbox,
 		          imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox, subject_match_window_days`
 	var out SystemSettings
 	err := q.db.QueryRow(ctx, query,
-		s.DefaultAssigneeID, s.DisplayTimezone, s.IMAPInboxMailbox,
+		s.DisplayTimezone, s.IMAPInboxMailbox,
 		s.IMAPArchiveMailbox, s.IMAPJunkMailbox, s.IMAPSentMailbox, s.SubjectMatchWindowDays,
 	).Scan(
-		&out.ID, &out.DefaultAssigneeID, &out.DisplayTimezone,
+		&out.ID, &out.DisplayTimezone,
 		&out.IMAPInboxMailbox, &out.IMAPArchiveMailbox, &out.IMAPJunkMailbox, &out.IMAPSentMailbox,
 		&out.SubjectMatchWindowDays,
 	)
 	return out, err
+}
+
+// GetAccountSettings fetches the settings row for a mail account.
+// It returns pgx.ErrNoRows when the account has no settings row yet.
+func (q *Queries) GetAccountSettings(ctx context.Context, accountID string) (AccountSettings, error) {
+	const query = `SELECT account_id, default_assignee_id FROM account_settings WHERE account_id = $1`
+	var s AccountSettings
+	err := q.db.QueryRow(ctx, query, accountID).Scan(&s.AccountID, &s.DefaultAssigneeID)
+	return s, err
+}
+
+// ListAccountSettings returns all account settings rows.
+func (q *Queries) ListAccountSettings(ctx context.Context) ([]AccountSettings, error) {
+	rows, err := q.db.Query(ctx, `SELECT account_id, default_assignee_id FROM account_settings ORDER BY account_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AccountSettings
+	for rows.Next() {
+		var s AccountSettings
+		if err := rows.Scan(&s.AccountID, &s.DefaultAssigneeID); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// UpsertAccountSettings inserts or updates the settings row for a mail account.
+func (q *Queries) UpsertAccountSettings(ctx context.Context, s AccountSettings) (AccountSettings, error) {
+	const query = `
+		INSERT INTO account_settings (account_id, default_assignee_id)
+		VALUES ($1, $2)
+		ON CONFLICT (account_id) DO UPDATE SET default_assignee_id = EXCLUDED.default_assignee_id
+		RETURNING account_id, default_assignee_id`
+	var out AccountSettings
+	err := q.db.QueryRow(ctx, query, s.AccountID, s.DefaultAssigneeID).
+		Scan(&out.AccountID, &out.DefaultAssigneeID)
+	return out, err
+}
+
+// AssignUnassignedThreadsByAccount assigns all active unassigned threads of an account
+// to the given user and returns the affected thread IDs.
+func (q *Queries) AssignUnassignedThreadsByAccount(ctx context.Context, accountID string, assigneeID uuid.UUID, source string) ([]uuid.UUID, error) {
+	const query = `
+		UPDATE threads
+		   SET assignee_id = $2, assignment_source = $3
+		 WHERE account_id = $1
+		   AND assignee_id IS NULL
+		   AND status IN ('new', 'in_progress')
+		RETURNING id`
+	rows, err := q.db.Query(ctx, query, accountID, assigneeID, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // InsertAuditLog records an immutable audit event in audit_logs.
@@ -225,48 +296,54 @@ func (q *Queries) ListThreadEvents(ctx context.Context, threadID uuid.UUID) ([]T
 	return events, rows.Err()
 }
 
+const threadColumns = `id, account_id, subject_normalized, subject_display, status, assignee_id,
+	       assignment_source, customer_email, COALESCE(customer_name, ''), reopens_thread_id, last_message_at`
+
+func scanThread(row pgx.Row) (Thread, error) {
+	var t Thread
+	err := row.Scan(
+		&t.ID, &t.AccountID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
+		&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
+	)
+	return t, err
+}
+
 // CreateThread inserts a new conversation thread.
 func (q *Queries) CreateThread(ctx context.Context, t Thread) (Thread, error) {
-	const query = `
-		INSERT INTO threads (
-			subject_normalized, subject_display, status, assignee_id,
-			assignment_source, customer_email, customer_name, reopens_thread_id, last_message_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		RETURNING id, subject_normalized, subject_display, status, assignee_id,
-		          assignment_source, customer_email, COALESCE(customer_name, ''), reopens_thread_id, last_message_at`
 	if t.LastMessageAt.IsZero() {
 		t.LastMessageAt = time.Now().UTC()
 	}
-	var out Thread
-	err := q.db.QueryRow(ctx, query,
-		t.SubjectNormalized, t.SubjectDisplay, t.Status, t.AssigneeID,
+	if t.AssignmentSource == "" {
+		if t.AssigneeID == nil {
+			t.AssignmentSource = "unassigned"
+		} else {
+			t.AssignmentSource = "default"
+		}
+	}
+	const query = `
+		INSERT INTO threads (
+			account_id, subject_normalized, subject_display, status, assignee_id,
+			assignment_source, customer_email, customer_name, reopens_thread_id, last_message_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING ` + threadColumns
+	return scanThread(q.db.QueryRow(ctx, query,
+		t.AccountID, t.SubjectNormalized, t.SubjectDisplay, t.Status, t.AssigneeID,
 		t.AssignmentSource, t.CustomerEmail, t.CustomerName, t.ReopensThreadID, t.LastMessageAt,
-	).Scan(
-		&out.ID, &out.SubjectNormalized, &out.SubjectDisplay, &out.Status, &out.AssigneeID,
-		&out.AssignmentSource, &out.CustomerEmail, &out.CustomerName, &out.ReopensThreadID, &out.LastMessageAt,
-	)
-	return out, err
+	))
 }
 
 // GetThreadByID fetches a thread by UUID.
 func (q *Queries) GetThreadByID(ctx context.Context, id uuid.UUID) (Thread, error) {
-	const query = `
-		SELECT id, subject_normalized, subject_display, status, assignee_id,
-		       assignment_source, customer_email, COALESCE(customer_name, ''), reopens_thread_id, last_message_at
-		FROM threads WHERE id = $1`
-	var out Thread
-	err := q.db.QueryRow(ctx, query, id).Scan(
-		&out.ID, &out.SubjectNormalized, &out.SubjectDisplay, &out.Status, &out.AssigneeID,
-		&out.AssignmentSource, &out.CustomerEmail, &out.CustomerName, &out.ReopensThreadID, &out.LastMessageAt,
-	)
-	return out, err
+	return scanThread(q.db.QueryRow(ctx, `SELECT `+threadColumns+` FROM threads WHERE id = $1`, id))
 }
 
 // ListThreadsFilter specifies optional filters for listing threads.
 type ListThreadsFilter struct {
-	Status     *ThreadStatus
-	AssigneeID *uuid.UUID
-	Limit      int
+	Status          *ThreadStatus
+	AssigneeID      *uuid.UUID
+	AccountID       *string
+	AllowedAccounts []string
+	Limit           int
 }
 
 // ListThreads returns threads matching the given filter ordered by last_message_at DESC.
@@ -275,25 +352,23 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		f.Limit = 100
 	}
 	const query = `
-		SELECT id, subject_normalized, subject_display, status, assignee_id,
-		       assignment_source, customer_email, COALESCE(customer_name, ''), reopens_thread_id, last_message_at
+		SELECT ` + threadColumns + `
 		FROM threads
 		WHERE ($1::thread_status IS NULL OR status = $1)
 		  AND ($2::uuid IS NULL OR assignee_id = $2)
+		  AND ($3::text IS NULL OR account_id = $3)
+		  AND ($4::text[] IS NULL OR account_id = ANY($4))
 		ORDER BY last_message_at DESC
-		LIMIT $3`
-	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Limit)
+		LIMIT $5`
+	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.AccountID, f.AllowedAccounts, f.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var list []Thread
 	for rows.Next() {
-		var t Thread
-		if err := rows.Scan(
-			&t.ID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
-			&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
-		); err != nil {
+		t, err := scanThread(rows)
+		if err != nil {
 			return nil, err
 		}
 		list = append(list, t)
@@ -351,18 +426,18 @@ func (q *Queries) CreateEmail(ctx context.Context, e Email) (Email, error) {
 	}
 	const query = `
 		INSERT INTO emails (
-			thread_id, parent_email_id, direction, message_id, in_reply_to, references_ids,
+			thread_id, account_id, parent_email_id, direction, message_id, in_reply_to, references_ids,
 			imap_mailbox, imap_uidvalidity, imap_uid, from_address, from_name,
 			to_addresses, cc_addresses, subject, subject_normalized,
 			body_text, body_html_sanitized, raw_headers, sent_at, received_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10, $11,
-			$12, $13, $14, $15,
-			$16, $17, $18, $19, $20
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, $11, $12,
+			$13, $14, $15, $16,
+			$17, $18, $19, $20, $21
 		) RETURNING id`
 	err = q.db.QueryRow(ctx, query,
-		e.ThreadID, e.ParentEmailID, e.Direction, e.MessageID, e.InReplyTo, e.ReferencesIDs,
+		e.ThreadID, e.AccountID, e.ParentEmailID, e.Direction, e.MessageID, e.InReplyTo, e.ReferencesIDs,
 		e.IMAPMailbox, e.IMAPUIDValidity, e.IMAPUID, e.FromAddress, e.FromName,
 		toJSON, ccJSON, e.Subject, e.SubjectNormalized,
 		e.BodyText, e.BodyHTMLSanitized, hdrJSON, e.SentAt, e.ReceivedAt,
@@ -370,70 +445,55 @@ func (q *Queries) CreateEmail(ctx context.Context, e Email) (Email, error) {
 	return e, err
 }
 
+const emailColumns = `id, thread_id, account_id, parent_email_id, direction, message_id, in_reply_to, references_ids,
+	       imap_mailbox, imap_uidvalidity, imap_uid, from_address, COALESCE(from_name, ''),
+	       to_addresses, cc_addresses, subject, subject_normalized,
+	       COALESCE(body_text, ''), COALESCE(body_html_sanitized, ''), raw_headers, sent_at, received_at`
+
 // GetEmailByID fetches an email by UUID.
 func (q *Queries) GetEmailByID(ctx context.Context, id uuid.UUID) (Email, error) {
-	const query = `
-		SELECT id, thread_id, parent_email_id, direction, message_id, in_reply_to, references_ids,
-		       imap_mailbox, imap_uidvalidity, imap_uid, from_address, COALESCE(from_name, ''),
-		       to_addresses, cc_addresses, subject, subject_normalized,
-		       COALESCE(body_text, ''), COALESCE(body_html_sanitized, ''), raw_headers, sent_at, received_at
-		FROM emails WHERE id = $1`
-	return scanEmail(q.db.QueryRow(ctx, query, id))
+	return scanEmail(q.db.QueryRow(ctx, `SELECT `+emailColumns+` FROM emails WHERE id = $1`, id))
 }
 
-// GetEmailByMessageID fetches an email by its normalized RFC 5322 Message-ID.
-func (q *Queries) GetEmailByMessageID(ctx context.Context, msgID string) (Email, error) {
-	const query = `
-		SELECT id, thread_id, parent_email_id, direction, message_id, in_reply_to, references_ids,
-		       imap_mailbox, imap_uidvalidity, imap_uid, from_address, COALESCE(from_name, ''),
-		       to_addresses, cc_addresses, subject, subject_normalized,
-		       COALESCE(body_text, ''), COALESCE(body_html_sanitized, ''), raw_headers, sent_at, received_at
-		FROM emails WHERE message_id = $1`
-	return scanEmail(q.db.QueryRow(ctx, query, msgID))
+// GetEmailByMessageID fetches an email by its normalized RFC 5322 Message-ID within an account.
+func (q *Queries) GetEmailByMessageID(ctx context.Context, accountID, msgID string) (Email, error) {
+	const query = `SELECT ` + emailColumns + ` FROM emails WHERE account_id = $1 AND message_id = $2`
+	return scanEmail(q.db.QueryRow(ctx, query, accountID, msgID))
 }
 
-// FindEmailByMessageIDs returns the most recent email matching any of the given Message-IDs.
-func (q *Queries) FindEmailByMessageIDs(ctx context.Context, msgIDs []string) (Email, error) {
+// FindEmailByMessageIDs returns the most recent email of the given account matching any of the Message-IDs.
+func (q *Queries) FindEmailByMessageIDs(ctx context.Context, accountID string, msgIDs []string) (Email, error) {
 	const query = `
-		SELECT id, thread_id, parent_email_id, direction, message_id, in_reply_to, references_ids,
-		       imap_mailbox, imap_uidvalidity, imap_uid, from_address, COALESCE(from_name, ''),
-		       to_addresses, cc_addresses, subject, subject_normalized,
-		       COALESCE(body_text, ''), COALESCE(body_html_sanitized, ''), raw_headers, sent_at, received_at
+		SELECT ` + emailColumns + `
 		FROM emails
-		WHERE message_id = ANY($1)
+		WHERE account_id = $1
+		  AND message_id = ANY($2)
 		ORDER BY sent_at DESC
 		LIMIT 1`
-	return scanEmail(q.db.QueryRow(ctx, query, msgIDs))
+	return scanEmail(q.db.QueryRow(ctx, query, accountID, msgIDs))
 }
 
-// FindThreadBySubjectAndParticipant finds the most recent non-spam thread matching normalized subject and customer email within a time window.
-func (q *Queries) FindThreadBySubjectAndParticipant(ctx context.Context, normSubject, customerEmail string, since time.Time) (Thread, error) {
+// FindThreadBySubjectAndParticipant finds the most recent non-spam thread of an account
+// matching normalized subject and customer email within a time window.
+func (q *Queries) FindThreadBySubjectAndParticipant(ctx context.Context, accountID, normSubject, customerEmail string, since time.Time) (Thread, error) {
 	const query = `
-		SELECT id, subject_normalized, subject_display, status, assignee_id,
-		       assignment_source, customer_email, COALESCE(customer_name, ''), reopens_thread_id, last_message_at
+		SELECT ` + threadColumns + `
 		FROM threads
-		WHERE lower(subject_normalized) = lower($1)
+		WHERE account_id = $1
+		  AND lower(subject_normalized) = lower($2)
 		  AND subject_normalized <> ''
-		  AND customer_email = $2
-		  AND last_message_at >= $3
+		  AND customer_email = $3
+		  AND last_message_at >= $4
 		  AND status <> 'spam'
 		ORDER BY last_message_at DESC
 		LIMIT 1`
-	var out Thread
-	err := q.db.QueryRow(ctx, query, normSubject, customerEmail, since).Scan(
-		&out.ID, &out.SubjectNormalized, &out.SubjectDisplay, &out.Status, &out.AssigneeID,
-		&out.AssignmentSource, &out.CustomerEmail, &out.CustomerName, &out.ReopensThreadID, &out.LastMessageAt,
-	)
-	return out, err
+	return scanThread(q.db.QueryRow(ctx, query, accountID, normSubject, customerEmail, since))
 }
 
 // ListEmailsByThread returns all emails in a thread ordered by sent_at ASC.
 func (q *Queries) ListEmailsByThread(ctx context.Context, threadID uuid.UUID) ([]Email, error) {
 	const query = `
-		SELECT id, thread_id, parent_email_id, direction, message_id, in_reply_to, references_ids,
-		       imap_mailbox, imap_uidvalidity, imap_uid, from_address, COALESCE(from_name, ''),
-		       to_addresses, cc_addresses, subject, subject_normalized,
-		       COALESCE(body_text, ''), COALESCE(body_html_sanitized, ''), raw_headers, sent_at, received_at
+		SELECT ` + emailColumns + `
 		FROM emails
 		WHERE thread_id = $1
 		ORDER BY sent_at ASC, received_at ASC`
@@ -507,23 +567,23 @@ func (q *Queries) ListAttachmentsByEmail(ctx context.Context, emailID uuid.UUID)
 	return list, rows.Err()
 }
 
-// GetIMAPSyncState fetches the UID watermark for a mailbox.
-func (q *Queries) GetIMAPSyncState(ctx context.Context, mailbox string) (IMAPSyncState, error) {
-	const query = `SELECT mailbox, uid_validity, last_synced_uid FROM imap_sync_state WHERE mailbox = $1`
+// GetIMAPSyncState fetches the UID watermark for an account mailbox.
+func (q *Queries) GetIMAPSyncState(ctx context.Context, accountID, mailbox string) (IMAPSyncState, error) {
+	const query = `SELECT account_id, mailbox, uid_validity, last_synced_uid FROM imap_sync_state WHERE account_id = $1 AND mailbox = $2`
 	var s IMAPSyncState
-	err := q.db.QueryRow(ctx, query, mailbox).Scan(&s.Mailbox, &s.UIDValidity, &s.LastSyncedUID)
+	err := q.db.QueryRow(ctx, query, accountID, mailbox).Scan(&s.AccountID, &s.Mailbox, &s.UIDValidity, &s.LastSyncedUID)
 	return s, err
 }
 
-// UpsertIMAPSyncState updates the UID watermark for a mailbox.
+// UpsertIMAPSyncState updates the UID watermark for an account mailbox.
 func (q *Queries) UpsertIMAPSyncState(ctx context.Context, s IMAPSyncState) error {
 	const query = `
-		INSERT INTO imap_sync_state (mailbox, uid_validity, last_synced_uid)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (mailbox) DO UPDATE SET
+		INSERT INTO imap_sync_state (account_id, mailbox, uid_validity, last_synced_uid)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (account_id, mailbox) DO UPDATE SET
 			uid_validity = EXCLUDED.uid_validity,
 			last_synced_uid = EXCLUDED.last_synced_uid`
-	_, err := q.db.Exec(ctx, query, s.Mailbox, s.UIDValidity, s.LastSyncedUID)
+	_, err := q.db.Exec(ctx, query, s.AccountID, s.Mailbox, s.UIDValidity, s.LastSyncedUID)
 	return err
 }
 
@@ -534,12 +594,12 @@ func (q *Queries) EnqueueIMAPJob(ctx context.Context, job IMAPJob) (IMAPJob, err
 	}
 	const query = `
 		INSERT INTO imap_jobs (
-			job_type, email_id, source_mailbox, target_mailbox,
+			account_id, job_type, email_id, source_mailbox, target_mailbox,
 			imap_uidvalidity, imap_uid, raw_rfc822_path, max_attempts, status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
 		RETURNING id, enqueued_at`
 	err := q.db.QueryRow(ctx, query,
-		job.JobType, job.EmailID, job.SourceMailbox, job.TargetMailbox,
+		job.AccountID, job.JobType, job.EmailID, job.SourceMailbox, job.TargetMailbox,
 		job.IMAPUIDValidity, job.IMAPUID, job.RawRFC822Path, job.MaxAttempts,
 	).Scan(&job.ID, &job.EnqueuedAt)
 	job.Status = "pending"
@@ -558,12 +618,12 @@ func (q *Queries) ClaimNextIMAPJob(ctx context.Context) (IMAPJob, error) {
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
-		RETURNING id, job_type, email_id, source_mailbox, target_mailbox,
+		RETURNING id, account_id, job_type, email_id, source_mailbox, target_mailbox,
 		          imap_uidvalidity, imap_uid, raw_rfc822_path, attempts, max_attempts,
 		          next_run_at, last_error, status, enqueued_at`
 	var j IMAPJob
 	err := q.db.QueryRow(ctx, query).Scan(
-		&j.ID, &j.JobType, &j.EmailID, &j.SourceMailbox, &j.TargetMailbox,
+		&j.ID, &j.AccountID, &j.JobType, &j.EmailID, &j.SourceMailbox, &j.TargetMailbox,
 		&j.IMAPUIDValidity, &j.IMAPUID, &j.RawRFC822Path, &j.Attempts, &j.MaxAttempts,
 		&j.NextRunAt, &j.LastError, &j.Status, &j.EnqueuedAt,
 	)
@@ -643,7 +703,7 @@ func scanEmail(row pgx.Row) (Email, error) {
 	var e Email
 	var toRaw, ccRaw, hdrRaw []byte
 	err := row.Scan(
-		&e.ID, &e.ThreadID, &e.ParentEmailID, &e.Direction, &e.MessageID, &e.InReplyTo, &e.ReferencesIDs,
+		&e.ID, &e.ThreadID, &e.AccountID, &e.ParentEmailID, &e.Direction, &e.MessageID, &e.InReplyTo, &e.ReferencesIDs,
 		&e.IMAPMailbox, &e.IMAPUIDValidity, &e.IMAPUID, &e.FromAddress, &e.FromName,
 		&toRaw, &ccRaw, &e.Subject, &e.SubjectNormalized,
 		&e.BodyText, &e.BodyHTMLSanitized, &hdrRaw, &e.SentAt, &e.ReceivedAt,

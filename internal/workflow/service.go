@@ -15,6 +15,9 @@ import (
 var (
 	ErrInvalidTransition = errors.New("invalid workflow state transition")
 	ErrCannotReopenMerge = errors.New("thread cannot be reopened and merged")
+	// ErrAssigneeNoAccountAccess is returned when a thread would be assigned to a user
+	// who has no access to the thread's mail account.
+	ErrAssigneeNoAccountAccess = errors.New("assignee has no access to the thread's mail account")
 )
 
 // Store defines the persistence operations required by the workflow Service.
@@ -29,6 +32,7 @@ type Store interface {
 	GetUserByID(ctx context.Context, id uuid.UUID) (sqlc.User, error)
 	ReparentThreadEmailsAndEvents(ctx context.Context, sourceThreadID, targetThreadID uuid.UUID) error
 	DeleteThread(ctx context.Context, id uuid.UUID) error
+	AssignUnassignedThreadsByAccount(ctx context.Context, accountID string, assigneeID uuid.UUID, source string) ([]uuid.UUID, error)
 }
 
 // QueriesAdapter wraps *sqlc.Queries to satisfy Store.
@@ -128,6 +132,7 @@ func (s *Service) enqueueFolderMoveJobs(ctx context.Context, threadID uuid.UUID,
 			continue
 		}
 		_, err := s.store.EnqueueIMAPJob(ctx, sqlc.IMAPJob{
+			AccountID:       em.AccountID,
 			JobType:         jobType,
 			EmailID:         em.ID,
 			SourceMailbox:   em.IMAPMailbox,
@@ -150,7 +155,10 @@ func (s *Service) enqueueFolderMoveJobs(ctx context.Context, threadID uuid.UUID,
 	return nil
 }
 
-// Reassign assigns a thread to a different active user and logs a reassigned event.
+// Reassign assigns a thread to a user and logs an assigned or reassigned event.
+//
+// The target user must be active and have access to the thread's mail account; otherwise
+// ErrAssigneeNoAccountAccess is returned.
 func (s *Service) Reassign(ctx context.Context, threadID, newAssigneeID uuid.UUID, actorID *uuid.UUID) error {
 	thread, err := s.store.GetThreadByID(ctx, threadID)
 	if err != nil {
@@ -163,16 +171,62 @@ func (s *Service) Reassign(ctx context.Context, threadID, newAssigneeID uuid.UUI
 	if !targetUser.IsActive {
 		return errors.New("cannot assign thread to inactive user")
 	}
+	if !targetUser.HasAccountAccess(thread.AccountID) {
+		return fmt.Errorf("%w: user %s has no access to account %q", ErrAssigneeNoAccountAccess, targetUser.Email, thread.AccountID)
+	}
 	if err := s.store.UpdateThreadAssignee(ctx, threadID, newAssigneeID, "manual"); err != nil {
 		return fmt.Errorf("update thread assignee: %w", err)
+	}
+
+	eventType := "reassigned"
+	oldValue := map[string]any{}
+	if thread.AssigneeID == nil {
+		eventType = "assigned"
+		oldValue["assignee_id"] = nil
+	} else {
+		oldValue["assignee_id"] = thread.AssigneeID.String()
 	}
 	return s.audit.LogThreadEvent(ctx, audit.ThreadEventParams{
 		ThreadID:    threadID,
 		ActorUserID: actorID,
-		EventType:   "reassigned",
-		OldValue:    map[string]string{"assignee_id": thread.AssigneeID.String()},
+		EventType:   eventType,
+		OldValue:    oldValue,
 		NewValue:    map[string]string{"assignee_id": newAssigneeID.String(), "source": "manual"},
 	})
+}
+
+// AssignUnassignedThreadsForAccount assigns all still-unassigned active threads of an
+// account to assigneeID, logging an assigned event for each affected thread.
+//
+// It is used when an account's default assignee is configured, so waiting threads are
+// picked up automatically.
+func (s *Service) AssignUnassignedThreadsForAccount(ctx context.Context, accountID string, assigneeID uuid.UUID, actorID *uuid.UUID) (int, error) {
+	assignee, err := s.store.GetUserByID(ctx, assigneeID)
+	if err != nil {
+		return 0, fmt.Errorf("load assignee user: %w", err)
+	}
+	if !assignee.IsActive {
+		return 0, errors.New("cannot assign threads to inactive user")
+	}
+	if !assignee.HasAccountAccess(accountID) {
+		return 0, fmt.Errorf("%w: user %s has no access to account %q", ErrAssigneeNoAccountAccess, assignee.Email, accountID)
+	}
+	threadIDs, err := s.store.AssignUnassignedThreadsByAccount(ctx, accountID, assigneeID, "default")
+	if err != nil {
+		return 0, fmt.Errorf("assign unassigned threads for account %q: %w", accountID, err)
+	}
+	for _, id := range threadIDs {
+		if err := s.audit.LogThreadEvent(ctx, audit.ThreadEventParams{
+			ThreadID:    id,
+			ActorUserID: actorID,
+			EventType:   "assigned",
+			OldValue:    map[string]any{"assignee_id": nil},
+			NewValue:    map[string]string{"assignee_id": assigneeID.String(), "source": "default"},
+		}); err != nil {
+			return 0, err
+		}
+	}
+	return len(threadIDs), nil
 }
 
 // ReopenAndMerge merges a follow-up 'new' thread into its referenced 'completed' thread
@@ -192,6 +246,9 @@ func (s *Service) ReopenAndMerge(ctx context.Context, followUpThreadID uuid.UUID
 	}
 	if target.Status != sqlc.ThreadStatusCompleted {
 		return uuid.Nil, fmt.Errorf("%w: target thread status is %s (want completed)", ErrCannotReopenMerge, target.Status)
+	}
+	if followUp.AccountID != target.AccountID {
+		return uuid.Nil, fmt.Errorf("%w: threads belong to different mail accounts", ErrCannotReopenMerge)
 	}
 
 	if err := s.store.ReparentThreadEmailsAndEvents(ctx, followUp.ID, target.ID); err != nil {

@@ -14,6 +14,7 @@ var ErrNoAssigneeAvailable = errors.New("no active assignee available")
 
 // EmailInput carries the email attributes passed to assignment resolvers (ready for V2 rules and ML).
 type EmailInput struct {
+	AccountID         string
 	FromAddress       string
 	FromName          string
 	ToAddresses       []string

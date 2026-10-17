@@ -21,33 +21,60 @@ const (
 
 // User represents an operator or assignee in MiniCRM.
 type User struct {
-	ID          uuid.UUID `json:"id"`
-	OIDCSub     *string   `json:"oidc_sub,omitempty"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"display_name"`
-	Role        string    `json:"role"`
-	IsActive    bool      `json:"is_active"`
+	ID              uuid.UUID `json:"id"`
+	OIDCSub         *string   `json:"oidc_sub,omitempty"`
+	Email           string    `json:"email"`
+	DisplayName     string    `json:"display_name"`
+	Role            string    `json:"role"`
+	IsActive        bool      `json:"is_active"`
+	AllowedAccounts []string  `json:"allowed_accounts,omitempty"`
+}
+
+// HasAccountAccess reports whether the user may access the given mail account.
+func (u User) HasAccountAccess(accountID string) bool {
+	if accountID == "" {
+		return false
+	}
+	for _, id := range u.AllowedAccounts {
+		if id == accountID {
+			return true
+		}
+	}
+	return false
+}
+
+// HasMultipleAccounts reports whether the user may access more than one mail account.
+func (u User) HasMultipleAccounts() bool {
+	return len(u.AllowedAccounts) > 1
 }
 
 // SystemSettings holds singleton CRM settings.
 type SystemSettings struct {
-	ID                     int       `json:"id"`
-	DefaultAssigneeID      uuid.UUID `json:"default_assignee_id"`
-	DisplayTimezone        string    `json:"display_timezone"`
-	IMAPInboxMailbox       string    `json:"imap_inbox_mailbox"`
-	IMAPArchiveMailbox     string    `json:"imap_archive_mailbox"`
-	IMAPJunkMailbox        string    `json:"imap_junk_mailbox"`
-	IMAPSentMailbox        string    `json:"imap_sent_mailbox"`
-	SubjectMatchWindowDays int       `json:"subject_match_window_days"`
+	ID                     int    `json:"id"`
+	DisplayTimezone        string `json:"display_timezone"`
+	IMAPInboxMailbox       string `json:"imap_inbox_mailbox"`
+	IMAPArchiveMailbox     string `json:"imap_archive_mailbox"`
+	IMAPJunkMailbox        string `json:"imap_junk_mailbox"`
+	IMAPSentMailbox        string `json:"imap_sent_mailbox"`
+	SubjectMatchWindowDays int    `json:"subject_match_window_days"`
+}
+
+// AccountSettings holds per-account settings, such as the default assignee.
+// A nil DefaultAssigneeID means the account currently has no default assignee and
+// incoming threads for it stay unassigned until one is configured.
+type AccountSettings struct {
+	AccountID         string     `json:"account_id"`
+	DefaultAssigneeID *uuid.UUID `json:"default_assignee_id,omitempty"`
 }
 
 // Thread represents a conversation thread of linked emails.
 type Thread struct {
 	ID                uuid.UUID    `json:"id"`
+	AccountID         string       `json:"account_id"`
 	SubjectNormalized string       `json:"subject_normalized"`
 	SubjectDisplay    string       `json:"subject_display"`
 	Status            ThreadStatus `json:"status"`
-	AssigneeID        uuid.UUID    `json:"assignee_id"`
+	AssigneeID        *uuid.UUID   `json:"assignee_id,omitempty"`
 	AssignmentSource  string       `json:"assignment_source"`
 	CustomerEmail     string       `json:"customer_email"`
 	CustomerName      string       `json:"customer_name"`
@@ -65,6 +92,7 @@ type Address struct {
 type Email struct {
 	ID                uuid.UUID         `json:"id"`
 	ThreadID          uuid.UUID         `json:"thread_id"`
+	AccountID         string            `json:"account_id"`
 	ParentEmailID     *uuid.UUID        `json:"parent_email_id,omitempty"`
 	Direction         string            `json:"direction"` // "inbound" or "outbound"
 	MessageID         string            `json:"message_id"`
@@ -101,6 +129,7 @@ type Attachment struct {
 
 // IMAPSyncState tracks the UID watermark for an IMAP mailbox.
 type IMAPSyncState struct {
+	AccountID     string `json:"account_id"`
 	Mailbox       string `json:"mailbox"`
 	UIDValidity   int64  `json:"uid_validity"`
 	LastSyncedUID int64  `json:"last_synced_uid"`
@@ -109,6 +138,7 @@ type IMAPSyncState struct {
 // IMAPJob represents an asynchronous IMAP folder action.
 type IMAPJob struct {
 	ID              uuid.UUID `json:"id"`
+	AccountID       string    `json:"account_id"`
 	JobType         string    `json:"job_type"` // "move_to_archive", "move_to_junk", "append_to_sent"
 	EmailID         uuid.UUID `json:"email_id"`
 	SourceMailbox   *string   `json:"source_mailbox,omitempty"`

@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -59,7 +60,7 @@ func run(logger *slog.Logger) error {
 	defer pool.Close()
 
 	sqlDB := stdlib.OpenDBFromPool(pool)
-	if err := migrations.Up(ctx, sqlDB); err != nil {
+	if err := migrations.Up(ctx, sqlDB, cfg.Accounts[0].ID); err != nil {
 		_ = sqlDB.Close()
 		return err
 	}
@@ -79,6 +80,8 @@ func run(logger *slog.Logger) error {
 		cfg.OIDCClientID,
 		cfg.OIDCClientSecret,
 		cfg.OIDCRedirectURL,
+		cfg.OIDCGroupsClaim,
+		cfg.OIDCScopes,
 	)
 	if err != nil {
 		return err
@@ -87,7 +90,17 @@ func run(logger *slog.Logger) error {
 	sessions := auth.NewSessionManager(cfg.CookieSecure)
 	sessions.Store = pgxstore.New(pool)
 
-	authSvc := auth.NewService(queries, auditLogger, sessions, oidcProvider, cfg.BootstrapAdminMail)
+	accountRules := make([]auth.AccountAccessRule, 0, len(cfg.Accounts))
+	webAccounts := make([]web.AccountConfig, 0, len(cfg.Accounts))
+	for _, acct := range cfg.Accounts {
+		accountRules = append(accountRules, auth.AccountAccessRule{
+			AccountID:   acct.ID,
+			AccountName: acct.Name,
+			OIDCGroup:   acct.OIDCGroup,
+		})
+		webAccounts = append(webAccounts, web.AccountConfig{ID: acct.ID, Name: acct.Name})
+	}
+	authSvc := auth.NewService(queries, auditLogger, sessions, oidcProvider, cfg.BootstrapAdminMail, accountRules...)
 	if _, _, err := authSvc.SeedBootstrapAdminAndSettings(ctx, cfg.BootstrapAdminMail, cfg.BootstrapAdminName, cfg.DisplayTimezone); err != nil {
 		return err
 	}
@@ -98,30 +111,52 @@ func run(logger *slog.Logger) error {
 	imapJobWakeCh := make(chan struct{}, 16)
 	wfSvc := workflow.NewService(workflow.QueriesAdapter{Queries: queries}, auditLogger, imapJobWakeCh)
 
-	imapDialer := func(_ context.Context) (mail.IMAPClient, error) {
-		return mail.DialIMAP(cfg.IMAPHost, cfg.IMAPPort, cfg.IMAPUsername, cfg.IMAPPassword, cfg.IMAPImplicitTLS)
+	// One IMAP sync worker per configured mail account.
+	accountDialers := make(map[string]func(context.Context) (mail.IMAPClient, error), len(cfg.Accounts))
+	accountSenders := make([]mail.AccountSenderConfig, 0, len(cfg.Accounts))
+	syncWorkers := make([]*mail.IMAPSyncWorker, 0, len(cfg.Accounts))
+	for _, acct := range cfg.Accounts {
+		acct := acct
+		dialer := func(_ context.Context) (mail.IMAPClient, error) {
+			return mail.DialIMAP(acct.IMAPHost, acct.IMAPPort, acct.IMAPUsername, acct.IMAPPassword, acct.IMAPImplicitTLS)
+		}
+		accountDialers[acct.ID] = dialer
+		syncWorkers = append(syncWorkers,
+			mail.NewIMAPSyncWorker(acct.ID, queries, matcher, attStore, dialer, acct.IMAPPollInterval, logger))
+		accountSenders = append(accountSenders, mail.AccountSenderConfig{
+			AccountID:   acct.ID,
+			FromAddress: acct.SMTPFromAddress,
+			FromName:    acct.SMTPFromName,
+			Transport:   mail.NewGoMailTransport(acct.SMTPHost, acct.SMTPPort, acct.SMTPUsername, acct.SMTPPassword, acct.SMTPTLSMode),
+		})
 	}
-	syncWorker := mail.NewIMAPSyncWorker(queries, matcher, attStore, imapDialer, cfg.IMAPPollInterval, logger)
-	actionWorker := mail.NewIMAPActionWorker(queries, attStore, imapDialer, imapJobWakeCh, logger)
 
-	smtpTransport := mail.NewGoMailTransport(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPTLSMode)
+	accountDialer := func(ctx context.Context, accountID string) (mail.IMAPClient, error) {
+		dialer, ok := accountDialers[accountID]
+		if !ok {
+			return nil, fmt.Errorf("no IMAP account configured for %q", accountID)
+		}
+		return dialer(ctx)
+	}
+	actionWorker := mail.NewIMAPActionWorker(queries, attStore, accountDialer, imapJobWakeCh, logger)
+
 	outboxWorker := mail.NewOutboxWorker(
 		queries,
 		attStore,
-		smtpTransport,
+		accountSenders,
 		auditLogger,
-		cfg.SMTPFromAddress,
-		cfg.SMTPFromName,
 		cfg.MailDomain,
 		imapJobWakeCh,
 		logger,
 	)
 
-	go syncWorker.Run(ctx)
+	for _, worker := range syncWorkers {
+		go worker.Run(ctx)
+	}
 	go actionWorker.Run(ctx)
 	go outboxWorker.Run(ctx)
 
-	webSrv := web.NewServer(queries, authSvc, wfSvc, outboxWorker, attStore, auditLogger)
+	webSrv := web.NewServer(queries, authSvc, wfSvc, outboxWorker, attStore, auditLogger, webAccounts)
 	router := web.NewRouter(webSrv, authSvc, sessions)
 
 	httpServer := &http.Server{

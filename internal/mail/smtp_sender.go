@@ -90,6 +90,7 @@ func (t *GoMailTransport) Send(ctx context.Context, msg *gomail.Msg) error {
 type OutboxStore interface {
 	GetThreadByID(ctx context.Context, id uuid.UUID) (sqlc.Thread, error)
 	UpdateThreadStatus(ctx context.Context, id uuid.UUID, status sqlc.ThreadStatus) error
+	UpdateThreadAssignee(ctx context.Context, id, assigneeID uuid.UUID, source string) error
 	TouchThreadLastMessageAt(ctx context.Context, id uuid.UUID, ts time.Time) error
 	ListEmailsByThread(ctx context.Context, threadID uuid.UUID) ([]sqlc.Email, error)
 	CreateEmail(ctx context.Context, e sqlc.Email) (sqlc.Email, error)
@@ -104,27 +105,33 @@ type OutboxStore interface {
 	EnqueueIMAPJob(ctx context.Context, job sqlc.IMAPJob) (sqlc.IMAPJob, error)
 }
 
+// AccountSenderConfig holds the outbound SMTP identity of a single mail account.
+type AccountSenderConfig struct {
+	AccountID   string
+	FromAddress string
+	FromName    string
+	Transport   SMTPTransport
+}
+
 // OutboxWorker composes outbound replies, sends them via SMTP, and queues IMAP Sent folder APPENDs.
 type OutboxWorker struct {
 	store         OutboxStore
 	attachments   *storage.Store
-	transport     SMTPTransport
+	senders       map[string]AccountSenderConfig
 	audit         *audit.Logger
-	fromAddress   string
-	fromName      string
 	mailDomain    string
 	outboxWakeCh  chan struct{}
 	imapJobWakeCh chan<- struct{}
 	logger        *slog.Logger
 }
 
-// NewOutboxWorker constructs an OutboxWorker.
+// NewOutboxWorker constructs an OutboxWorker with per-account SMTP sender configurations.
 func NewOutboxWorker(
 	store OutboxStore,
 	attachments *storage.Store,
-	transport SMTPTransport,
+	senders []AccountSenderConfig,
 	auditLogger *audit.Logger,
-	fromAddress, fromName, mailDomain string,
+	mailDomain string,
 	imapJobWakeCh chan<- struct{},
 	logger *slog.Logger,
 ) *OutboxWorker {
@@ -134,18 +141,29 @@ func NewOutboxWorker(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	senderMap := make(map[string]AccountSenderConfig, len(senders))
+	for _, cfg := range senders {
+		senderMap[cfg.AccountID] = cfg
+	}
 	return &OutboxWorker{
 		store:         store,
 		attachments:   attachments,
-		transport:     transport,
+		senders:       senderMap,
 		audit:         auditLogger,
-		fromAddress:   fromAddress,
-		fromName:      fromName,
 		mailDomain:    mailDomain,
 		outboxWakeCh:  make(chan struct{}, 8),
 		imapJobWakeCh: imapJobWakeCh,
 		logger:        logger,
 	}
+}
+
+// senderFor returns the SMTP sender configuration for a mail account.
+func (w *OutboxWorker) senderFor(accountID string) (AccountSenderConfig, error) {
+	cfg, ok := w.senders[accountID]
+	if !ok {
+		return AccountSenderConfig{}, fmt.Errorf("no SMTP sender configured for account %q", accountID)
+	}
+	return cfg, nil
 }
 
 // ComposeAndQueueReply creates an outbound email linked to the thread's latest message and queues it for SMTP delivery.
@@ -156,6 +174,10 @@ func (w *OutboxWorker) ComposeAndQueueReply(ctx context.Context, p ComposeReplyP
 	thread, err := w.store.GetThreadByID(ctx, p.ThreadID)
 	if err != nil {
 		return sqlc.Email{}, fmt.Errorf("load thread: %w", err)
+	}
+	sender, err := w.senderFor(thread.AccountID)
+	if err != nil {
+		return sqlc.Email{}, err
 	}
 	existingEmails, err := w.store.ListEmailsByThread(ctx, p.ThreadID)
 	if err != nil {
@@ -189,13 +211,14 @@ func (w *OutboxWorker) ComposeAndQueueReply(ctx context.Context, p ComposeReplyP
 	msgID := fmt.Sprintf("%s@%s", uuid.NewString(), w.mailDomain)
 	emailRec, err := w.store.CreateEmail(ctx, sqlc.Email{
 		ThreadID:          thread.ID,
+		AccountID:         thread.AccountID,
 		ParentEmailID:     parentID,
 		Direction:         "outbound",
 		MessageID:         msgID,
 		InReplyTo:         inReplyTo,
 		ReferencesIDs:     referencesIDs,
-		FromAddress:       w.fromAddress,
-		FromName:          w.fromName,
+		FromAddress:       sender.FromAddress,
+		FromName:          sender.FromName,
 		ToAddresses:       []sqlc.Address{{Name: thread.CustomerName, Email: thread.CustomerEmail}},
 		CCAddresses:       []sqlc.Address{},
 		Subject:           subject,
@@ -247,6 +270,22 @@ func (w *OutboxWorker) ComposeAndQueueReply(ctx context.Context, p ComposeReplyP
 		NewValue:    map[string]string{"email_id": emailRec.ID.String(), "message_id": msgID},
 	}); err != nil {
 		return sqlc.Email{}, err
+	}
+
+	// Automatically assign an unassigned thread to the replying operator.
+	if thread.AssigneeID == nil {
+		if err := w.store.UpdateThreadAssignee(ctx, thread.ID, p.SenderUserID, "reply"); err != nil {
+			return sqlc.Email{}, fmt.Errorf("assign thread to replying operator: %w", err)
+		}
+		if err := w.audit.LogThreadEvent(ctx, audit.ThreadEventParams{
+			ThreadID:    thread.ID,
+			ActorUserID: &p.SenderUserID,
+			EventType:   "assigned",
+			OldValue:    map[string]any{"assignee_id": nil},
+			NewValue:    map[string]string{"assignee_id": p.SenderUserID.String(), "source": "reply"},
+		}); err != nil {
+			return sqlc.Email{}, err
+		}
 	}
 
 	// Automatically transition new -> in_progress when first reply is sent.
@@ -325,6 +364,11 @@ func (w *OutboxWorker) sendOne(ctx context.Context, item sqlc.OutboxEmail) error
 		return fmt.Errorf("load attachments for email %s: %w", emailRec.ID, err)
 	}
 
+	sender, err := w.senderFor(emailRec.AccountID)
+	if err != nil {
+		return err
+	}
+
 	msg, err := w.buildGoMailMessage(ctx, emailRec, atts)
 	if err != nil {
 		return err
@@ -335,7 +379,7 @@ func (w *OutboxWorker) sendOne(ctx context.Context, item sqlc.OutboxEmail) error
 		return fmt.Errorf("serialize rfc5322 message: %w", err)
 	}
 
-	if err := w.transport.Send(ctx, msg); err != nil {
+	if err := sender.Transport.Send(ctx, msg); err != nil {
 		return err
 	}
 	if err := w.store.CompleteOutboxEmail(ctx, item.ID); err != nil {
@@ -353,6 +397,7 @@ func (w *OutboxWorker) sendOne(ctx context.Context, item sqlc.OutboxEmail) error
 	}
 	relPath := rawBlob.StorageRelPath
 	if _, err := w.store.EnqueueIMAPJob(ctx, sqlc.IMAPJob{
+		AccountID:     emailRec.AccountID,
 		JobType:       "append_to_sent",
 		EmailID:       emailRec.ID,
 		TargetMailbox: sentMailbox,
@@ -372,6 +417,7 @@ func (w *OutboxWorker) sendOne(ctx context.Context, item sqlc.OutboxEmail) error
 		slog.String("event_category", "data_change"),
 		slog.String("operation", "update"),
 		slog.String("resource_type", "outbound_email"),
+		slog.String("account_id", emailRec.AccountID),
 		slog.String("resource_id", emailRec.ID.String()),
 		slog.String("status", "sent"),
 	)

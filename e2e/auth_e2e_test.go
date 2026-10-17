@@ -126,6 +126,7 @@ func startSelfContainedE2EServers(t *testing.T) string {
 		Subject:      "dev-admin-sub",
 		Email:        "admin@example.com",
 		Name:         "Dev Admin",
+		Groups:       []string{"crm-support", "crm-sales"},
 	})
 	if err != nil {
 		t.Fatalf("devidm.NewServer: %v", err)
@@ -155,26 +156,35 @@ func startSelfContainedE2EServers(t *testing.T) string {
 		"minicrm-e2e",
 		"minicrm-e2e-secret",
 		crmSrv.URL+"/auth/callback",
+		"groups",
+		[]string{"openid", "profile", "email", "groups"},
 	)
 	if err != nil {
 		t.Fatalf("auth.NewOIDCProvider: %v", err)
 	}
 
-	authSvc := auth.NewService(store, auditLogger, sessions, oidcProvider, "admin@example.com")
+	authSvc := auth.NewService(store, auditLogger, sessions, oidcProvider, "admin@example.com",
+		auth.AccountAccessRule{AccountID: "support", AccountName: "Support", OIDCGroup: "crm-support"},
+		auth.AccountAccessRule{AccountID: "sales", AccountName: "Sales", OIDCGroup: "crm-sales"},
+	)
 	if _, _, err := authSvc.SeedBootstrapAdminAndSettings(ctx, "admin@example.com", "Dev Admin", "UTC"); err != nil {
 		t.Fatalf("SeedBootstrapAdminAndSettings: %v", err)
 	}
 	wfSvc := workflow.NewService(store, auditLogger, nil)
-	webSrv := web.NewServer(store, authSvc, wfSvc, nil, attStore, auditLogger)
+	webSrv := web.NewServer(store, authSvc, wfSvc, nil, attStore, auditLogger, []web.AccountConfig{
+		{ID: "support", Name: "Support"},
+		{ID: "sales", Name: "Sales"},
+	})
 	handler = web.NewRouter(webSrv, authSvc, sessions)
 
 	return crmSrv.URL
 }
 
 type e2eMemStore struct {
-	users     map[uuid.UUID]sqlc.User
-	settings  *sqlc.SystemSettings
-	auditLogs []sqlc.AuditLog
+	users           map[uuid.UUID]sqlc.User
+	settings        *sqlc.SystemSettings
+	accountSettings map[string]sqlc.AccountSettings
+	auditLogs       []sqlc.AuditLog
 }
 
 func newE2EMemStore() *e2eMemStore {
@@ -209,23 +219,50 @@ func (m *e2eMemStore) GetUserByEmail(_ context.Context, email string) (sqlc.User
 
 func (m *e2eMemStore) CreateUser(_ context.Context, arg sqlc.CreateUserParams) (sqlc.User, error) {
 	u := sqlc.User{
-		ID:          uuid.New(),
-		OIDCSub:     arg.OIDCSub,
-		Email:       arg.Email,
-		DisplayName: arg.DisplayName,
-		Role:        arg.Role,
-		IsActive:    arg.IsActive,
+		ID:              uuid.New(),
+		OIDCSub:         arg.OIDCSub,
+		Email:           arg.Email,
+		DisplayName:     arg.DisplayName,
+		Role:            arg.Role,
+		IsActive:        arg.IsActive,
+		AllowedAccounts: arg.AllowedAccounts,
 	}
 	m.users[u.ID] = u
 	return u, nil
 }
 
-func (m *e2eMemStore) UpdateUserOIDC(_ context.Context, id uuid.UUID, oidcSub, displayName string) (sqlc.User, error) {
+func (m *e2eMemStore) UpdateUserOIDC(_ context.Context, id uuid.UUID, oidcSub, displayName string, allowedAccounts []string) (sqlc.User, error) {
 	u := m.users[id]
-	u.OIDCSub = &oidcSub
+	if oidcSub != "" {
+		u.OIDCSub = &oidcSub
+	}
 	u.DisplayName = displayName
+	u.AllowedAccounts = allowedAccounts
 	m.users[id] = u
 	return u, nil
+}
+
+func (m *e2eMemStore) GetAccountSettings(_ context.Context, accountID string) (sqlc.AccountSettings, error) {
+	if a, ok := m.accountSettings[accountID]; ok {
+		return a, nil
+	}
+	return sqlc.AccountSettings{}, pgx.ErrNoRows
+}
+
+func (m *e2eMemStore) ListAccountSettings(_ context.Context) ([]sqlc.AccountSettings, error) {
+	var out []sqlc.AccountSettings
+	for _, a := range m.accountSettings {
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func (m *e2eMemStore) UpsertAccountSettings(_ context.Context, a sqlc.AccountSettings) (sqlc.AccountSettings, error) {
+	if m.accountSettings == nil {
+		m.accountSettings = make(map[string]sqlc.AccountSettings)
+	}
+	m.accountSettings[a.AccountID] = a
+	return a, nil
 }
 
 func (m *e2eMemStore) ListUsers(_ context.Context) ([]sqlc.User, error) {
@@ -303,6 +340,10 @@ func (m *e2eMemStore) ReparentThreadEmailsAndEvents(_ context.Context, _, _ uuid
 
 func (m *e2eMemStore) DeleteThread(_ context.Context, _ uuid.UUID) error {
 	return nil
+}
+
+func (m *e2eMemStore) AssignUnassignedThreadsByAccount(_ context.Context, _ string, _ uuid.UUID, _ string) ([]uuid.UUID, error) {
+	return nil, nil
 }
 
 func (m *e2eMemStore) InsertAuditLog(_ context.Context, entry sqlc.AuditLog) error {

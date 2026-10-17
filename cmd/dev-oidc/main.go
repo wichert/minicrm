@@ -34,6 +34,7 @@ func run(logger *slog.Logger) error {
 	sub := flag.String("sub", envOrDefault("DEV_OIDC_SUB", "dev-admin-sub"), "Fixed OIDC subject (sub) claim")
 	email := flag.String("email", envOrDefault("DEV_OIDC_EMAIL", "admin@example.com"), "Fixed OIDC email claim")
 	name := flag.String("name", envOrDefault("DEV_OIDC_NAME", "Dev Admin"), "Fixed OIDC name claim")
+	groupsFlag := flag.String("groups", envOrDefault("DEV_OIDC_GROUPS", ""), "Comma-separated OIDC groups claim values")
 	flag.Parse()
 
 	issuerURL := strings.TrimSpace(*issuer)
@@ -48,6 +49,7 @@ func run(logger *slog.Logger) error {
 		Subject:      *sub,
 		Email:        *email,
 		Name:         *name,
+		Groups:       splitGroups(*groupsFlag),
 	})
 	if err != nil {
 		return err
@@ -78,12 +80,24 @@ func run(logger *slog.Logger) error {
 		slog.String("sub", *sub),
 		slog.String("email", *email),
 		slog.String("name", *name),
+		slog.Any("groups", splitGroups(*groupsFlag)),
 	)
 
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// splitGroups parses a comma-separated list of OIDC group values.
+func splitGroups(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func envOrDefault(key, fallback string) string {

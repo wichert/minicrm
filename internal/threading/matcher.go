@@ -15,9 +15,9 @@ import (
 
 // Store defines the persistence methods required by Matcher.
 type Store interface {
-	FindEmailByMessageIDs(ctx context.Context, msgIDs []string) (sqlc.Email, error)
+	FindEmailByMessageIDs(ctx context.Context, accountID string, msgIDs []string) (sqlc.Email, error)
 	GetThreadByID(ctx context.Context, id uuid.UUID) (sqlc.Thread, error)
-	FindThreadBySubjectAndParticipant(ctx context.Context, normSubject, customerEmail string, since time.Time) (sqlc.Thread, error)
+	FindThreadBySubjectAndParticipant(ctx context.Context, accountID, normSubject, customerEmail string, since time.Time) (sqlc.Thread, error)
 	CreateThread(ctx context.Context, t sqlc.Thread) (sqlc.Thread, error)
 	TouchThreadLastMessageAt(ctx context.Context, id uuid.UUID, ts time.Time) error
 	GetSystemSettings(ctx context.Context) (sqlc.SystemSettings, error)
@@ -25,6 +25,7 @@ type Store interface {
 
 // InboundMessageMetadata holds the extracted fields needed to link an incoming email to a thread.
 type InboundMessageMetadata struct {
+	AccountID     string
 	MessageID     string
 	InReplyTo     string
 	ReferencesIDs []string
@@ -77,7 +78,7 @@ func (m *Matcher) ResolveThread(ctx context.Context, msg InboundMessageMetadata)
 	// Step B.1: Header match via In-Reply-To and References
 	candidateIDs := buildCandidateMessageIDs(msg.InReplyTo, msg.ReferencesIDs)
 	if len(candidateIDs) > 0 {
-		matchedEmail, err := m.store.FindEmailByMessageIDs(ctx, candidateIDs)
+		matchedEmail, err := m.store.FindEmailByMessageIDs(ctx, msg.AccountID, candidateIDs)
 		if err == nil {
 			parentEmailID = &matchedEmail.ID
 			t, tErr := m.store.GetThreadByID(ctx, matchedEmail.ThreadID)
@@ -100,7 +101,7 @@ func (m *Matcher) ResolveThread(ctx context.Context, msg InboundMessageMetadata)
 			refTime = time.Now().UTC()
 		}
 		since := refTime.AddDate(0, 0, -windowDays)
-		t, err := m.store.FindThreadBySubjectAndParticipant(ctx, normSubject, msg.FromAddress, since)
+		t, err := m.store.FindThreadBySubjectAndParticipant(ctx, msg.AccountID, normSubject, msg.FromAddress, since)
 		if err == nil {
 			matchedThread = &t
 		} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -137,6 +138,7 @@ func (m *Matcher) ResolveThread(ctx context.Context, msg InboundMessageMetadata)
 	}
 
 	cand, err := m.assigner.Resolve(ctx, assignment.EmailInput{
+		AccountID:         msg.AccountID,
 		FromAddress:       msg.FromAddress,
 		FromName:          msg.FromName,
 		ToAddresses:       msg.ToAddresses,
@@ -145,16 +147,29 @@ func (m *Matcher) ResolveThread(ctx context.Context, msg InboundMessageMetadata)
 		BodyText:          msg.BodyText,
 		PreviousThreadID:  reopensThreadID,
 	})
-	if err != nil {
+	// No default assignee configured for this account: create the thread unassigned
+	// so it can be picked up later, when a default assignee is configured or an
+	// operator takes/assigns the thread.
+	unassigned := errors.Is(err, assignment.ErrNoAssigneeAvailable)
+	if err != nil && !unassigned {
 		return ResolutionResult{}, fmt.Errorf("resolve assignee for new thread: %w", err)
 	}
 
+	var assigneeID *uuid.UUID
+	assignmentSource := "unassigned"
+	if !unassigned {
+		id := cand.AssigneeID
+		assigneeID = &id
+		assignmentSource = cand.Source
+	}
+
 	newThread, err := m.store.CreateThread(ctx, sqlc.Thread{
+		AccountID:         msg.AccountID,
 		SubjectNormalized: normSubject,
 		SubjectDisplay:    displaySubject,
 		Status:            sqlc.ThreadStatusNew,
-		AssigneeID:        cand.AssigneeID,
-		AssignmentSource:  cand.Source,
+		AssigneeID:        assigneeID,
+		AssignmentSource:  assignmentSource,
 		CustomerEmail:     msg.FromAddress,
 		CustomerName:      msg.FromName,
 		ReopensThreadID:   reopensThreadID,
@@ -168,21 +183,24 @@ func (m *Matcher) ResolveThread(ctx context.Context, msg InboundMessageMetadata)
 		ThreadID:  newThread.ID,
 		EventType: "created",
 		NewValue: map[string]any{
+			"account_id":        newThread.AccountID,
 			"status":            newThread.Status,
 			"reopens_thread_id": reopensThreadID,
 		},
 	}); err != nil {
 		return ResolutionResult{}, err
 	}
-	if err := m.audit.LogThreadEvent(ctx, audit.ThreadEventParams{
-		ThreadID:  newThread.ID,
-		EventType: "assigned",
-		NewValue: map[string]string{
-			"assignee_id": cand.AssigneeID.String(),
-			"source":      cand.Source,
-		},
-	}); err != nil {
-		return ResolutionResult{}, err
+	if assigneeID != nil {
+		if err := m.audit.LogThreadEvent(ctx, audit.ThreadEventParams{
+			ThreadID:  newThread.ID,
+			EventType: "assigned",
+			NewValue: map[string]string{
+				"assignee_id": assigneeID.String(),
+				"source":      assignmentSource,
+			},
+		}); err != nil {
+			return ResolutionResult{}, err
+		}
 	}
 
 	return ResolutionResult{

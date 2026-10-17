@@ -4,10 +4,50 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
 )
+
+// MailAccountConfig describes a single IMAP/SMTP account monitored by MiniCRM.
+//
+// Accounts are configured using numbered environment variable prefixes, e.g.
+// MINICRM_ACCOUNT_1_ID, MINICRM_ACCOUNT_1_IMAP_HOST, MINICRM_ACCOUNT_2_ID, and so on.
+type MailAccountConfig struct {
+	// ID is the mandatory, stable, unique identifier for the account (e.g. "support").
+	ID string `env:"ID,required"`
+	// Name is the mandatory human-readable account name shown in the UI.
+	Name string `env:"NAME,required"`
+	// OIDCGroup is the mandatory OIDC group/role claim value granting access to this account.
+	OIDCGroup string `env:"OIDC_GROUP,required"`
+
+	// IMAP configuration (username + password authentication)
+	IMAPHost         string        `env:"IMAP_HOST,required"`
+	IMAPPort         int           `env:"IMAP_PORT" envDefault:"993"`
+	IMAPUsername     string        `env:"IMAP_USERNAME,required"`
+	IMAPPassword     string        `env:"IMAP_PASSWORD,required"`
+	IMAPImplicitTLS  bool          `env:"IMAP_IMPLICIT_TLS" envDefault:"true"`
+	IMAPPollInterval time.Duration `env:"IMAP_POLL_INTERVAL" envDefault:"2m"`
+
+	// SMTP configuration (username + password authentication)
+	SMTPHost        string `env:"SMTP_HOST,required"`
+	SMTPPort        int    `env:"SMTP_PORT" envDefault:"587"`
+	SMTPUsername    string `env:"SMTP_USERNAME,required"`
+	SMTPPassword    string `env:"SMTP_PASSWORD,required"`
+	SMTPFromAddress string `env:"SMTP_FROM_ADDRESS,required"`
+	SMTPFromName    string `env:"SMTP_FROM_NAME" envDefault:"MiniCRM Support"`
+	SMTPTLSMode     string `env:"SMTP_TLS_MODE" envDefault:"starttls"` // "starttls", "implicit", "none"
+}
+
+// AccountEnvPrefixFormat is the printf format for a mail account's env var prefix.
+const AccountEnvPrefixFormat = "MINICRM_ACCOUNT_%d_"
+
+// accountIDPattern restricts account IDs to slug-like values, as they are used as
+// database keys and in HTML form field names.
+var accountIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // Config holds the runtime configuration for MiniCRM.
 type Config struct {
@@ -20,28 +60,20 @@ type Config struct {
 	MailDomain         string `env:"MINICRM_MAIL_DOMAIN" envDefault:"minicrm.local"`
 	CookieSecure       bool   `env:"MINICRM_COOKIE_SECURE" envDefault:"true"`
 
-	// IMAP configuration (username + password authentication)
-	IMAPHost         string        `env:"MINICRM_IMAP_HOST,required"`
-	IMAPPort         int           `env:"MINICRM_IMAP_PORT" envDefault:"993"`
-	IMAPUsername     string        `env:"MINICRM_IMAP_USERNAME,required"`
-	IMAPPassword     string        `env:"MINICRM_IMAP_PASSWORD,required"`
-	IMAPImplicitTLS  bool          `env:"MINICRM_IMAP_IMPLICIT_TLS" envDefault:"true"`
-	IMAPPollInterval time.Duration `env:"MINICRM_IMAP_POLL_INTERVAL" envDefault:"2m"`
-
-	// SMTP configuration (username + password authentication)
-	SMTPHost        string `env:"MINICRM_SMTP_HOST,required"`
-	SMTPPort        int    `env:"MINICRM_SMTP_PORT" envDefault:"587"`
-	SMTPUsername    string `env:"MINICRM_SMTP_USERNAME,required"`
-	SMTPPassword    string `env:"MINICRM_SMTP_PASSWORD,required"`
-	SMTPFromAddress string `env:"MINICRM_SMTP_FROM_ADDRESS,required"`
-	SMTPFromName    string `env:"MINICRM_SMTP_FROM_NAME" envDefault:"MiniCRM Support"`
-	SMTPTLSMode     string `env:"MINICRM_SMTP_TLS_MODE" envDefault:"starttls"` // "starttls", "implicit", "none"
+	// Mail accounts (loaded from MINICRM_ACCOUNT_<N>_* env prefixes).
+	Accounts []MailAccountConfig `env:"-"`
 
 	// OAuth2 / OIDC Identity Server configuration
 	OIDCIssuerURL    string `env:"MINICRM_OIDC_ISSUER_URL,required"`
 	OIDCClientID     string `env:"MINICRM_OIDC_CLIENT_ID,required"`
 	OIDCClientSecret string `env:"MINICRM_OIDC_CLIENT_SECRET,required"`
 	OIDCRedirectURL  string `env:"MINICRM_OIDC_REDIRECT_URL,required"`
+	// OIDCGroupsClaim names the ID token claim carrying the user's group memberships.
+	OIDCGroupsClaim string `env:"MINICRM_OIDC_GROUPS_CLAIM" envDefault:"groups"`
+	// OIDCScopes are the scopes requested from the OIDC provider. Providers such as
+	// Kanidm only include the groups claim when a groups scope is requested
+	// (e.g. "groups_name" for bare group names).
+	OIDCScopes []string `env:"MINICRM_OIDC_SCOPES" envDefault:"openid,profile,email"`
 }
 
 // Load parses environment variables and validates the resulting configuration.
@@ -50,10 +82,36 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse config from env: %w", err)
 	}
+	accounts, err := loadAccounts()
+	if err != nil {
+		return nil, err
+	}
+	cfg.Accounts = accounts
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// loadAccounts parses the numbered MINICRM_ACCOUNT_<N>_* environment variable prefixes,
+// starting at index 1 and stopping at the first index without a MINICRM_ACCOUNT_<N>_ID value.
+func loadAccounts() ([]MailAccountConfig, error) {
+	accounts := make([]MailAccountConfig, 0, 2)
+	for i := 1; ; i++ {
+		prefix := fmt.Sprintf(AccountEnvPrefixFormat, i)
+		if _, ok := os.LookupEnv(prefix + "ID"); !ok {
+			break
+		}
+		acct, err := env.ParseAsWithOptions[MailAccountConfig](env.Options{Prefix: prefix})
+		if err != nil {
+			return nil, fmt.Errorf("parse mail account %d (%s*): %w", i, prefix, err)
+		}
+		accounts = append(accounts, acct)
+	}
+	if len(accounts) == 0 {
+		return nil, errors.New("at least one mail account must be configured (MINICRM_ACCOUNT_1_ID is required)")
+	}
+	return accounts, nil
 }
 
 // Validate checks semantic constraints on Config values.
@@ -64,16 +122,79 @@ func (c *Config) Validate() error {
 	if _, err := time.LoadLocation(c.DisplayTimezone); err != nil {
 		return fmt.Errorf("invalid MINICRM_DISPLAY_TIMEZONE %q: %w", c.DisplayTimezone, err)
 	}
-	if c.IMAPPort <= 0 || c.IMAPPort > 65535 {
-		return fmt.Errorf("invalid MINICRM_IMAP_PORT: %d", c.IMAPPort)
+	if len(c.Accounts) == 0 {
+		return errors.New("at least one mail account must be configured")
 	}
-	if c.SMTPPort <= 0 || c.SMTPPort > 65535 {
-		return fmt.Errorf("invalid MINICRM_SMTP_PORT: %d", c.SMTPPort)
+	seenIDs := make(map[string]struct{}, len(c.Accounts))
+	for i, acct := range c.Accounts {
+		if acct.ID == "" {
+			return fmt.Errorf("mail account %d: ID must not be empty", i+1)
+		}
+		if !accountIDPattern.MatchString(acct.ID) {
+			return fmt.Errorf("mail account %d: invalid ID %q (want lowercase letters, digits, '-' or '_')", i+1, acct.ID)
+		}
+		if _, dup := seenIDs[acct.ID]; dup {
+			return fmt.Errorf("duplicate mail account ID %q", acct.ID)
+		}
+		seenIDs[acct.ID] = struct{}{}
+		if acct.Name == "" {
+			return fmt.Errorf("mail account %q: NAME must not be empty", acct.ID)
+		}
+		if acct.OIDCGroup == "" {
+			return fmt.Errorf("mail account %q: OIDC_GROUP must not be empty", acct.ID)
+		}
+		if acct.IMAPHost == "" {
+			return fmt.Errorf("mail account %q: IMAP_HOST must not be empty", acct.ID)
+		}
+		if acct.IMAPUsername == "" {
+			return fmt.Errorf("mail account %q: IMAP_USERNAME must not be empty", acct.ID)
+		}
+		if acct.IMAPPort <= 0 || acct.IMAPPort > 65535 {
+			return fmt.Errorf("mail account %q: invalid IMAP_PORT: %d", acct.ID, acct.IMAPPort)
+		}
+		if acct.SMTPHost == "" {
+			return fmt.Errorf("mail account %q: SMTP_HOST must not be empty", acct.ID)
+		}
+		if acct.SMTPUsername == "" {
+			return fmt.Errorf("mail account %q: SMTP_USERNAME must not be empty", acct.ID)
+		}
+		if acct.SMTPFromAddress == "" {
+			return fmt.Errorf("mail account %q: SMTP_FROM_ADDRESS must not be empty", acct.ID)
+		}
+		if acct.SMTPPort <= 0 || acct.SMTPPort > 65535 {
+			return fmt.Errorf("mail account %q: invalid SMTP_PORT: %d", acct.ID, acct.SMTPPort)
+		}
+		switch acct.SMTPTLSMode {
+		case "starttls", "implicit", "none":
+		default:
+			return fmt.Errorf("mail account %q: invalid SMTP_TLS_MODE %q (want starttls, implicit, or none)", acct.ID, acct.SMTPTLSMode)
+		}
 	}
-	switch c.SMTPTLSMode {
-	case "starttls", "implicit", "none":
-	default:
-		return fmt.Errorf("invalid MINICRM_SMTP_TLS_MODE %q (want starttls, implicit, or none)", c.SMTPTLSMode)
+	if c.OIDCGroupsClaim == "" {
+		return errors.New("MINICRM_OIDC_GROUPS_CLAIM must not be empty")
+	}
+	if len(c.OIDCScopes) == 0 {
+		return errors.New("MINICRM_OIDC_SCOPES must not be empty")
+	}
+	seenScopes := make(map[string]struct{}, len(c.OIDCScopes))
+	for _, scope := range c.OIDCScopes {
+		if strings.TrimSpace(scope) == "" {
+			return errors.New("MINICRM_OIDC_SCOPES must not contain empty scopes")
+		}
+		seenScopes[scope] = struct{}{}
+	}
+	if _, ok := seenScopes["openid"]; !ok {
+		return errors.New(`MINICRM_OIDC_SCOPES must include the "openid" scope`)
 	}
 	return nil
+}
+
+// AccountByID returns the configured mail account with the given ID.
+func (c *Config) AccountByID(id string) (MailAccountConfig, bool) {
+	for _, acct := range c.Accounts {
+		if acct.ID == id {
+			return acct, true
+		}
+	}
+	return MailAccountConfig{}, false
 }

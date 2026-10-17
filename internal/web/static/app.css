@@ -63,3 +63,9 @@ main.container {
   font-size: 0.8rem;
   font-weight: 600;
 }
+
+.badge-account {
+  background: #e0ecff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}

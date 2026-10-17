@@ -10,10 +10,17 @@ import (
 	"github.com/wichert/minicrm/internal/db/sqlc"
 )
 
+// AccountOption is a mail account selectable or displayable in the UI.
+type AccountOption struct {
+	ID   string
+	Name string
+}
+
 // ThreadSummaryItem holds display fields for a single row in the inbox list.
 type ThreadSummaryItem struct {
 	Thread        sqlc.Thread
 	AssigneeName  string
+	AccountName   string
 	FormattedTime string
 }
 
@@ -25,6 +32,10 @@ type InboxViewData struct {
 	AssigneeFilter string
 	Users          []sqlc.User
 	DisplayTZ      string
+	// ShowAccountUI is true when the current user can access more than one mail account.
+	ShowAccountUI bool
+	AccountFilter string
+	Accounts      []AccountOption
 }
 
 // EmailItemView holds an email, its formatted timestamp, and its attachments.
@@ -50,14 +61,25 @@ type ThreadDetailViewData struct {
 	Events        []EventItemView
 	Users         []sqlc.User
 	DisplayTZ     string
+	// ShowAccountUI is true when the current user can access more than one mail account.
+	ShowAccountUI bool
+	AccountName   string
+}
+
+// AccountSettingsView pairs a configured mail account with its current settings.
+type AccountSettingsView struct {
+	Account           AccountOption
+	DefaultAssigneeID *uuid.UUID
 }
 
 // SettingsViewData holds data for the admin settings and user management page.
 type SettingsViewData struct {
-	CurrentUser sqlc.User
-	Settings    sqlc.SystemSettings
-	Users       []sqlc.User
-	AuditLogs   []sqlc.AuditLog
+	CurrentUser     sqlc.User
+	Settings        sqlc.SystemSettings
+	Users           []sqlc.User
+	AuditLogs       []sqlc.AuditLog
+	Accounts        []AccountOption
+	AccountSettings []AccountSettingsView
 }
 
 // FormatTimestamp converts t into the configured IANA displayTimezone.
@@ -153,6 +175,7 @@ const inboxTablePartial = `
   <table>
     <thead>
       <tr>
+        {{if .ShowAccountUI}}<th>Account</th>{{end}}
         <th>Subject</th>
         <th>Customer</th>
         <th>Status</th>
@@ -163,6 +186,7 @@ const inboxTablePartial = `
     <tbody>
       {{range .Threads}}
       <tr>
+        {{if $.ShowAccountUI}}<td><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
         <td><a href="/threads/{{.Thread.ID}}">{{.Thread.SubjectDisplay}}</a></td>
         <td>{{.Thread.CustomerName}} &lt;{{.Thread.CustomerEmail}}&gt;</td>
         <td><span class="badge">{{.Thread.Status}}</span></td>
@@ -170,7 +194,7 @@ const inboxTablePartial = `
         <td>{{.FormattedTime}}</td>
       </tr>
       {{else}}
-      <tr><td colspan="5">No threads found.</td></tr>
+      <tr><td colspan="{{if .ShowAccountUI}}6{{else}}5{{end}}">No threads found.</td></tr>
       {{end}}
     </tbody>
   </table>
@@ -189,6 +213,16 @@ const inboxBody = `
       <option value="spam" {{if eq .StatusFilter "spam"}}selected{{end}}>spam</option>
     </select>
   </label>
+  {{if .ShowAccountUI}}
+  <label>Account:
+    <select name="account" data-hx-get="/threads">
+      <option value="">All</option>
+      {{range .Accounts}}
+      <option value="{{.ID}}" {{if eq .ID $.AccountFilter}}selected{{end}}>{{.Name}}</option>
+      {{end}}
+    </select>
+  </label>
+  {{end}}
   <button type="submit">Filter</button>
 </form>
 ` + inboxTablePartial
@@ -198,8 +232,9 @@ const threadDetailBody = `
   <h1>{{.Thread.SubjectDisplay}}</h1>
   <p>
     <strong>Status:</strong> <span class="badge">{{.Thread.Status}}</span> |
+    {{if .ShowAccountUI}}<strong>Account:</strong> <span class="badge badge-account">{{.AccountName}}</span> |{{end}}
     <strong>Customer:</strong> {{.Thread.CustomerName}} &lt;{{.Thread.CustomerEmail}}&gt; |
-    <strong>Assignee:</strong> {{.AssigneeName}} ({{.Thread.AssignmentSource}})
+    <strong>Assignee:</strong> {{if .Thread.AssigneeID}}{{.AssigneeName}} ({{.Thread.AssignmentSource}}){{else}}Unassigned{{end}}
   </p>
 
   {{if .ReopensThread}}
@@ -231,11 +266,17 @@ const threadDetailBody = `
     </form>
     {{end}}
 
+    {{if not .Thread.AssigneeID}}
+    <form method="post" action="/threads/{{.Thread.ID}}/assign">
+      <input type="hidden" name="assignee_id" value="{{.CurrentUser.ID}}">
+      <button type="submit">Take Thread (assign to me)</button>
+    </form>
+    {{end}}
     <form method="post" action="/threads/{{.Thread.ID}}/assign">
       <label>Assignee:
         <select name="assignee_id">
           {{range .Users}}
-          <option value="{{.ID}}" {{if eq .ID $.Thread.AssigneeID}}selected{{end}}>{{.DisplayName}} ({{.Email}})</option>
+          <option value="{{.ID}}" {{if and $.Thread.AssigneeID (eq .ID.String $.Thread.AssigneeID.String)}}selected{{end}}>{{.DisplayName}} ({{.Email}})</option>
           {{end}}
         </select>
       </label>
@@ -300,15 +341,23 @@ const threadDetailBody = `
 const settingsBody = `
 <h1>System Settings</h1>
 <form method="post" action="/settings" class="card">
-  <div>
+  {{range .AccountSettings}}
+  <fieldset>
+    <legend>Account: {{.Account.Name}} ({{.Account.ID}})</legend>
     <label>Default Assignee:
-      <select name="default_assignee_id" required>
-        {{range .Users}}
-        <option value="{{.ID}}" {{if eq .ID $.Settings.DefaultAssigneeID}}selected{{end}}>{{.DisplayName}} ({{.Email}})</option>
+      <select name="account_default_assignee_{{.Account.ID}}">
+        <option value="" {{if not .DefaultAssigneeID}}selected{{end}}>-- Unassigned (None) --</option>
+        {{$acct := .Account.ID}}
+        {{$current := .DefaultAssigneeID}}
+        {{range $.Users}}
+        {{if and .IsActive (.HasAccountAccess $acct)}}
+        <option value="{{.ID}}" {{if and $current (eq .ID.String $current.String)}}selected{{end}}>{{.DisplayName}} ({{.Email}})</option>
+        {{end}}
         {{end}}
       </select>
     </label>
-  </div>
+  </fieldset>
+  {{end}}
   <div>
     <label>Display Timezone (IANA):
       <input type="text" name="display_timezone" value="{{.Settings.DisplayTimezone}}" required>
@@ -352,6 +401,12 @@ const settingsBody = `
       <option value="admin">admin</option>
     </select>
   </label>
+  <fieldset>
+    <legend>Account Access</legend>
+    {{range .Accounts}}
+    <label><input type="checkbox" name="allowed_accounts" value="{{.ID}}"> {{.Name}} ({{.ID}})</label>
+    {{end}}
+  </fieldset>
   <button type="submit">Pre-Create User</button>
 </form>
 `

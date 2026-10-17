@@ -195,15 +195,16 @@ func toIMAPUID(v int64) (imap.UID, error) {
 // SyncStore defines the persistence operations needed by IMAPSyncWorker.
 type SyncStore interface {
 	GetSystemSettings(ctx context.Context) (sqlc.SystemSettings, error)
-	GetIMAPSyncState(ctx context.Context, mailbox string) (sqlc.IMAPSyncState, error)
+	GetIMAPSyncState(ctx context.Context, accountID, mailbox string) (sqlc.IMAPSyncState, error)
 	UpsertIMAPSyncState(ctx context.Context, s sqlc.IMAPSyncState) error
-	GetEmailByMessageID(ctx context.Context, msgID string) (sqlc.Email, error)
+	GetEmailByMessageID(ctx context.Context, accountID, msgID string) (sqlc.Email, error)
 	CreateEmail(ctx context.Context, e sqlc.Email) (sqlc.Email, error)
 	CreateAttachment(ctx context.Context, a sqlc.Attachment) (sqlc.Attachment, error)
 }
 
 // IMAPSyncWorker pulls incoming emails from the IMAP INBOX and ingests them into PostgreSQL + disk.
 type IMAPSyncWorker struct {
+	accountID   string
 	store       SyncStore
 	matcher     *threading.Matcher
 	attachments *storage.Store
@@ -214,6 +215,7 @@ type IMAPSyncWorker struct {
 
 // NewIMAPSyncWorker creates a new IMAPSyncWorker.
 func NewIMAPSyncWorker(
+	accountID string,
 	store SyncStore,
 	matcher *threading.Matcher,
 	attachments *storage.Store,
@@ -228,6 +230,7 @@ func NewIMAPSyncWorker(
 		logger = slog.Default()
 	}
 	return &IMAPSyncWorker{
+		accountID:   accountID,
 		store:       store,
 		matcher:     matcher,
 		attachments: attachments,
@@ -271,9 +274,9 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 	}
 	defer func() { _ = client.Close() }()
 
-	syncState, err := w.store.GetIMAPSyncState(ctx, inbox)
+	syncState, err := w.store.GetIMAPSyncState(ctx, w.accountID, inbox)
 	if errors.Is(err, pgx.ErrNoRows) {
-		syncState = sqlc.IMAPSyncState{Mailbox: inbox, UIDValidity: 0, LastSyncedUID: 0}
+		syncState = sqlc.IMAPSyncState{AccountID: w.accountID, Mailbox: inbox, UIDValidity: 0, LastSyncedUID: 0}
 	} else if err != nil {
 		return 0, fmt.Errorf("get imap_sync_state: %w", err)
 	}
@@ -303,6 +306,7 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 			highestUID = rawMsg.UID
 		}
 		if err := w.store.UpsertIMAPSyncState(ctx, sqlc.IMAPSyncState{
+			AccountID:     w.accountID,
 			Mailbox:       inbox,
 			UIDValidity:   uidVal,
 			LastSyncedUID: highestUID,
@@ -320,8 +324,9 @@ func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValid
 		return fmt.Errorf("parse rfc5322: %w", err)
 	}
 
-	// Deduplicate by Message-ID
-	if _, err := w.store.GetEmailByMessageID(ctx, parsed.MessageID); err == nil {
+	// Deduplicate by Message-ID within this account, so an email delivered to several
+	// accounts is ingested once per account.
+	if _, err := w.store.GetEmailByMessageID(ctx, w.accountID, parsed.MessageID); err == nil {
 		return nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("check existing message_id: %w", err)
@@ -333,6 +338,7 @@ func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValid
 	}
 
 	resolution, err := w.matcher.ResolveThread(ctx, threading.InboundMessageMetadata{
+		AccountID:     w.accountID,
 		MessageID:     parsed.MessageID,
 		InReplyTo:     parsed.InReplyTo,
 		ReferencesIDs: parsed.ReferencesIDs,
@@ -354,6 +360,7 @@ func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValid
 	uid := rawMsg.UID
 	emailRec, err := w.store.CreateEmail(ctx, sqlc.Email{
 		ThreadID:          resolution.Thread.ID,
+		AccountID:         w.accountID,
 		ParentEmailID:     resolution.ParentEmailID,
 		Direction:         "inbound",
 		MessageID:         parsed.MessageID,
@@ -401,6 +408,7 @@ func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValid
 		slog.String("event_category", "data_change"),
 		slog.String("operation", "create"),
 		slog.String("resource_type", "inbound_email"),
+		slog.String("account_id", w.accountID),
 		slog.String("resource_id", emailRec.ID.String()),
 		slog.String("thread_id", resolution.Thread.ID.String()),
 		slog.String("message_id", parsed.MessageID),

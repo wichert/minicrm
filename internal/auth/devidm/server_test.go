@@ -18,10 +18,11 @@ import (
 )
 
 type memStore struct {
-	users      map[uuid.UUID]sqlc.User
-	settings   *sqlc.SystemSettings
-	auditLogs  []sqlc.AuditLog
-	threadLogs []sqlc.ThreadEvent
+	users           map[uuid.UUID]sqlc.User
+	settings        *sqlc.SystemSettings
+	accountSettings map[string]sqlc.AccountSettings
+	auditLogs       []sqlc.AuditLog
+	threadLogs      []sqlc.ThreadEvent
 }
 
 func newMemStore() *memStore {
@@ -56,23 +57,35 @@ func (m *memStore) GetUserByEmail(_ context.Context, email string) (sqlc.User, e
 
 func (m *memStore) CreateUser(_ context.Context, arg sqlc.CreateUserParams) (sqlc.User, error) {
 	u := sqlc.User{
-		ID:          uuid.New(),
-		OIDCSub:     arg.OIDCSub,
-		Email:       arg.Email,
-		DisplayName: arg.DisplayName,
-		Role:        arg.Role,
-		IsActive:    arg.IsActive,
+		ID:              uuid.New(),
+		OIDCSub:         arg.OIDCSub,
+		Email:           arg.Email,
+		DisplayName:     arg.DisplayName,
+		Role:            arg.Role,
+		IsActive:        arg.IsActive,
+		AllowedAccounts: arg.AllowedAccounts,
 	}
 	m.users[u.ID] = u
 	return u, nil
 }
 
-func (m *memStore) UpdateUserOIDC(_ context.Context, id uuid.UUID, oidcSub, displayName string) (sqlc.User, error) {
+func (m *memStore) UpdateUserOIDC(_ context.Context, id uuid.UUID, oidcSub, displayName string, allowedAccounts []string) (sqlc.User, error) {
 	u := m.users[id]
-	u.OIDCSub = &oidcSub
+	if oidcSub != "" {
+		u.OIDCSub = &oidcSub
+	}
 	u.DisplayName = displayName
+	u.AllowedAccounts = allowedAccounts
 	m.users[id] = u
 	return u, nil
+}
+
+func (m *memStore) UpsertAccountSettings(_ context.Context, s sqlc.AccountSettings) (sqlc.AccountSettings, error) {
+	if m.accountSettings == nil {
+		m.accountSettings = make(map[string]sqlc.AccountSettings)
+	}
+	m.accountSettings[s.AccountID] = s
+	return s, nil
 }
 
 func (m *memStore) GetSystemSettings(_ context.Context) (sqlc.SystemSettings, error) {
@@ -105,6 +118,7 @@ func TestDevIDMWithRealOIDCProviderAndPKCE(t *testing.T) {
 		Subject:      "dev-admin-sub",
 		Email:        "admin@example.com",
 		Name:         "Dev Admin",
+		Groups:       []string{"crm-support"},
 	})
 	if err != nil {
 		t.Fatalf("devidm.NewServer: %v", err)
@@ -129,14 +143,26 @@ func TestDevIDMWithRealOIDCProviderAndPKCE(t *testing.T) {
 		"minicrm-client",
 		"minicrm-secret",
 		appSrv.URL+"/auth/callback",
+		"groups",
+		[]string{"openid", "profile", "email", "groups"},
 	)
 	if err != nil {
 		t.Fatalf("auth.NewOIDCProvider against devidm: %v", err)
 	}
 
-	authSvc := auth.NewService(store, auditLogger, sessions, oidcProvider, "admin@example.com")
+	authSvc := auth.NewService(store, auditLogger, sessions, oidcProvider, "admin@example.com",
+		auth.AccountAccessRule{AccountID: "support", AccountName: "Support", OIDCGroup: "crm-support"})
 	if _, _, err := authSvc.SeedBootstrapAdminAndSettings(ctx, "admin@example.com", "Admin", "UTC"); err != nil {
 		t.Fatalf("SeedBootstrapAdminAndSettings: %v", err)
+	}
+
+	// The provider must request the configured scopes, including the groups scope,
+	// otherwise providers like Kanidm never emit group membership.
+	authURL := oidcProvider.AuthCodeURL("state-1", "nonce-1", "verifier-1")
+	for _, want := range []string{"scope=openid+profile+email+groups", "code_challenge_method=S256"} {
+		if !strings.Contains(authURL, want) {
+			t.Fatalf("expected %q in authorization URL, got %s", want, authURL)
+		}
 	}
 
 	mux.HandleFunc("GET /auth/login", authSvc.HandleLogin)

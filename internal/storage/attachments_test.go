@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,7 +16,8 @@ import (
 func TestStoreSaveOpenAndDeduplicate(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
-	store, err := storage.NewStore(t.TempDir(), logger)
+	baseDir := t.TempDir()
+	store, err := storage.NewStore(baseDir, logger)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -55,6 +58,27 @@ func TestStoreSaveOpenAndDeduplicate(t *testing.T) {
 	logs := logBuf.String()
 	if !strings.Contains(logs, `"event_category":"data_change"`) || !strings.Contains(logs, `"event_category":"data_access"`) {
 		t.Fatalf("expected structured data_change and data_access logs, got: %s", logs)
+	}
+	if !strings.Contains(logs, `"operation":"reuse"`) {
+		t.Fatalf("expected a blob reuse data_change log for identical content, got: %s", logs)
+	}
+
+	// Only a single copy of the identical payload may exist on disk.
+	fileCount := 0
+	err = filepath.WalkDir(filepath.Join(baseDir, blob1.StorageRelPath[:2]), func(_ string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			fileCount++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDir: %v", err)
+	}
+	if fileCount != 1 {
+		t.Fatalf("expected exactly 1 stored blob file, found %d", fileCount)
 	}
 }
 

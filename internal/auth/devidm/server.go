@@ -28,6 +28,8 @@ type Config struct {
 	Subject      string
 	Email        string
 	Name         string
+	// Groups are emitted in the ID token under the "groups" claim.
+	Groups []string
 }
 
 type authCodeEntry struct {
@@ -130,7 +132,8 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      []string{"openid", "profile", "email"},
+		"scopes_supported":                      []string{"openid", "profile", "email", "groups"},
+		"claims_supported":                      []string{"iss", "sub", "aud", "iat", "exp", "nonce", "email", "email_verified", "name", "groups"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"S256"},
 	}
@@ -200,10 +203,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 type idTokenClaims struct {
 	jwt.Claims
-	Nonce         string `json:"nonce,omitempty"`
-	Email         string `json:"email"`
-	EmailVerified bool   `json:"email_verified"`
-	Name          string `json:"name"`
+	Nonce         string   `json:"nonce,omitempty"`
+	Email         string   `json:"email"`
+	EmailVerified bool     `json:"email_verified"`
+	Name          string   `json:"name"`
+	Groups        []string `json:"groups,omitempty"`
 }
 
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -252,6 +256,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		Email:         cfg.Email,
 		EmailVerified: true,
 		Name:          cfg.Name,
+		Groups:        cfg.Groups,
 	}
 
 	rawIDToken, err := jwt.Signed(s.signer).Claims(claims).Serialize()

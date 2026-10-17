@@ -2,20 +2,26 @@ package assignment
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/wichert/minicrm/internal/db/sqlc"
 )
 
 // SettingsStore is the persistence interface required by DefaultAssigneeResolver.
 type SettingsStore interface {
-	GetSystemSettings(ctx context.Context) (sqlc.SystemSettings, error)
+	GetAccountSettings(ctx context.Context, accountID string) (sqlc.AccountSettings, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (sqlc.User, error)
-	ListUsers(ctx context.Context) ([]sqlc.User, error)
 }
 
-// DefaultAssigneeResolver assigns incoming threads to the configured system default assignee.
+// DefaultAssigneeResolver assigns incoming threads to the configured default assignee of
+// the mail account the thread belongs to.
+//
+// When the account has no default assignee configured (no account_settings row, a NULL
+// default_assignee_id, or an assignee that is inactive or lacks access to the account) it
+// resolves no candidate at all, so the thread is created in the unassigned state.
 type DefaultAssigneeResolver struct {
 	store SettingsStore
 }
@@ -30,35 +36,35 @@ func (r *DefaultAssigneeResolver) Name() string {
 	return "default"
 }
 
-// Resolve returns the configured default_assignee_id if active, or falls back to the first active user.
-func (r *DefaultAssigneeResolver) Resolve(ctx context.Context, _ EmailInput) (*Candidate, error) {
-	settings, err := r.store.GetSystemSettings(ctx)
+// Resolve returns the configured per-account default assignee, or nil when the account has none.
+func (r *DefaultAssigneeResolver) Resolve(ctx context.Context, input EmailInput) (*Candidate, error) {
+	if input.AccountID == "" {
+		return nil, errors.New("default assignee resolver requires an account ID")
+	}
+	settings, err := r.store.GetAccountSettings(ctx, input.AccountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("load system_settings: %w", err)
+		return nil, fmt.Errorf("load account_settings for %q: %w", input.AccountID, err)
 	}
-	user, err := r.store.GetUserByID(ctx, settings.DefaultAssigneeID)
-	if err == nil && user.IsActive {
-		return &Candidate{
-			AssigneeID: user.ID,
-			Source:     "default",
-			Confidence: 1.0,
-			Reason:     "configured default assignee",
-		}, nil
+	if settings.DefaultAssigneeID == nil {
+		return nil, nil
 	}
-
-	users, err := r.store.ListUsers(ctx)
+	user, err := r.store.GetUserByID(ctx, *settings.DefaultAssigneeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("list fallback users: %w", err)
+		return nil, fmt.Errorf("load default assignee: %w", err)
 	}
-	for _, u := range users {
-		if u.IsActive {
-			return &Candidate{
-				AssigneeID: u.ID,
-				Source:     "default",
-				Confidence: 1.0,
-				Reason:     "fallback active user",
-			}, nil
-		}
+	if !user.IsActive || !user.HasAccountAccess(input.AccountID) {
+		return nil, nil
 	}
-	return nil, ErrNoAssigneeAvailable
+	return &Candidate{
+		AssigneeID: user.ID,
+		Source:     "default",
+		Confidence: 1.0,
+		Reason:     "configured default assignee for account " + input.AccountID,
+	}, nil
 }

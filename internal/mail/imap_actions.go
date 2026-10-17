@@ -21,11 +21,14 @@ type ActionJobStore interface {
 	FailIMAPJob(ctx context.Context, jobID uuid.UUID, attempts, maxAttempts int, errMsg string, nextRun time.Time) error
 }
 
+// AccountDialer returns an IMAP client for the given mail account ID.
+type AccountDialer func(ctx context.Context, accountID string) (IMAPClient, error)
+
 // IMAPActionWorker executes queued IMAP folder moves (Archive, Junk) and Sent folder APPENDs.
 type IMAPActionWorker struct {
 	store       ActionJobStore
 	attachments *storage.Store
-	dialer      func(ctx context.Context) (IMAPClient, error)
+	dialer      AccountDialer
 	wakeCh      <-chan struct{}
 	logger      *slog.Logger
 }
@@ -34,7 +37,7 @@ type IMAPActionWorker struct {
 func NewIMAPActionWorker(
 	store ActionJobStore,
 	attachments *storage.Store,
-	dialer func(ctx context.Context) (IMAPClient, error),
+	dialer AccountDialer,
 	wakeCh <-chan struct{},
 	logger *slog.Logger,
 ) *IMAPActionWorker {
@@ -97,9 +100,12 @@ func (w *IMAPActionWorker) ProcessPending(ctx context.Context) (int, error) {
 }
 
 func (w *IMAPActionWorker) executeJob(ctx context.Context, job sqlc.IMAPJob) error {
-	client, err := w.dialer(ctx)
+	if job.AccountID == "" {
+		return fmt.Errorf("job %s has no account id", job.ID)
+	}
+	client, err := w.dialer(ctx, job.AccountID)
 	if err != nil {
-		return fmt.Errorf("dial imap for job %s: %w", job.ID, err)
+		return fmt.Errorf("dial imap for job %s (account %s): %w", job.ID, job.AccountID, err)
 	}
 	defer func() { _ = client.Close() }()
 
@@ -124,6 +130,7 @@ func (w *IMAPActionWorker) executeJob(ctx context.Context, job sqlc.IMAPJob) err
 			slog.String("event_category", "data_change"),
 			slog.String("operation", "update"),
 			slog.String("resource_type", "imap_message_folder"),
+			slog.String("account_id", job.AccountID),
 			slog.String("email_id", job.EmailID.String()),
 			slog.String("job_type", job.JobType),
 			slog.String("target_mailbox", job.TargetMailbox),
@@ -153,6 +160,7 @@ func (w *IMAPActionWorker) executeJob(ctx context.Context, job sqlc.IMAPJob) err
 			slog.String("event_category", "data_change"),
 			slog.String("operation", "create"),
 			slog.String("resource_type", "imap_sent_copy"),
+			slog.String("account_id", job.AccountID),
 			slog.String("email_id", job.EmailID.String()),
 			slog.String("target_mailbox", job.TargetMailbox),
 		)

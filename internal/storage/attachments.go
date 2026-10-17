@@ -87,13 +87,29 @@ func (s *Store) Save(ctx context.Context, r io.Reader) (StoredBlob, error) {
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o750); err != nil {
 		return StoredBlob{}, fmt.Errorf("create attachment fanout dir: %w", err)
 	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return StoredBlob{}, fmt.Errorf("rename temp attachment to final path: %w", err)
+
+	// Content-addressed storage is idempotent: when the same bytes (for example an
+	// attachment delivered to several mail accounts) were already stored, reuse the
+	// existing blob instead of writing a second copy.
+	operation := "create"
+	if _, statErr := os.Stat(finalPath); statErr == nil {
+		operation = "reuse"
+		_ = os.Remove(tmpPath)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return StoredBlob{}, fmt.Errorf("stat attachment blob: %w", statErr)
+	} else if err := os.Rename(tmpPath, finalPath); err != nil {
+		// A concurrent writer may have created the same blob first.
+		if _, statErr := os.Stat(finalPath); statErr == nil {
+			operation = "reuse"
+			_ = os.Remove(tmpPath)
+		} else {
+			return StoredBlob{}, fmt.Errorf("rename temp attachment to final path: %w", err)
+		}
 	}
 
 	s.logger.InfoContext(ctx, "data_change",
 		slog.String("event_category", "data_change"),
-		slog.String("operation", "create"),
+		slog.String("operation", operation),
 		slog.String("resource_type", "attachment_blob"),
 		slog.String("sha256", digest),
 		slog.Int64("size_bytes", n),

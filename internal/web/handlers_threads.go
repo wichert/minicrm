@@ -20,6 +20,12 @@ import (
 	"github.com/wichert/minicrm/internal/workflow"
 )
 
+// AccountConfig describes a configured mail account for display and option lists.
+type AccountConfig struct {
+	ID   string
+	Name string
+}
+
 // HandlerStore defines the persistence operations required by the web Server handlers.
 type HandlerStore interface {
 	ListThreads(ctx context.Context, f sqlc.ListThreadsFilter) ([]sqlc.Thread, error)
@@ -34,7 +40,13 @@ type HandlerStore interface {
 	GetSystemSettings(ctx context.Context) (sqlc.SystemSettings, error)
 	UpsertSystemSettings(ctx context.Context, s sqlc.SystemSettings) (sqlc.SystemSettings, error)
 	ListAuditLogs(ctx context.Context, limit int) ([]sqlc.AuditLog, error)
+	GetAccountSettings(ctx context.Context, accountID string) (sqlc.AccountSettings, error)
+	ListAccountSettings(ctx context.Context) ([]sqlc.AccountSettings, error)
+	UpsertAccountSettings(ctx context.Context, s sqlc.AccountSettings) (sqlc.AccountSettings, error)
 }
+
+// ErrThreadNotFound is returned when a thread does not exist or is not accessible to the user.
+var ErrThreadNotFound = errors.New("thread not found")
 
 // Server holds dependencies for MiniCRM HTTP handlers.
 type Server struct {
@@ -44,6 +56,7 @@ type Server struct {
 	outbox      *mail.OutboxWorker
 	attachments *storage.Store
 	audit       *audit.Logger
+	accounts    []AccountConfig
 }
 
 // NewServer constructs a web Server.
@@ -54,6 +67,7 @@ func NewServer(
 	outbox *mail.OutboxWorker,
 	attachments *storage.Store,
 	auditLogger *audit.Logger,
+	accounts []AccountConfig,
 ) *Server {
 	return &Server{
 		store:       store,
@@ -62,7 +76,41 @@ func NewServer(
 		outbox:      outbox,
 		attachments: attachments,
 		audit:       auditLogger,
+		accounts:    accounts,
 	}
+}
+
+// accountName returns the display name of a configured mail account.
+func (s *Server) accountName(accountID string) string {
+	for _, a := range s.accounts {
+		if a.ID == accountID {
+			return a.Name
+		}
+	}
+	return accountID
+}
+
+// accessibleAccounts returns the configured accounts the user may access.
+func (s *Server) accessibleAccounts(user sqlc.User) []views.AccountOption {
+	out := make([]views.AccountOption, 0, len(s.accounts))
+	for _, a := range s.accounts {
+		if user.HasAccountAccess(a.ID) {
+			out = append(out, views.AccountOption{ID: a.ID, Name: a.Name})
+		}
+	}
+	return out
+}
+
+// loadAuthorizedThread loads a thread and verifies the user may access its mail account.
+func (s *Server) loadAuthorizedThread(ctx context.Context, user sqlc.User, threadID uuid.UUID) (sqlc.Thread, error) {
+	thread, err := s.store.GetThreadByID(ctx, threadID)
+	if err != nil {
+		return sqlc.Thread{}, ErrThreadNotFound
+	}
+	if !user.HasAccountAccess(thread.AccountID) {
+		return sqlc.Thread{}, ErrThreadNotFound
+	}
+	return thread, nil
 }
 
 // HandleListThreads renders the filterable thread inbox.
@@ -77,13 +125,27 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		statusFilter = &st
 	}
 
-	threads, err := s.store.ListThreads(ctx, sqlc.ListThreadsFilter{
-		Status: statusFilter,
-		Limit:  100,
-	})
-	if err != nil {
-		http.Error(w, "failed to list threads", http.StatusInternalServerError)
-		return
+	accountFilter := strings.TrimSpace(r.URL.Query().Get("account"))
+	var accountIDFilter *string
+	if accountFilter != "" && user.HasAccountAccess(accountFilter) {
+		accountIDFilter = &accountFilter
+	} else {
+		accountFilter = ""
+	}
+
+	var threads []sqlc.Thread
+	if len(user.AllowedAccounts) > 0 {
+		var err error
+		threads, err = s.store.ListThreads(ctx, sqlc.ListThreadsFilter{
+			Status:          statusFilter,
+			AccountID:       accountIDFilter,
+			AllowedAccounts: user.AllowedAccounts,
+			Limit:           100,
+		})
+		if err != nil {
+			http.Error(w, "failed to list threads", http.StatusInternalServerError)
+			return
+		}
 	}
 	users, _ := s.store.ListUsers(ctx)
 	userNames := make(map[uuid.UUID]string, len(users))
@@ -94,9 +156,14 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]views.ThreadSummaryItem, 0, len(threads))
 	for _, th := range threads {
+		assigneeName := ""
+		if th.AssigneeID != nil {
+			assigneeName = userNames[*th.AssigneeID]
+		}
 		items = append(items, views.ThreadSummaryItem{
 			Thread:        th,
-			AssigneeName:  userNames[th.AssigneeID],
+			AssigneeName:  assigneeName,
+			AccountName:   s.accountName(th.AccountID),
 			FormattedTime: views.FormatTimestamp(th.LastMessageAt, displayTZ),
 		})
 	}
@@ -106,11 +173,14 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	partial := r.Header.Get("HX-Request") == "true"
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := views.RenderInbox(w, views.InboxViewData{
-		CurrentUser:  user,
-		Threads:      items,
-		StatusFilter: statusStr,
-		Users:        users,
-		DisplayTZ:    displayTZ,
+		CurrentUser:   user,
+		Threads:       items,
+		StatusFilter:  statusStr,
+		Users:         users,
+		DisplayTZ:     displayTZ,
+		ShowAccountUI: user.HasMultipleAccounts(),
+		AccountFilter: accountFilter,
+		Accounts:      s.accessibleAccounts(user),
 	}, partial); err != nil {
 		http.Error(w, "template render error", http.StatusInternalServerError)
 	}
@@ -126,7 +196,7 @@ func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	thread, err := s.store.GetThreadByID(ctx, threadID)
+	thread, err := s.loadAuthorizedThread(ctx, user, threadID)
 	if err != nil {
 		http.Error(w, "thread not found", http.StatusNotFound)
 		return
@@ -164,12 +234,21 @@ func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	users, _ := s.store.ListUsers(ctx)
-	assigneeName := thread.AssigneeID.String()
-	for _, u := range users {
-		if u.ID == thread.AssigneeID {
-			assigneeName = u.DisplayName
-			break
+	allUsers, _ := s.store.ListUsers(ctx)
+	// Only users with access to the thread's account may be offered as assignees.
+	users := make([]sqlc.User, 0, len(allUsers))
+	for _, u := range allUsers {
+		if u.IsActive && u.HasAccountAccess(thread.AccountID) {
+			users = append(users, u)
+		}
+	}
+	assigneeName := ""
+	if thread.AssigneeID != nil {
+		for _, u := range allUsers {
+			if u.ID == *thread.AssigneeID {
+				assigneeName = u.DisplayName
+				break
+			}
 		}
 	}
 
@@ -185,6 +264,8 @@ func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 		Events:        eventViews,
 		Users:         users,
 		DisplayTZ:     displayTZ,
+		ShowAccountUI: user.HasMultipleAccounts(),
+		AccountName:   s.accountName(thread.AccountID),
 	}); err != nil {
 		http.Error(w, "template render error", http.StatusInternalServerError)
 	}
@@ -198,8 +279,9 @@ func (s *Server) HandleIsolatedEmailBody(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid email id", http.StatusBadRequest)
 		return
 	}
+	user, _ := auth.UserFromContext(ctx)
 	emailRec, err := s.store.GetEmailByID(ctx, emailID)
-	if err != nil {
+	if err != nil || !user.HasAccountAccess(emailRec.AccountID) {
 		http.Error(w, "email not found", http.StatusNotFound)
 		return
 	}
@@ -222,6 +304,10 @@ func (s *Server) HandleTransitionThread(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := parseBoundedForm(w, r, 64<<10); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.loadAuthorizedThread(ctx, user, threadID); err != nil {
+		http.Error(w, "thread not found", http.StatusNotFound)
 		return
 	}
 	targetStatus := sqlc.ThreadStatus(strings.TrimSpace(r.FormValue("status")))
@@ -249,12 +335,20 @@ func (s *Server) HandleAssignThread(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
+	if _, err := s.loadAuthorizedThread(ctx, user, threadID); err != nil {
+		http.Error(w, "thread not found", http.StatusNotFound)
+		return
+	}
 	assigneeID, err := uuid.Parse(strings.TrimSpace(r.FormValue("assignee_id")))
 	if err != nil {
 		http.Error(w, "invalid assignee_id", http.StatusBadRequest)
 		return
 	}
 	if err := s.workflow.Reassign(ctx, threadID, assigneeID, &user.ID); err != nil {
+		if errors.Is(err, workflow.ErrAssigneeNoAccountAccess) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
@@ -268,6 +362,10 @@ func (s *Server) HandleReopenMerge(w http.ResponseWriter, r *http.Request) {
 	threadID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid thread id", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.loadAuthorizedThread(ctx, user, threadID); err != nil {
+		http.Error(w, "thread not found", http.StatusNotFound)
 		return
 	}
 	reopenedID, err := s.workflow.ReopenAndMerge(ctx, threadID, &user.ID)
@@ -289,6 +387,10 @@ func (s *Server) HandleReplyThread(w http.ResponseWriter, r *http.Request) {
 	threadID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid thread id", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.loadAuthorizedThread(ctx, user, threadID); err != nil {
+		http.Error(w, "thread not found", http.StatusNotFound)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
@@ -340,8 +442,16 @@ func (s *Server) HandleDownloadAttachment(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid attachment id", http.StatusBadRequest)
 		return
 	}
+	user, _ := auth.UserFromContext(ctx)
 	att, err := s.store.GetAttachmentByID(ctx, attID)
 	if err != nil {
+		http.Error(w, "attachment not found", http.StatusNotFound)
+		return
+	}
+	// Attachments are only served when the user has access to the mail account of the
+	// email/thread the attachment belongs to, even when the blob is shared across accounts.
+	ownerEmail, err := s.store.GetEmailByID(ctx, att.EmailID)
+	if err != nil || !user.HasAccountAccess(ownerEmail.AccountID) {
 		http.Error(w, "attachment not found", http.StatusNotFound)
 		return
 	}

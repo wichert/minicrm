@@ -106,10 +106,13 @@ func TestComposeReplySMTPSendAndIMAPSentAppend(t *testing.T) {
 	outboxWorker := mail.NewOutboxWorker(
 		outboxStore,
 		attStore,
-		smtpTransport,
+		[]mail.AccountSenderConfig{{
+			AccountID:   "support",
+			FromAddress: "support@company.com",
+			FromName:    "MiniCRM Support",
+			Transport:   smtpTransport,
+		}},
 		auditLogger,
-		"support@company.com",
-		"MiniCRM Support",
 		"company.com",
 		nil,
 		nil,
@@ -117,23 +120,26 @@ func TestComposeReplySMTPSendAndIMAPSentAppend(t *testing.T) {
 	actionWorker := mail.NewIMAPActionWorker(
 		baseStore,
 		attStore,
-		func(_ context.Context) (mail.IMAPClient, error) { return imapSrv, nil },
+		func(_ context.Context, _ string) (mail.IMAPClient, error) { return imapSrv, nil },
 		nil,
 		nil,
 	)
 
 	ctx := context.Background()
+	assignee := baseStore.defaultUser.ID
 	thread, _ := baseStore.CreateThread(ctx, sqlc.Thread{
+		AccountID:         "support",
 		SubjectNormalized: "Billing Help",
 		SubjectDisplay:    "Billing Help",
 		Status:            sqlc.ThreadStatusNew,
-		AssigneeID:        baseStore.defaultUser.ID,
+		AssigneeID:        &assignee,
 		CustomerEmail:     "customer@client.com",
 		CustomerName:      "Customer",
 		LastMessageAt:     time.Now().UTC(),
 	})
 	_, _ = baseStore.CreateEmail(ctx, sqlc.Email{
 		ThreadID:      thread.ID,
+		AccountID:     "support",
 		Direction:     "inbound",
 		MessageID:     "orig-1@client.com",
 		ReferencesIDs: []string{"root-0@client.com"},
