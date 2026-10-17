@@ -3,8 +3,13 @@
 **MiniCRM** is a lightweight, self-contained email CRM built in Go. It connects to a shared IMAP/SMTP mailbox, links incoming and outgoing emails into conversation threads, assigns every thread to a team member, and tracks threads through a strict workflow (`new -> in-progress -> completed` or `new -> spam`).
 
 For detailed technical and security design documentation, see:
-- [`docs/architecture.md`](./docs/architecture.md) — System architecture, data model, IMAP/SMTP workers, threading, and HTML/HTTP security controls.
+- [`docs/architecture.md`](./docs/architecture.md) — System overview, component diagram, technology stack, and package layout.
 - [`docs/authentication.md`](./docs/authentication.md) — Production OAuth2/OIDC configuration, user provisioning flow, and local development with the dummy OIDC server (`cmd/dev-oidc`).
+- [`docs/imap.md`](./docs/imap.md) — IMAP & SMTP server requirements, `INBOX` synchronization, `Archive`/`Junk`/`Sent` folder lifecycle, and safe deletion from `Archive`.
+- [`docs/storage.md`](./docs/storage.md) — PostgreSQL schema, UTC `TIMESTAMPTZ` + `display_timezone`, immutable audit trail, structured query logging, and local disk attachment store.
+- [`docs/workflow-and-threading.md`](./docs/workflow-and-threading.md) — Reply linking, completed-thread **Reopen & Merge**, workflow state machine, and pluggable assignment engine.
+- [`docs/security.md`](./docs/security.md) — Defense-in-depth HTML sanitization, sandboxed `<iframe>` isolation, HTTP security headers, and CSRF protection.
+- [`docs/testing.md`](./docs/testing.md) — Unit, integration, and end-to-end (`e2e/`) test setup, `prek` + `golangci-lint`, and GitHub Actions CI.
 
 ---
 
