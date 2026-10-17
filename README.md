@@ -1,6 +1,8 @@
 # MiniCRM
 
-**MiniCRM** is a lightweight, self-contained email CRM built in Go. It connects to a shared IMAP/SMTP mailbox, links incoming and outgoing emails into conversation threads, assigns every thread to a team member, and tracks threads through a strict workflow (`new -> in-progress -> completed` or `new -> spam`).
+**MiniCRM** is a lightweight, self-contained email CRM built in Go. It connects to one or more shared IMAP/SMTP mailboxes (accounts), links incoming and outgoing emails into conversation threads, assigns threads to team members, and tracks them through a strict workflow (`new -> in-progress -> completed` or `new -> spam`).
+
+Each mail account is monitored and replied from independently: an email delivered to several configured accounts produces one thread per account, and users only see threads, email bodies, and attachments of the accounts their OIDC groups grant them access to.
 
 For detailed technical and security design documentation, see:
 - [`docs/architecture.md`](./docs/architecture.md) — System overview, component diagram, technology stack, and package layout.
@@ -15,17 +17,23 @@ For detailed technical and security design documentation, see:
 
 ## Features
 
-- **IMAP Ingestion & Folder Lifecycle**:
-  - Pulls incoming email from an IMAP server (`INBOX`) using basic `username + password` authentication.
+- **Multi-Account IMAP Ingestion & Folder Lifecycle**:
+  - Any number of mail accounts can be configured (`MINICRM_ACCOUNT_<N>_*`); each account has its own IMAP/SMTP credentials, IMAP polling worker, and `Junk`/`Archive`/`Sent` folder lifecycle.
+  - Pulls incoming email from each account's IMAP `INBOX` using basic `username + password` authentication.
   - Moves emails to the IMAP `Junk` folder when a thread is marked as `spam`.
   - Moves emails to the IMAP `Archive` folder when a thread is marked as `completed` (deleting emails from `Archive` on the mail server is safe and does not affect MiniCRM).
 - **SMTP Outbound & `Sent` Sync**:
-  - Sends replies via SMTP (`username + password` authentication), stores them in PostgreSQL, and `APPEND`s a copy to the IMAP `Sent` folder.
+  - Sends replies through the SMTP account that the thread was received on, stores them in PostgreSQL, and `APPEND`s a copy to that account's IMAP `Sent` folder.
+- **OIDC-Driven Account Access Control**:
+  - Each account maps an OIDC group claim value (`MINICRM_ACCOUNT_<N>_OIDC_GROUP`) to the account; users only see threads, email bodies, and attachments of the accounts their groups grant.
+  - Identical attachments delivered to multiple accounts are stored once on disk (content-addressed, SHA-256).
+  - The UI shows an account badge/column and account filter for users with access to more than one account, and hides them for single-account users.
 - **Reply Threading & Completed-Thread Reopen**:
   - Links replies via `In-Reply-To` and `References` headers, with a fallback to normalized subject + sender matching.
   - When a new reply arrives for an already `completed` thread, MiniCRM opens a new thread referencing the completed thread and offers a one-click **"Reopen & Merge"** action in the UI.
-- **Mandatory Assignment**:
-  - Every thread is assigned to a user, with a configurable default assignee and a pluggable resolver pipeline ready for future rule-based or ML assignment.
+- **Assignment**:
+  - Each account has its own configurable default assignee. When no default assignee is configured (or the configured one is inactive or lacks access), new threads stay **Unassigned** and are picked up automatically once a default assignee is set, or by an operator using **Take Thread**/assign, or by replying to the thread.
+  - Neither the UI nor the backend allows assigning a thread to a user without access to the thread's mail account.
 - **OAuth2 / OIDC Authentication & Audit Trail**:
   - Authenticates operators against an existing OAuth2/OIDC identity server (Authorization Code + PKCE) and supports pre-creating users before their first login.
   - Logs all user/auth/settings events, thread transitions, and data reads/mutations (`log/slog`).
@@ -52,28 +60,65 @@ MiniCRM is configured via environment variables:
 | `MINICRM_HTTP_ADDR` | No | `:8080` | HTTP listen address |
 | `MINICRM_DATABASE_URL` | **Yes** | — | PostgreSQL connection URL |
 | `MINICRM_ATTACHMENTS_DIR` | No | `./data/attachments` | Local directory for content-addressed attachments |
-| `MINICRM_BOOTSTRAP_ADMIN_EMAIL` | **Yes** | — | Email of the initial admin user & default assignee |
+| `MINICRM_BOOTSTRAP_ADMIN_EMAIL` | **Yes** | — | Email of the initial admin user (granted access to all configured accounts) |
 | `MINICRM_BOOTSTRAP_ADMIN_NAME` | No | `Admin` | Display name of the initial bootstrap admin |
 | `MINICRM_DISPLAY_TIMEZONE` | No | `UTC` | Initial IANA display timezone (e.g. `Europe/Amsterdam`) |
 | `MINICRM_MAIL_DOMAIN` | No | `minicrm.local` | Domain used when generating outbound `Message-ID` headers |
 | `MINICRM_COOKIE_SECURE` | No | `true` | Set `Secure` attribute and `__Host-` prefix on session cookies |
-| `MINICRM_IMAP_HOST` | **Yes** | — | IMAP server hostname |
-| `MINICRM_IMAP_PORT` | No | `993` | IMAP server port |
-| `MINICRM_IMAP_USERNAME` | **Yes** | — | IMAP username |
-| `MINICRM_IMAP_PASSWORD` | **Yes** | — | IMAP password |
-| `MINICRM_IMAP_IMPLICIT_TLS` | No | `true` | Use implicit TLS (`true`) or STARTTLS (`false`) |
-| `MINICRM_IMAP_POLL_INTERVAL` | No | `2m` | Polling interval for `INBOX` synchronization |
-| `MINICRM_SMTP_HOST` | **Yes** | — | SMTP server hostname |
-| `MINICRM_SMTP_PORT` | No | `587` | SMTP server port |
-| `MINICRM_SMTP_USERNAME` | **Yes** | — | SMTP username |
-| `MINICRM_SMTP_PASSWORD` | **Yes** | — | SMTP password |
-| `MINICRM_SMTP_FROM_ADDRESS` | **Yes** | — | Sender email address for outbound replies |
-| `MINICRM_SMTP_FROM_NAME` | No | `MiniCRM Support` | Sender display name for outbound replies |
-| `MINICRM_SMTP_TLS_MODE` | No | `starttls` | SMTP TLS mode: `starttls`, `implicit`, or `none` |
-| `MINICRM_OIDC_ISSUER_URL` | **Yes** | — | OIDC issuer URL (must serve `.well-known/openid-configuration`) |
+| `MINICRM_OIDC_GROUPS_CLAIM` | No | `groups` | ID token claim carrying the user's group/role memberships |
+| `MINICRM_OIDC_SCOPES` | No | `openid,profile,email` | Comma-separated scopes requested from the IdP; must include `openid`. Add `groups`/`groups_name` when the IdP (e.g. Kanidm) only emits groups on request |
+| `MINICRM_ACCOUNT_<N>_ID` | **Yes** | — | Unique account identifier for account `N` (e.g. `support`). Accounts are numbered from `1` upwards until an `_ID` is absent |
+| `MINICRM_ACCOUNT_<N>_NAME` | **Yes** | — | Human-readable account name shown in the UI |
+| `MINICRM_ACCOUNT_<N>_OIDC_GROUP` | **Yes** | — | OIDC group/role claim value granting access to this account |
+| `MINICRM_ACCOUNT_<N>_IMAP_HOST` | **Yes** | — | IMAP server hostname |
+| `MINICRM_ACCOUNT_<N>_IMAP_PORT` | No | `993` | IMAP server port |
+| `MINICRM_ACCOUNT_<N>_IMAP_USERNAME` | **Yes** | — | IMAP username |
+| `MINICRM_ACCOUNT_<N>_IMAP_PASSWORD` | **Yes** | — | IMAP password |
+| `MINICRM_ACCOUNT_<N>_IMAP_IMPLICIT_TLS` | No | `true` | Use implicit TLS (`true`) or STARTTLS (`false`) |
+| `MINICRM_ACCOUNT_<N>_IMAP_POLL_INTERVAL` | No | `2m` | Polling interval for this account's `INBOX` synchronization |
+| `MINICRM_ACCOUNT_<N>_SMTP_HOST` | **Yes** | — | SMTP server hostname |
+| `MINICRM_ACCOUNT_<N>_SMTP_PORT` | No | `587` | SMTP server port |
+| `MINICRM_ACCOUNT_<N>_SMTP_USERNAME` | **Yes** | — | SMTP username |
+| `MINICRM_ACCOUNT_<N>_SMTP_PASSWORD` | **Yes** | — | SMTP password |
+| `MINICRM_ACCOUNT_<N>_SMTP_FROM_ADDRESS` | **Yes** | — | Sender email address for outbound replies |
+| `MINICRM_ACCOUNT_<N>_SMTP_FROM_NAME` | No | `MiniCRM Support` | Sender display name for outbound replies |
+| `MINICRM_ACCOUNT_<N>_SMTP_TLS_MODE` | No | `starttls` | SMTP TLS mode: `starttls`, `implicit`, or `none` |
+| `MINICRM_OIDC_ISSUER_URL` | **Yes** | — | OIDC issuer URL (must serve `.well-known/openid-configuration`). For Kanidm this is `https://<host>/oauth2/openid/<client>` |
 | `MINICRM_OIDC_CLIENT_ID` | **Yes** | — | OAuth2 client ID |
 | `MINICRM_OIDC_CLIENT_SECRET` | **Yes** | — | OAuth2 client secret |
 | `MINICRM_OIDC_REDIRECT_URL` | **Yes** | — | OIDC callback URL (e.g. `https://crm.example.com/auth/callback`) |
+
+### Example: Two Mail Accounts
+
+```bash
+export MINICRM_OIDC_GROUPS_CLAIM=groups
+
+# Account 1: Support
+export MINICRM_ACCOUNT_1_ID=support
+export MINICRM_ACCOUNT_1_NAME="Customer Support"
+export MINICRM_ACCOUNT_1_OIDC_GROUP=crm-support
+export MINICRM_ACCOUNT_1_IMAP_HOST=imap.example.com
+export MINICRM_ACCOUNT_1_IMAP_USERNAME=support@example.com
+export MINICRM_ACCOUNT_1_IMAP_PASSWORD=...
+export MINICRM_ACCOUNT_1_SMTP_HOST=smtp.example.com
+export MINICRM_ACCOUNT_1_SMTP_USERNAME=support@example.com
+export MINICRM_ACCOUNT_1_SMTP_PASSWORD=...
+export MINICRM_ACCOUNT_1_SMTP_FROM_ADDRESS=support@example.com
+
+# Account 2: Sales
+export MINICRM_ACCOUNT_2_ID=sales
+export MINICRM_ACCOUNT_2_NAME="Sales"
+export MINICRM_ACCOUNT_2_OIDC_GROUP=crm-sales
+export MINICRM_ACCOUNT_2_IMAP_HOST=imap.example.com
+export MINICRM_ACCOUNT_2_IMAP_USERNAME=sales@example.com
+export MINICRM_ACCOUNT_2_IMAP_PASSWORD=...
+export MINICRM_ACCOUNT_2_SMTP_HOST=smtp.example.com
+export MINICRM_ACCOUNT_2_SMTP_USERNAME=sales@example.com
+export MINICRM_ACCOUNT_2_SMTP_PASSWORD=...
+export MINICRM_ACCOUNT_2_SMTP_FROM_ADDRESS=sales@example.com
+```
+
+A user whose ID token contains `"groups": ["crm-support"]` may access the `support` account only; `["crm-support", "crm-sales"]` grants both. Users matching no configured account group are refused at login. Adding a third account later only requires `MINICRM_ACCOUNT_3_*` variables.
 
 ---
 
@@ -96,7 +141,8 @@ For local development and testing without an external OIDC identity server, Mini
 go run ./cmd/dev-oidc \
   -addr 127.0.0.1:9000 \
   -email admin@example.com \
-  -name "Dev Admin"
+  -name "Dev Admin" \
+  -groups "crm-support,crm-sales"
 
 # 2. Point MiniCRM at the dummy OIDC server
 export MINICRM_COOKIE_SECURE=false
@@ -116,6 +162,7 @@ go run ./cmd/minicrm
 - `-sub` / `DEV_OIDC_SUB` (default `dev-admin-sub`)
 - `-email` / `DEV_OIDC_EMAIL` (default `admin@example.com`)
 - `-name` / `DEV_OIDC_NAME` (default `Dev Admin`)
+- `-groups` / `DEV_OIDC_GROUPS` (comma-separated `groups` claim values, e.g. `crm-support,crm-sales`)
 
 ---
 
@@ -124,7 +171,7 @@ go run ./cmd/minicrm
 1. **Sign In (`/auth/login`)**:
    - Open `http://localhost:8080/threads` in your browser. You will be redirected to your OAuth2/OIDC identity provider to sign in.
 2. **Working the Thread Inbox (`/threads`)**:
-   - Filter threads by workflow state (`new`, `in_progress`, `completed`, `spam`).
+   - Filter threads by workflow state (`new`, `in_progress`, `completed`, `spam`) and, for users with access to multiple accounts, by mail account.
    - Click any thread to view its chronological messages, download attachments, or reassign it to another team member.
 3. **Workflow Transitions & Replies (`/threads/{id}`)**:
    - **`new -> in_progress`**: Click **Start Progress** or send a reply using the **Send Reply** form (sending the first reply automatically transitions a `new` thread to `in_progress`).

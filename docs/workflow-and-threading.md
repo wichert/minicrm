@@ -81,10 +81,14 @@ type Resolver interface {
 ```
 
 1. **V1 (`DefaultAssigneeResolver`)**:
-   - Reads `system_settings.default_assignee_id`, verifies the user is active (`is_active = true`), and returns `Candidate{AssigneeID: id, Source: "default", Confidence: 1.0}`.
-   - If the configured default user was deactivated, falls back to the first active user.
-2. **Manual Reassignment (`workflow.Service.Reassign`)**:
+   - Reads `account_settings.default_assignee_id` for the account the thread belongs to, verifies the user is active (`is_active = true`) **and** has access to that account, and returns `Candidate{AssigneeID: id, Source: "default", Confidence: 1.0}`.
+   - If the account has no settings row, no default assignee, or the assignee is inactive/lacks account access, the resolver returns no candidate. The thread is then created **unassigned** (`assignee_id = NULL`, `assignment_source = 'unassigned'`).
+2. **Unassigned Threads**:
+   - Setting a default assignee in `/settings` calls `workflow.Service.AssignUnassignedThreadsForAccount`, which assigns all waiting `new`/`in_progress` threads of that account and logs an `assigned` event per thread.
+   - Operators can **Take Thread** (assign to themselves), assign any user with access to the thread's account, or simply reply (which auto-assigns the thread to the replying operator).
+3. **Manual Reassignment (`workflow.Service.Reassign`)**:
    - Operators can reassign any thread via `/threads/{id}/assign`.
-   - Sets `threads.assignment_source = 'manual'` and logs `reassigned` (with `old_value` and `new_value` JSON) in `thread_events`.
-3. **Extending in V2 (Rules & ML Prediction)**:
+   - The backend enforces that the target user is active **and** has access to the thread's account; otherwise `ErrAssigneeNoAccountAccess` is returned (`422 Unprocessable Entity`). The UI's assignee dropdown only lists users with access to the thread's account.
+   - Sets `threads.assignment_source = 'manual'` and logs `assigned` (previously unassigned) or `reassigned` (with `old_value` and `new_value` JSON) in `thread_events`.
+4. **Extending in V2 (Rules & ML Prediction)**:
    - Because V1 stores normalized subjects, sender addresses, body text, `assignment_source`, and all manual `reassigned` events in `thread_events`, future versions can prepend a `RuleBasedResolver` and `MLPredictorResolver` ahead of `DefaultAssigneeResolver` in `cmd/minicrm/main.go` without altering the database schema or ingestion worker.

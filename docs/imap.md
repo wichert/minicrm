@@ -6,7 +6,9 @@ This document specifies the requirements MiniCRM places on the mail server and d
 
 ## 1. Mail Server Requirements
 
-MiniCRM connects to a single shared mailbox (e.g., `support@company.com`) over standard **IMAP** and **SMTP** protocols.
+MiniCRM connects to one or more shared mailboxes (accounts) over standard **IMAP** and **SMTP** protocols. Accounts are configured via numbered `MINICRM_ACCOUNT_<N>_*` environment variables (`ID`, `NAME`, `OIDC_GROUP`, `IMAP_*`, `SMTP_*`). Each account has its own `INBOX` synchronization worker, its own `imap_sync_state` watermark (`PRIMARY KEY (account_id, mailbox)`), its own outbound SMTP identity, and its own `Archive`/`Junk`/`Sent` folder lifecycle.
+
+Because `emails` uniqueness is `UNIQUE (account_id, message_id)` and thread matching is scoped by `account_id`, an email delivered to two accounts is ingested into both and produces two independent threads (one per account).
 
 ### IMAP Server Requirements
 - **Protocol**: IMAPv4rev1 or IMAPv4rev2 (`github.com/emersion/go-imap/v2`).

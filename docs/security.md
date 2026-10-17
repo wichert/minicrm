@@ -67,6 +67,9 @@ In addition, `/emails/{id}/body` embeds a `<meta http-equiv="Content-Security-Po
 
 ## 4. Layer 4: Attachment Downloads, CSRF & Request Bounds
 
+- **Account-Scoped Attachment Download Authorization**:
+  - `/attachments/{id}/download` resolves `attachment -> email -> account_id` and requires the signed-in user to have access to that mail account (`sqlc.User.HasAccountAccess`), returning `404 Not Found` otherwise. This holds even when the same content-addressed blob is shared by attachments of several accounts.
+  - `/emails/{id}/body` performs the same account-access check before rendering the isolated email body.
 - **Attachment Download Hardening (`SetAttachmentDownloadHeaders`)**:
   - `/attachments/{id}/download` sets:
     - `Content-Disposition: attachment; filename*=UTF-8''<url-escaped-name>`

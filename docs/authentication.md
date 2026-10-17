@@ -13,13 +13,16 @@ MiniCRM uses the **OAuth2 Authorization Code Flow with PKCE (`S256`)** and **Ope
 Your OIDC identity server (e.g., Keycloak, Dex, Okta, Auth0, Entra ID, Authelia, Authentik) must:
 
 1. Serve an OIDC Discovery document at `{MINICRM_OIDC_ISSUER_URL}/.well-known/openid-configuration`.
-2. Publish its public signing keys at the `jwks_uri` advertised in the discovery document (`RS256` supported out of the box).
+2. Publish its public signing keys at the `jwks_uri` advertised in the discovery document (`RS256` and `ES256` are both supported).
 3. Support the `authorization_code` grant type and PKCE (`code_challenge_method=S256`).
 4. Include the following claims in the signed `id_token` when scopes `openid profile email` are requested:
    - `sub` (unique subject identifier for the user)
-   - `email` (email address, used to match pre-created users or bootstrap admin)
+   - `email` (email address, used to match pre-created users or bootstrap admin). Login fails if this claim is absent.
    - `name` (optional display name; falls back to `email` if omitted)
    - `nonce` (echoed from the `/authorize` request)
+5. Include the group/role memberships claim named by `MINICRM_OIDC_GROUPS_CLAIM` (default `groups`) when the corresponding scope is requested. This claim decides which mail accounts a user may access (see [OIDC Group-Based Account Access](#oidc-group-based-account-access)).
+
+> Some providers (e.g. Kanidm) only emit the groups claim when a dedicated scope is requested. Use `MINICRM_OIDC_SCOPES` to request it — see [Kanidm](#5-kanidm-setup).
 
 ### Registering MiniCRM as an OIDC Client
 
@@ -29,7 +32,8 @@ In your identity server, create a confidential OAuth2/OIDC client with:
 - **Response Type**: `code`
 - **PKCE**: Required / `S256`
 - **Redirect URI**: `https://<your-minicrm-domain>/auth/callback`
-- **Scopes**: `openid`, `profile`, `email`
+- **Scopes**: `openid`, `profile`, `email`, plus your groups scope (e.g. `groups` or `groups_name`)
+- **Token signing**: `RS256` or `ES256` (MiniCRM verifies both via OIDC discovery / JWKS)
 
 ### MiniCRM OIDC Environment Variables
 
@@ -39,7 +43,10 @@ In your identity server, create a confidential OAuth2/OIDC client with:
 | `MINICRM_OIDC_CLIENT_ID` | **Yes** | — | OAuth2 Client ID registered in the IdP. |
 | `MINICRM_OIDC_CLIENT_SECRET` | **Yes** | — | OAuth2 Client Secret registered in the IdP. |
 | `MINICRM_OIDC_REDIRECT_URL` | **Yes** | — | Full callback URL pointing to MiniCRM's `/auth/callback` endpoint. |
-| `MINICRM_BOOTSTRAP_ADMIN_EMAIL` | **Yes** | — | Email address of the initial admin user and default assignee seeded on startup. |
+| `MINICRM_OIDC_GROUPS_CLAIM` | No | `groups` | ID token claim holding the user's group/role memberships; used to derive mail account access. |
+| `MINICRM_OIDC_SCOPES` | No | `openid,profile,email` | Comma-separated scopes requested from the IdP. Must include `openid`. Add `groups`/`groups_name` (Kanidm) so group membership is returned. |
+| `MINICRM_ACCOUNT_<N>_OIDC_GROUP` | **Yes** (per account) | — | Group/role claim value that grants access to mail account `N`. See [OIDC Group-Based Account Access](#oidc-group-based-account-access). |
+| `MINICRM_BOOTSTRAP_ADMIN_EMAIL` | **Yes** | — | Email address of the initial admin user seeded on startup (granted access to all configured accounts). |
 | `MINICRM_BOOTSTRAP_ADMIN_NAME` | No | `Admin` | Display name for the seeded bootstrap admin user. |
 | `MINICRM_COOKIE_SECURE` | No | `true` | When `true` (default), session cookies use the `__Host-minicrm_session` name, `Secure`, `HttpOnly`, and `SameSite=Lax`. Set to `false` only for plain `http://localhost` development. |
 
@@ -128,6 +135,7 @@ Because `dev-oidc` implements the real protocol rather than bypassing authentica
 | `-sub` | `DEV_OIDC_SUB` | `dev-admin-sub` | Fixed `sub` claim returned in the signed ID Token. |
 | `-email` | `DEV_OIDC_EMAIL` | `admin@example.com` | Fixed `email` claim returned in the signed ID Token. |
 | `-name` | `DEV_OIDC_NAME` | `Dev Admin` | Fixed `name` claim returned in the signed ID Token. |
+| `-groups` | `DEV_OIDC_GROUPS` | *(empty)* | Comma-separated fixed `groups` claim values, e.g. `crm-support,crm-sales`. |
 
 ### Step-by-Step Local Development Example
 
@@ -179,3 +187,200 @@ MiniCRM tests the dummy IDM and OIDC integration at two levels:
    - In GitHub Actions CI (`e2e` job), `./bin/dev-oidc` (`127.0.0.1:9000`) and `./bin/minicrm` (`127.0.0.1:8080`) are launched as separate OS processes alongside a `postgres:16-alpine` container.
    - `MINICRM_E2E_BASE_URL=http://127.0.0.1:8080 go test -v -race ./e2e/...` exercises the full browser redirect chain using an HTTP cookie jar, verifies `/threads` and `/settings` access, and queries PostgreSQL `audit_logs` to confirm the `user_login` audit trail entry was recorded.
    - When run locally without `MINICRM_E2E_BASE_URL` (`go test ./e2e/...`), the test automatically boots self-contained `devidm` and `minicrm` HTTP servers on ephemeral ports so `go test ./...` works with zero external setup.
+
+---
+
+## 5. OIDC Group-Based Account Access
+
+MiniCRM supports multiple mail accounts (`MINICRM_ACCOUNT_<N>_*`). Each account declares the OIDC group/role value that grants access to it, so no separate MiniCRM permission database has to be maintained:
+
+```env
+MINICRM_OIDC_GROUPS_CLAIM=groups
+MINICRM_OIDC_SCOPES=openid,profile,email,groups
+
+MINICRM_ACCOUNT_1_ID=support
+MINICRM_ACCOUNT_1_NAME="Customer Support"
+MINICRM_ACCOUNT_1_OIDC_GROUP=crm-support
+
+MINICRM_ACCOUNT_2_ID=sales
+MINICRM_ACCOUNT_2_NAME="Sales"
+MINICRM_ACCOUNT_2_OIDC_GROUP=crm-sales
+```
+
+**How the mapping works.** During the code exchange (`OIDCProvider.ExchangeAndVerify`), the ID token claim named by `MINICRM_OIDC_GROUPS_CLAIM` is read into `VerifiedIdentity.Groups` (a JSON array of strings, or a single string). On every login (`auth.Service.ResolveAndLoginUser`), each configured account whose `OIDC_GROUP` appears in that list is added to the user's `allowed_accounts`, which is persisted on `users` and refreshed on each login (changes are recorded in `audit_logs` as `user_updated`). Comparison is exact string matching, case-sensitive.
+
+A user with `"groups": ["crm-support"]` can access `support` only; `["crm-support", "crm-sales"]` grants both. `OIDC_GROUP` values must match **exactly** what your provider puts in the claim — bare group names for some providers, `group@domain` SPNs or even UUIDs for others (see [Kanidm](#6-kanidm-setup) and [Other Providers](#7-other-providers)).
+
+- Users matching **no** configured account group are refused at login with `403 Forbidden` and a `user_login_failed` audit event (`reason: "no_account_access"`).
+- The bootstrap admin is granted access to all configured accounts.
+- Admins can pre-create users and select their initial account access in `/settings`.
+- `sqlc.User.HasAccountAccess(accountID)` and `sqlc.User.HasMultipleAccounts()` drive all thread, email body (`/emails/{id}/body`), and attachment (`/attachments/{id}/download`) authorization checks, as well as whether the account filter/column/badge is shown in the UI.
+
+---
+
+## 6. Kanidm Setup
+
+[Kanidm](https://kanidm.github.io/kanidm/stable/) is a modern identity management platform with a standards-compliant OIDC provider. MiniCRM works with Kanidm, but there are four Kanidm-specific details to get right:
+
+1. **The issuer URL is client-specific.** Kanidm uses per-client issuer URLs and signing keys:
+   `https://<kanidm-host>/oauth2/openid/<client-name>`. This — not the site root — must be `MINICRM_OIDC_ISSUER_URL`.
+2. **Kanidm signs ID tokens with `ES256` by default.** MiniCRM verifies it automatically from the discovery document; do **not** run `warning-enable-legacy-crypto` unless you have another reason to.
+3. **Kanidm only returns the groups claim when a groups scope is requested.** Request `groups_name` (bare group names, e.g. `crm_support`) or `groups` (group SPNs *and* UUIDs, e.g. `crm_support@idm.example.com`). Set `MINICRM_OIDC_SCOPES` accordingly.
+4. **Kanidm requires a scope map** covering every scope MiniCRM requests, including `openid`. Users must be members of a scope-mapped group or Kanidm rejects the authorization before MiniCRM is even reached.
+
+### 6.1 Prerequisites
+
+- A running Kanidm server, reachable over HTTPS by both browsers and the MiniCRM server.
+- An administrative session (`kanidm login --name idm_admin`); members of `idm_admins` / `idm_oauth2_admins` can manage OAuth2 clients.
+- A TLS certificate the MiniCRM binary trusts (Kanidm uses its own CA by default — install it in the host trust store, or use a publicly trusted certificate).
+
+### 6.2 Create the groups and users
+
+Create one Kanidm group per mail account, and one group for everyone who may sign in to MiniCRM at all (Kanidm requires a scope map for any user who authorizes the client):
+
+```bash
+kanidm group create crm_users
+kanidm group create crm_support
+kanidm group create crm_sales
+
+# Users (repeat per operator); a mail address is required for the `email` claim.
+kanidm person create alice "Alice Agent"
+kanidm person update alice --mail alice@example.com
+kanidm person credential create-reset-token alice   # let the user set a password/passkey
+
+# Membership: crm_users = can sign in; crm_support / crm_sales = account access.
+kanidm group add-members crm_users alice
+kanidm group add-members crm_support alice
+```
+
+> Users without a `--mail` value get no `email` claim, and MiniCRM login fails with a 401 (`oidc id_token missing email claim`). Set the mail attribute for every operator.
+
+### 6.3 Create the OAuth2 client
+
+```bash
+kanidm system oauth2 create minicrm "MiniCRM" https://crm.example.com
+kanidm system oauth2 add-redirect-url minicrm https://crm.example.com/auth/callback
+
+# Scope map: any member of crm_users may obtain these scopes.
+# `groups_name` returns bare group names in the `groups` claim.
+kanidm system oauth2 update-scope-map minicrm crm_users openid profile email groups_name
+```
+
+The scope map is an allow-list for *every* requested scope: if MiniCRM requests a scope that is missing here, the authorization is refused. Keep `MINICRM_OIDC_SCOPES` and this command in sync.
+
+Optionally, grant a superset of scopes to a subset of users with `update-sup-scope-map`:
+
+```bash
+kanidm system oauth2 update-sup-scope-map minicrm crm_support groups_name
+```
+
+Retrieve the client secret:
+
+```bash
+kanidm system oauth2 show-basic-secret minicrm
+```
+
+Verify the effective configuration:
+
+```bash
+kanidm system oauth2 get minicrm
+```
+
+### 6.4 Configure MiniCRM
+
+`MINICRM_ACCOUNT_<N>_OIDC_GROUP` must match the **exact strings Kanidm emits** in the claim:
+
+- With the `groups_name` scope, the claim holds bare group names → use `crm_support`.
+- With the `groups` scope, the claim holds SPNs and UUIDs → use `crm_support@idm.example.com`.
+
+The safest choice is `groups_name`: the claim then contains the Kanidm group `name` attribute, which by convention uses lowercase letters, digits and `_` (e.g. `crm_support`).
+
+```env
+# Client-specific issuer URL — not the Kanidm site root.
+MINICRM_OIDC_ISSUER_URL=https://idm.example.com/oauth2/openid/minicrm
+MINICRM_OIDC_CLIENT_ID=minicrm
+MINICRM_OIDC_CLIENT_SECRET=<output of show-basic-secret>
+MINICRM_OIDC_REDIRECT_URL=https://crm.example.com/auth/callback
+
+# Kanidm needs the groups_name scope to emit group membership.
+MINICRM_OIDC_GROUPS_CLAIM=groups
+MINICRM_OIDC_SCOPES=openid,profile,email,groups_name
+
+MINICRM_BOOTSTRAP_ADMIN_EMAIL=alice@example.com
+MINICRM_BOOTSTRAP_ADMIN_NAME="Alice Agent"
+
+MINICRM_ACCOUNT_1_ID=support
+MINICRM_ACCOUNT_1_NAME="Customer Support"
+MINICRM_ACCOUNT_1_OIDC_GROUP=crm_support
+# ... IMAP/SMTP settings for account 1 ...
+
+MINICRM_ACCOUNT_2_ID=sales
+MINICRM_ACCOUNT_2_NAME="Sales"
+MINICRM_ACCOUNT_2_OIDC_GROUP=crm_sales
+# ... IMAP/SMTP settings for account 2 ...
+```
+
+`MINICRM_BOOTSTRAP_ADMIN_EMAIL` must be the address of a Kanidm person that also has the `mail` attribute set, otherwise the bootstrap admin is created but can never log in.
+
+### 6.5 Using a custom claim instead of `groups`
+
+If you prefer clean, account-oriented values (and to avoid coupling MiniCRM configuration to Kanidm group names), map a dedicated claim:
+
+```bash
+kanidm system oauth2 update-claim-map minicrm minicrm_accounts crm_support support
+kanidm system oauth2 update-claim-map minicrm minicrm_accounts crm_sales sales
+kanidm system oauth2 update-claim-map-join minicrm minicrm_accounts array
+```
+
+Then:
+
+```env
+MINICRM_OIDC_GROUPS_CLAIM=minicrm_accounts
+MINICRM_ACCOUNT_1_OIDC_GROUP=support
+MINICRM_ACCOUNT_2_OIDC_GROUP=sales
+```
+
+Each group may contribute one or more values, and values from several groups are merged into the array. Do **not** use `csv` or `ssv` joins — MiniCRM expects a JSON array (or a single string), and `array` is Kanidm's default.
+
+> **Verify this first.** Custom claims are only emitted when the client is granted a groups-related scope, so keep the `groups_name` (or `groups`) scope in both the scope map and `MINICRM_OIDC_SCOPES` while using a claim map. Log in once and confirm the resolved access in PostgreSQL (`SELECT email, allowed_accounts FROM users;`); an empty array means the claim was not present, in which case fall back to the `groups` claim (section 6.4).
+
+### 6.6 Verify the setup
+
+1. Inspect the discovery document to confirm the issuer matches your configuration:
+   ```bash
+   curl -s https://idm.example.com/oauth2/openid/minicrm/.well-known/openid-configuration | jq '{issuer, authorization_endpoint, token_endpoint, jwks_uri, id_token_signing_alg_values_supported, code_challenge_methods_supported}'
+   ```
+   `issuer` must equal `MINICRM_OIDC_ISSUER_URL` exactly (no trailing slash).
+2. Start MiniCRM and open `/threads`. You are redirected to Kanidm, which shows a consent prompt for the requested scopes.
+3. After signing in, MiniCRM shows only the threads of the accounts your Kanidm groups grant. A user in `crm_support` only must not see `sales` threads; the account filter/column is hidden for them.
+4. Confirm access was recorded: the `audit_logs` table contains `user_login` and (when groups changed) `user_updated` events, and `users.allowed_accounts` lists the resolved account IDs:
+   ```sql
+   SELECT email, allowed_accounts FROM users ORDER BY email;
+   ```
+
+### 6.7 Troubleshooting
+
+| Symptom | Cause & fix |
+|---|---|
+| `403 Forbidden` at `/auth/callback`, audit event `user_login_failed` with `reason: "no_account_access"` | The groups claim is missing or the values do not match. Check `MINICRM_OIDC_SCOPES` includes `groups_name` (or `groups`), that `update-scope-map` grants that scope, and that `MINICRM_ACCOUNT_<N>_OIDC_GROUP` matches the emitted string exactly (bare name vs `group@domain`). |
+| `401 Unauthorized` at callback, log `oidc id_token missing email claim` | The Kanidm person has no `mail` attribute (`kanidm person update <user> --mail ...`). |
+| Kanidm shows "Invalid request" / scope error | MiniCRM requested a scope not present in a scope map. Align `MINICRM_OIDC_SCOPES` with `update-scope-map minicrm <group> <scopes...>`. |
+| `failed to discover oidc provider` on startup | `MINICRM_OIDC_ISSUER_URL` points at the Kanidm root instead of `https://<host>/oauth2/openid/<client>`, or the host does not trust Kanidm's TLS CA. |
+| `x509: certificate signed by unknown authority` | Install Kanidm's CA into the MiniCRM host trust store (or use a publicly trusted certificate). |
+| Login loops back to Kanidm, then `invalid oauth2 state` | The redirect URI configured in Kanidm (`add-redirect-url`) differs from `MINICRM_OIDC_REDIRECT_URL` (scheme/host/port/path must match exactly), so the session cookie is not returned. |
+| Changes to group membership have no effect | `allowed_accounts` is refreshed at login only. Have the user sign out and in again; effective scopes may also be cached in the existing Kanidm session. |
+| Users are prompted for consent every time scopes change | Expected OIDC behaviour. In a governed enterprise deployment you may disable the prompt with `kanidm system oauth2 disable-consent-prompt minicrm`. |
+
+---
+
+## 7. Other Providers
+
+Anything that supports OIDC Discovery, `authorization_code`, PKCE `S256`, and either `RS256` or `ES256` works without MiniCRM-specific code. Notable configuration points:
+
+| Provider | Issuer URL | Groups claim | Notes |
+|---|---|---|---|
+| Keycloak | `https://<host>/realms/<realm>` | `groups` (needs a group-membership mapper) | Add a "Group Membership" client scope/mapper; disable the full group path if you want bare names. |
+| Dex | `https://<host>/dex` | `groups` | Enable the `groups` claim in the static client config. |
+| Authentik | `https://<host>/application/o/<slug>/` | `groups` | Add a scope mapping that emits `groups`. |
+| Entra ID | `https://login.microsoftonline.com/<tenant>/v2.0` | `groups` | Returns **group object IDs**, not names — set `MINICRM_ACCOUNT_<N>_OIDC_GROUP` to the GUID, or use app roles with `roles`. |
+| Kanidm | `https://<host>/oauth2/openid/<client>` | `groups` / `groups_name` | See [Kanidm Setup](#6-kanidm-setup); `ES256` and a per-client issuer. |

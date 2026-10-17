@@ -18,7 +18,7 @@ MiniCRM uses **PostgreSQL 16+** for relational metadata, email bodies, sessions,
 
 ---
 
-## 2. PostgreSQL Schema (`internal/db/migrations/001_initial_schema.sql`)
+## 2. PostgreSQL Schema (`internal/db/migrations/001_initial_schema.sql`, `002_multi_account.sql`)
 
 Schema migrations are embedded into the Go binary (`internal/db/migrations/embed.go`) and applied automatically on startup using `github.com/pressly/goose/v3`.
 
@@ -26,22 +26,23 @@ Schema migrations are embedded into the Go binary (`internal/db/migrations/embed
 
 | Table | Purpose | Key Columns & Constraints |
 |---|---|---|
-| `users` | Operators & assignees | `id (UUID PK)`, `oidc_sub (TEXT UNIQUE, nullable)`, `email (CITEXT UNIQUE)`, `display_name`, `role ('agent'\|'admin')`, `is_active (BOOL)`. |
-| `system_settings` | Singleton CRM configuration (`id = 1`) | `default_assignee_id (FK users)`, `display_timezone`, `imap_inbox_mailbox`, `imap_archive_mailbox`, `imap_junk_mailbox`, `imap_sent_mailbox`, `subject_match_window_days`. |
-| `threads` | Conversation threads | `id (UUID PK)`, `subject_normalized`, `subject_display`, `status (thread_status: 'new'\|'in_progress'\|'completed'\|'spam')`, `assignee_id (FK users)`, `assignment_source`, `customer_email (CITEXT)`, `customer_name`, `reopens_thread_id (FK threads, nullable)`, `last_message_at (TIMESTAMPTZ)`. |
-| `emails` | Inbound & outbound emails | `id (UUID PK)`, `thread_id (FK threads)`, `parent_email_id (FK emails)`, `direction ('inbound'\|'outbound')`, `message_id (TEXT UNIQUE)`, `in_reply_to`, `references_ids (TEXT[])`, `imap_mailbox`, `imap_uidvalidity`, `imap_uid`, `from_address (CITEXT)`, `to_addresses (JSONB)`, `cc_addresses (JSONB)`, `subject`, `subject_normalized`, `body_text`, `body_html_sanitized`, `raw_headers (JSONB)`, `sent_at`, `received_at`. |
+| `users` | Operators & assignees | `id (UUID PK)`, `oidc_sub (TEXT UNIQUE, nullable)`, `email (CITEXT UNIQUE)`, `display_name`, `role ('agent'\|'admin')`, `is_active (BOOL)`, `allowed_accounts (TEXT[], OIDC-derived)`. |
+| `system_settings` | Singleton CRM configuration (`id = 1`) | `display_timezone`, `imap_inbox_mailbox`, `imap_archive_mailbox`, `imap_junk_mailbox`, `imap_sent_mailbox`, `subject_match_window_days`. |
+| `account_settings` | Per-account configuration | `account_id (TEXT PK)`, `default_assignee_id (FK users, nullable)`. A missing row or `NULL` assignee means the account has no default assignee and new threads stay unassigned. |
+| `threads` | Conversation threads | `id (UUID PK)`, `account_id (TEXT)`, `subject_normalized`, `subject_display`, `status (thread_status: 'new'\|'in_progress'\|'completed'\|'spam')`, `assignee_id (FK users, nullable)`, `assignment_source`, `customer_email (CITEXT)`, `customer_name`, `reopens_thread_id (FK threads, nullable)`, `last_message_at (TIMESTAMPTZ)`. |
+| `emails` | Inbound & outbound emails | `id (UUID PK)`, `thread_id (FK threads)`, `account_id (TEXT)`, `parent_email_id (FK emails)`, `direction ('inbound'\|'outbound')`, `message_id (TEXT, UNIQUE per account: `UNIQUE (account_id, message_id)` — the same email delivered to two accounts yields one row per account)`, `in_reply_to`, `references_ids (TEXT[])`, `imap_mailbox`, `imap_uidvalidity`, `imap_uid`, `from_address (CITEXT)`, `to_addresses (JSONB)`, `cc_addresses (JSONB)`, `subject`, `subject_normalized`, `body_text`, `body_html_sanitized`, `raw_headers (JSONB)`, `sent_at`, `received_at`. |
 | `attachments` | Attachment metadata | `id (UUID PK)`, `email_id (FK emails)`, `filename`, `content_type`, `size_bytes`, `sha256_hex (CHAR(64))`, `storage_relpath`, `content_id`, `is_inline`. |
-| `imap_sync_state` | `INBOX` UID watermark | `mailbox (TEXT PK)`, `uid_validity (BIGINT)`, `last_synced_uid (BIGINT)`. |
-| `imap_jobs` | Async IMAP action queue | `id (UUID PK)`, `job_type ('move_to_archive'\|'move_to_junk'\|'append_to_sent')`, `email_id (FK emails)`, `source_mailbox`, `target_mailbox`, `imap_uidvalidity`, `imap_uid`, `raw_rfc822_path`, `attempts`, `max_attempts`, `next_run_at`, `last_error`, `status`, `enqueued_at`. |
+| `imap_sync_state` | Per-account `INBOX` UID watermark | `account_id (TEXT)`, `mailbox (TEXT)`, `uid_validity (BIGINT)`, `last_synced_uid (BIGINT)`, `PRIMARY KEY (account_id, mailbox)`. |
+| `imap_jobs` | Async IMAP action queue | `id (UUID PK)`, `account_id (TEXT)`, `job_type ('move_to_archive'\|'move_to_junk'\|'append_to_sent')`, `email_id (FK emails)`, `source_mailbox`, `target_mailbox`, `imap_uidvalidity`, `imap_uid`, `raw_rfc822_path`, `attempts`, `max_attempts`, `next_run_at`, `last_error`, `status`, `enqueued_at`. |
 | `outbox_emails` | Transactional SMTP outbox | `id (UUID PK)`, `email_id (UUID UNIQUE FK emails)`, `sender_user_id (FK users)`, `status ('pending'\|'sending'\|'sent'\|'failed')`, `attempts`, `next_run_at`, `last_error`, `enqueued_at`. |
 | `thread_events` | Immutable thread audit trail | `id (UUID PK)`, `thread_id (FK threads)`, `actor_user_id (FK users, nullable)`, `event_type ('created'\|'status_changed'\|'assigned'\|'reassigned'\|'reply_received'\|'reply_sent'\|'reopen_merged')`, `old_value (JSONB)`, `new_value (JSONB)`, `occurred_at (TIMESTAMPTZ)`. |
 | `audit_logs` | Immutable system & user audit trail | `id (UUID PK)`, `actor_user_id (FK users, nullable)`, `target_user_id (FK users, nullable)`, `event_type ('user_created'\|'user_precreated'\|'user_updated'\|'user_login'\|'user_login_failed'\|'user_logout'\|'settings_updated')`, `ip_address`, `user_agent`, `old_value (JSONB)`, `new_value (JSONB)`, `occurred_at (TIMESTAMPTZ)`. |
 | `sessions` | HTTP session store (`scs/pgxstore`) | `token (TEXT PK)`, `data (BYTEA)`, `expiry (TIMESTAMPTZ)`. |
 
 ### Indexes
-- `idx_threads_status_last_msg ON threads (status, last_message_at DESC)` — Powers the filtered thread inbox.
+- `idx_threads_account_status_last_msg ON threads (account_id, status, last_message_at DESC)` — Powers the filtered, account-scoped thread inbox.
 - `idx_threads_assignee_status ON threads (assignee_id, status, last_message_at DESC)` — Powers per-assignee filtering.
-- `idx_threads_subject_customer ON threads (lower(subject_normalized), customer_email, last_message_at DESC)` — Powers fallback reply threading by normalized subject and customer email.
+- `idx_threads_account_subject_customer ON threads (account_id, lower(subject_normalized), customer_email, last_message_at DESC)` — Powers fallback reply threading, strictly scoped per account.
 - `idx_emails_thread_sent ON emails (thread_id, sent_at ASC)` — Orders messages chronologically within a thread.
 - `idx_imap_jobs_runnable ON imap_jobs (status, next_run_at) WHERE status = 'pending'` — Partial index for fast `FOR UPDATE SKIP LOCKED` job claiming.
 
