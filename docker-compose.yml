@@ -1,0 +1,202 @@
+# Local end-to-end test stack for MiniCRM.
+#
+#   docker compose up --build      (or: podman-compose up --build)
+#
+# Then open http://localhost:8080/threads. The dummy OIDC server signs you in
+# automatically as "Dev Admin (admin@example.com)" with access to both mail accounts.
+#
+# Services:
+#   postgres  - PostgreSQL 16 database
+#   certgen   - one-shot generator for the self-signed IMAP TLS certificate
+#   mail      - Dovecot IMAP server with two seeded accounts (support@ and sales@)
+#   smtp      - Mailpit catch-all SMTP server (web UI on http://localhost:8025)
+#   dev-oidc  - MiniCRM's dummy OIDC identity provider
+#   minicrm   - the MiniCRM application
+#
+# The OIDC issuer is http://dev-oidc.localhost:9000, which resolves to 127.0.0.1 on the
+# host (browser) and is aliased to the dev-oidc container inside the compose network.
+
+x-app: &app
+  image: minicrm-dev:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: minicrm
+      POSTGRES_PASSWORD: minicrm
+      POSTGRES_DB: minicrm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minicrm -d minicrm"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  certgen:
+    build:
+      context: ./docker/certs
+      dockerfile: Dockerfile
+    image: minicrm-dev-certs:latest
+    volumes:
+      - mailcerts:/certs
+    restart: "no"
+
+  mail:
+    build:
+      context: ./docker/mail
+      dockerfile: Dockerfile
+    image: minicrm-dev-mail:latest
+    environment:
+      MAIL_USERS: "support@example.com sales@example.com"
+    volumes:
+      - mailcerts:/certs:ro
+      - maildata:/srv/vmail
+    ports:
+      # Rootless Podman cannot publish privileged ports < 1024 on the host. MiniCRM
+      # talks to Dovecot on the compose network, so these mappings are only for
+      # debugging with a local mail client.
+      - "1143:143"
+      - "1993:993"
+    # The one-shot certgen service is deliberately not a dependency: Podman treats
+    # "service_completed_successfully" as a hard "requires running" constraint. Both
+    # the mail and minicrm entrypoints wait for the certificate files instead.
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 993"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  smtp:
+    image: axllent/mailpit:v1.29
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+      # Reuse the development certificate so MiniCRM can use STARTTLS (go-mail refuses
+      # to send SMTP AUTH credentials over an unencrypted connection).
+      MP_SMTP_TLS_CERT: /certs/tls.crt
+      MP_SMTP_TLS_KEY: /certs/tls.key
+      MP_DATABASE: /data/mailpit.db
+    volumes:
+      - mailcerts:/certs:ro
+      - mailpitdata:/data
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  dev-oidc:
+    <<: *app
+    command:
+      - dev-oidc
+      - -addr
+      - 0.0.0.0:9000
+      - -issuer
+      - http://dev-oidc.localhost:9000
+      - -client-id
+      - minicrm-dev
+      - -client-secret
+      - minicrm-dev-secret
+      - -sub
+      - dev-admin-sub
+      - -email
+      - admin@example.com
+      - -name
+      - Dev Admin
+      - -groups
+      - crm-support,crm-sales
+    ports:
+      - "9000:9000"
+    networks:
+      default:
+        aliases:
+          - dev-oidc.localhost
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/.well-known/openid-configuration"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  minicrm:
+    <<: *app
+    environment:
+      MINICRM_HTTP_ADDR: "0.0.0.0:8080"
+      MINICRM_DATABASE_URL: "postgres://minicrm:minicrm@postgres:5432/minicrm?sslmode=disable"
+      MINICRM_ATTACHMENTS_DIR: "/data/attachments"
+      MINICRM_BOOTSTRAP_ADMIN_EMAIL: "admin@example.com"
+      MINICRM_BOOTSTRAP_ADMIN_NAME: "Dev Admin"
+      MINICRM_DISPLAY_TIMEZONE: "UTC"
+      MINICRM_MAIL_DOMAIN: "minicrm.local"
+      MINICRM_COOKIE_SECURE: "false"
+
+      MINICRM_OIDC_ISSUER_URL: "http://dev-oidc.localhost:9000"
+      MINICRM_OIDC_CLIENT_ID: "minicrm-dev"
+      MINICRM_OIDC_CLIENT_SECRET: "minicrm-dev-secret"
+      MINICRM_OIDC_REDIRECT_URL: "http://localhost:8080/auth/callback"
+      MINICRM_OIDC_GROUPS_CLAIM: "groups"
+      MINICRM_OIDC_SCOPES: "openid,profile,email,groups"
+
+      # Account 1: Customer Support (INBOX seeded by the mail container).
+      MINICRM_ACCOUNT_1_ID: "support"
+      MINICRM_ACCOUNT_1_NAME: "Customer Support"
+      MINICRM_ACCOUNT_1_OIDC_GROUP: "crm-support"
+      MINICRM_ACCOUNT_1_IMAP_HOST: "mail"
+      MINICRM_ACCOUNT_1_IMAP_PORT: "993"
+      MINICRM_ACCOUNT_1_IMAP_USERNAME: "support@example.com"
+      MINICRM_ACCOUNT_1_IMAP_PASSWORD: "secret"
+      MINICRM_ACCOUNT_1_IMAP_IMPLICIT_TLS: "true"
+      MINICRM_ACCOUNT_1_IMAP_POLL_INTERVAL: "10s"
+      MINICRM_ACCOUNT_1_SMTP_HOST: "smtp"
+      MINICRM_ACCOUNT_1_SMTP_PORT: "1025"
+      MINICRM_ACCOUNT_1_SMTP_USERNAME: "support@example.com"
+      MINICRM_ACCOUNT_1_SMTP_PASSWORD: "secret"
+      MINICRM_ACCOUNT_1_SMTP_TLS_MODE: "starttls"
+      MINICRM_ACCOUNT_1_SMTP_FROM_ADDRESS: "support@example.com"
+      MINICRM_ACCOUNT_1_SMTP_FROM_NAME: "Customer Support"
+
+      # Account 2: Sales (INBOX seeded by the mail container).
+      MINICRM_ACCOUNT_2_ID: "sales"
+      MINICRM_ACCOUNT_2_NAME: "Sales"
+      MINICRM_ACCOUNT_2_OIDC_GROUP: "crm-sales"
+      MINICRM_ACCOUNT_2_IMAP_HOST: "mail"
+      MINICRM_ACCOUNT_2_IMAP_PORT: "993"
+      MINICRM_ACCOUNT_2_IMAP_USERNAME: "sales@example.com"
+      MINICRM_ACCOUNT_2_IMAP_PASSWORD: "secret"
+      MINICRM_ACCOUNT_2_IMAP_IMPLICIT_TLS: "true"
+      MINICRM_ACCOUNT_2_IMAP_POLL_INTERVAL: "10s"
+      MINICRM_ACCOUNT_2_SMTP_HOST: "smtp"
+      MINICRM_ACCOUNT_2_SMTP_PORT: "1025"
+      MINICRM_ACCOUNT_2_SMTP_USERNAME: "sales@example.com"
+      MINICRM_ACCOUNT_2_SMTP_PASSWORD: "secret"
+      MINICRM_ACCOUNT_2_SMTP_TLS_MODE: "starttls"
+      MINICRM_ACCOUNT_2_SMTP_FROM_ADDRESS: "sales@example.com"
+      MINICRM_ACCOUNT_2_SMTP_FROM_NAME: "Sales"
+    volumes:
+      - mailcerts:/certs:ro
+      - attachments:/data/attachments
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mail:
+        condition: service_healthy
+      smtp:
+        condition: service_started
+      dev-oidc:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  mailcerts:
+  maildata:
+  mailpitdata:
+  attachments:

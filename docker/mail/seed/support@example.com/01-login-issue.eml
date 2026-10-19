@@ -1,0 +1,18 @@
+From: Alice Example <alice@customer.example>
+To: Customer Support <support@example.com>
+Subject: Cannot log in to my account
+Date: Mon, 05 Oct 2026 09:15:00 +0000
+Message-ID: <login-issue-1@customer.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hi support team,
+
+I have been unable to log in since this morning. I get an "invalid password"
+error even after resetting my password twice.
+
+My account email is alice@customer.example. Could you please check whether my
+account has been locked?
+
+Thanks,
+Alice

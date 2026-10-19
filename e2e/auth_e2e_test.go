@@ -171,9 +171,9 @@ func startSelfContainedE2EServers(t *testing.T) string {
 		t.Fatalf("SeedBootstrapAdminAndSettings: %v", err)
 	}
 	wfSvc := workflow.NewService(store, auditLogger, nil)
-	webSrv := web.NewServer(store, authSvc, wfSvc, nil, attStore, auditLogger, []web.AccountConfig{
-		{ID: "support", Name: "Support"},
-		{ID: "sales", Name: "Sales"},
+	webSrv := web.NewServer(store, authSvc, wfSvc, nil, attStore, auditLogger, sessions, []web.AccountConfig{
+		{ID: "support", Name: "Support", FromAddress: "support@example.com"},
+		{ID: "sales", Name: "Sales", FromAddress: "sales@example.com"},
 	})
 	handler = web.NewRouter(webSrv, authSvc, sessions)
 

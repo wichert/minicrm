@@ -1,0 +1,30 @@
+From: Dave Prospect <dave@prospect.example>
+To: Sales <sales@example.com>
+Subject: Pricing for 50 seats
+Date: Tue, 06 Oct 2026 11:20:00 +0000
+Message-ID: <pricing-request-1@prospect.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-pricing-request"
+
+--mix-pricing-request
+Content-Type: text/plain; charset=utf-8
+
+Hello sales team,
+
+We are evaluating MiniCRM for a team of 50 people and would like to know the
+annual pricing, including onboarding support.
+
+I have attached our requirements for reference.
+
+Kind regards,
+Dave Prospect
+Prospect Industries
+
+--mix-pricing-request
+Content-Type: text/plain; charset=utf-8; name="requirements.txt"
+Content-Disposition: attachment; filename="requirements.txt"
+Content-Transfer-Encoding: base64
+
+UHJvZHVjdDogTWluaUNSTQpTZWF0czogNTAKQmlsbGluZzogYW5udWFsCg==
+
+--mix-pricing-request--

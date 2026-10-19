@@ -175,6 +175,14 @@ func (w *OutboxWorker) ComposeAndQueueReply(ctx context.Context, p ComposeReplyP
 	if err != nil {
 		return sqlc.Email{}, fmt.Errorf("load thread: %w", err)
 	}
+	// Terminal threads cannot receive outbound mail. Completed threads must be reopened
+	// through Reopen & Merge first; spam threads are never replied to.
+	if thread.Status == sqlc.ThreadStatusSpam {
+		return sqlc.Email{}, errors.New("replies are disabled on spam threads")
+	}
+	if thread.Status == sqlc.ThreadStatusCompleted {
+		return sqlc.Email{}, errors.New("replies are disabled on completed threads")
+	}
 	sender, err := w.senderFor(thread.AccountID)
 	if err != nil {
 		return sqlc.Email{}, err

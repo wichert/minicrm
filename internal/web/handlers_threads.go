@@ -2,13 +2,16 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/alexedwards/scs/v2"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/wichert/minicrm/internal/audit"
@@ -22,8 +25,9 @@ import (
 
 // AccountConfig describes a configured mail account for display and option lists.
 type AccountConfig struct {
-	ID   string
-	Name string
+	ID          string
+	Name        string
+	FromAddress string
 }
 
 // HandlerStore defines the persistence operations required by the web Server handlers.
@@ -48,6 +52,13 @@ type HandlerStore interface {
 // ErrThreadNotFound is returned when a thread does not exist or is not accessible to the user.
 var ErrThreadNotFound = errors.New("thread not found")
 
+const (
+	flashSessionKey  = "minicrm_flash"
+	threadListLimit  = 100
+	flashKindSuccess = "success"
+	flashKindError   = "error"
+)
+
 // Server holds dependencies for MiniCRM HTTP handlers.
 type Server struct {
 	store       HandlerStore
@@ -56,6 +67,7 @@ type Server struct {
 	outbox      *mail.OutboxWorker
 	attachments *storage.Store
 	audit       *audit.Logger
+	sessions    *scs.SessionManager
 	accounts    []AccountConfig
 }
 
@@ -67,6 +79,7 @@ func NewServer(
 	outbox *mail.OutboxWorker,
 	attachments *storage.Store,
 	auditLogger *audit.Logger,
+	sessions *scs.SessionManager,
 	accounts []AccountConfig,
 ) *Server {
 	return &Server{
@@ -76,8 +89,63 @@ func NewServer(
 		outbox:      outbox,
 		attachments: attachments,
 		audit:       auditLogger,
+		sessions:    sessions,
 		accounts:    accounts,
 	}
+}
+
+// setFlash stores a one-shot notice in the SCS session for the next rendered page.
+func (s *Server) setFlash(r *http.Request, kind, message string) {
+	if s.sessions == nil || strings.TrimSpace(message) == "" {
+		return
+	}
+	s.sessions.Put(r.Context(), flashSessionKey, kind+"\n"+message)
+}
+
+// popFlash consumes and returns the pending session notice.
+func (s *Server) popFlash(r *http.Request) views.Flash {
+	if s.sessions == nil {
+		return views.Flash{}
+	}
+	raw := s.sessions.PopString(r.Context(), flashSessionKey)
+	if raw == "" {
+		return views.Flash{}
+	}
+	kind, message, ok := strings.Cut(raw, "\n")
+	if !ok {
+		return views.Flash{Kind: flashKindSuccess, Message: raw}
+	}
+	if kind == "" {
+		kind = flashKindSuccess
+	}
+	return views.Flash{Kind: kind, Message: message}
+}
+
+// renderError renders the styled application error page with the given status code.
+func (s *Server) renderError(w http.ResponseWriter, r *http.Request, status int, heading, message string) {
+	user, _ := auth.UserFromContext(r.Context())
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_ = views.RenderError(w, views.ErrorViewData{
+		Title:       heading,
+		ActiveNav:   "",
+		CurrentUser: user,
+		StatusCode:  status,
+		Heading:     heading,
+		Message:     message,
+	})
+}
+
+// requireAdmin renders a styled 403 instead of a bare plain-text response.
+func (s *Server) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, ok := auth.UserFromContext(r.Context())
+		if !ok || user.Role != "admin" {
+			s.renderError(w, r, http.StatusForbidden, "Access denied", "You need administrator rights to view this page.")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // accountName returns the display name of a configured mail account.
@@ -88,6 +156,16 @@ func (s *Server) accountName(accountID string) string {
 		}
 	}
 	return accountID
+}
+
+// accountFromAddress returns the outbound from address of a configured mail account.
+func (s *Server) accountFromAddress(accountID string) string {
+	for _, a := range s.accounts {
+		if a.ID == accountID {
+			return a.FromAddress
+		}
+	}
+	return ""
 }
 
 // accessibleAccounts returns the configured accounts the user may access.
@@ -113,6 +191,23 @@ func (s *Server) loadAuthorizedThread(ctx context.Context, user sqlc.User, threa
 	return thread, nil
 }
 
+// assigneeFilterForUser returns the active users that may be offered as an inbox assignee filter.
+func assigneeFilterUsers(allUsers []sqlc.User, current sqlc.User) []sqlc.User {
+	out := make([]sqlc.User, 0, len(allUsers))
+	for _, u := range allUsers {
+		if !u.IsActive {
+			continue
+		}
+		for _, accountID := range current.AllowedAccounts {
+			if u.HasAccountAccess(accountID) {
+				out = append(out, u)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // HandleListThreads renders the filterable thread inbox.
 func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -120,9 +215,13 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 
 	statusStr := strings.TrimSpace(r.URL.Query().Get("status"))
 	var statusFilter *sqlc.ThreadStatus
-	if statusStr != "" {
+	switch sqlc.ThreadStatus(statusStr) {
+	case sqlc.ThreadStatusNew, sqlc.ThreadStatusInProgress, sqlc.ThreadStatusCompleted, sqlc.ThreadStatusSpam:
 		st := sqlc.ThreadStatus(statusStr)
 		statusFilter = &st
+	default:
+		// Unknown or empty status values fall back to "All statuses" instead of reaching PostgreSQL.
+		statusStr = ""
 	}
 
 	accountFilter := strings.TrimSpace(r.URL.Query().Get("account"))
@@ -133,17 +232,37 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		accountFilter = ""
 	}
 
+	assigneeFilter := strings.TrimSpace(r.URL.Query().Get("assignee"))
+	var assigneeID *uuid.UUID
+	unassigned := false
+	switch assigneeFilter {
+	case "":
+	case "me":
+		id := user.ID
+		assigneeID = &id
+	case "unassigned":
+		unassigned = true
+	default:
+		if parsed, err := uuid.Parse(assigneeFilter); err == nil {
+			assigneeID = &parsed
+		} else {
+			assigneeFilter = ""
+		}
+	}
+
 	var threads []sqlc.Thread
 	if len(user.AllowedAccounts) > 0 {
 		var err error
 		threads, err = s.store.ListThreads(ctx, sqlc.ListThreadsFilter{
 			Status:          statusFilter,
+			AssigneeID:      assigneeID,
+			Unassigned:      unassigned,
 			AccountID:       accountIDFilter,
 			AllowedAccounts: user.AllowedAccounts,
-			Limit:           100,
+			Limit:           threadListLimit,
 		})
 		if err != nil {
-			http.Error(w, "failed to list threads", http.StatusInternalServerError)
+			s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not load the conversation threads. Please try again.")
 			return
 		}
 	}
@@ -173,16 +292,22 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	partial := r.Header.Get("HX-Request") == "true"
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := views.RenderInbox(w, views.InboxViewData{
-		CurrentUser:   user,
-		Threads:       items,
-		StatusFilter:  statusStr,
-		Users:         users,
-		DisplayTZ:     displayTZ,
-		ShowAccountUI: user.HasMultipleAccounts(),
-		AccountFilter: accountFilter,
-		Accounts:      s.accessibleAccounts(user),
+		Title:          "Threads",
+		Flash:          s.popFlash(r),
+		ActiveNav:      "threads",
+		CurrentUser:    user,
+		Threads:        items,
+		StatusFilter:   statusStr,
+		AssigneeFilter: assigneeFilter,
+		Users:          assigneeFilterUsers(users, user),
+		DisplayTZ:      displayTZ,
+		ShowAccountUI:  user.HasMultipleAccounts(),
+		AccountFilter:  accountFilter,
+		Accounts:       s.accessibleAccounts(user),
+		Truncated:      len(threads) >= threadListLimit,
+		Limit:          threadListLimit,
 	}, partial); err != nil {
-		http.Error(w, "template render error", http.StatusInternalServerError)
+		s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not render the conversation threads.")
 	}
 }
 
@@ -192,26 +317,38 @@ func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 	user, _ := auth.UserFromContext(ctx)
 	threadID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid thread id", http.StatusBadRequest)
+		s.renderError(w, r, http.StatusBadRequest, "Invalid thread", "That conversation link is not valid.")
 		return
 	}
 
 	thread, err := s.loadAuthorizedThread(ctx, user, threadID)
 	if err != nil {
-		http.Error(w, "thread not found", http.StatusNotFound)
+		s.renderError(w, r, http.StatusNotFound, "Thread not found", "This conversation does not exist or you do not have access to its mail account.")
 		return
 	}
 
+	s.audit.LogDataAccess(ctx, "thread", thread.ID.String())
+	s.renderThreadDetail(w, r, user, thread, http.StatusOK, nil, nil, "")
+}
+
+// renderThreadDetail loads a thread's messages and activity and renders the detail page.
+// headerErrors render in the thread header card (transition/assign/merge failures); replyErrors
+// render next to the reply field so a reply failure is never shown twice.
+func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user sqlc.User, thread sqlc.Thread, status int, headerErrors, replyErrors []string, replyDraft string) {
+	ctx := r.Context()
+
 	var reopensThread *sqlc.Thread
+	reopenCompletedAt := ""
+	reopenCompletedBy := ""
 	if thread.ReopensThreadID != nil {
 		if prev, err := s.store.GetThreadByID(ctx, *thread.ReopensThreadID); err == nil {
 			reopensThread = &prev
 		}
 	}
 
-	emails, err := s.store.ListEmailsByThread(ctx, threadID)
+	emails, err := s.store.ListEmailsByThread(ctx, thread.ID)
 	if err != nil {
-		http.Error(w, "failed to load thread emails", http.StatusInternalServerError)
+		s.renderError(w, r, http.StatusInternalServerError, "Thread unavailable", "We could not load this conversation's messages.")
 		return
 	}
 	displayTZ := s.currentDisplayTimezone(ctx)
@@ -225,16 +362,11 @@ func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	rawEvents, _ := s.store.ListThreadEvents(ctx, threadID)
-	eventViews := make([]views.EventItemView, 0, len(rawEvents))
-	for _, ev := range rawEvents {
-		eventViews = append(eventViews, views.EventItemView{
-			Event:         ev,
-			FormattedTime: views.FormatTimestamp(ev.OccurredAt, displayTZ),
-		})
-	}
-
 	allUsers, _ := s.store.ListUsers(ctx)
+	userNames := make(map[uuid.UUID]string, len(allUsers))
+	for _, u := range allUsers {
+		userNames[u.ID] = u.DisplayName
+	}
 	// Only users with access to the thread's account may be offered as assignees.
 	users := make([]sqlc.User, 0, len(allUsers))
 	for _, u := range allUsers {
@@ -244,31 +376,107 @@ func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 	}
 	assigneeName := ""
 	if thread.AssigneeID != nil {
-		for _, u := range allUsers {
-			if u.ID == *thread.AssigneeID {
-				assigneeName = u.DisplayName
-				break
+		assigneeName = userNames[*thread.AssigneeID]
+	}
+
+	rawEvents, _ := s.store.ListThreadEvents(ctx, thread.ID)
+	eventViews := make([]views.EventItemView, 0, len(rawEvents))
+	for _, ev := range rawEvents {
+		actorName := ""
+		if ev.ActorUserID != nil {
+			actorName = userNames[*ev.ActorUserID]
+		}
+		eventViews = append(eventViews, views.EventItemView{
+			Event:         ev,
+			FormattedTime: views.FormatTimestamp(ev.OccurredAt, displayTZ),
+			Summary:       views.FormatThreadEventSummary(ev, actorName, userNames),
+		})
+	}
+
+	// A reopened thread carries both its own "created" event and the reparented follow-up thread's
+	// events. Label that merged block so the duplicated "opened this thread" line reads as history.
+	if sectionIndex := mergedFollowUpEventIndex(rawEvents); sectionIndex >= 0 {
+		eventViews[sectionIndex].Section = "Follow-up thread"
+	}
+
+	if reopensThread != nil {
+		prevEvents, _ := s.store.ListThreadEvents(ctx, reopensThread.ID)
+		for _, ev := range prevEvents {
+			if ev.EventType != "status_changed" || !eventTargetsStatus(ev.NewValue, string(sqlc.ThreadStatusCompleted)) {
+				continue
+			}
+			reopenCompletedAt = views.FormatTimestamp(ev.OccurredAt, displayTZ)
+			if ev.ActorUserID != nil {
+				reopenCompletedBy = userNames[*ev.ActorUserID]
 			}
 		}
 	}
 
-	s.audit.LogDataAccess(ctx, "thread", thread.ID.String())
+	replyAllowed := thread.Status != sqlc.ThreadStatusSpam && thread.Status != sqlc.ThreadStatusCompleted
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := views.RenderThreadDetail(w, views.ThreadDetailViewData{
-		CurrentUser:   user,
-		Thread:        thread,
-		AssigneeName:  assigneeName,
-		ReopensThread: reopensThread,
-		Emails:        emailViews,
-		Events:        eventViews,
-		Users:         users,
-		DisplayTZ:     displayTZ,
-		ShowAccountUI: user.HasMultipleAccounts(),
-		AccountName:   s.accountName(thread.AccountID),
-	}); err != nil {
-		http.Error(w, "template render error", http.StatusInternalServerError)
+	if status != http.StatusOK {
+		w.WriteHeader(status)
 	}
+	if err := views.RenderThreadDetail(w, views.ThreadDetailViewData{
+		Title:              thread.SubjectDisplay,
+		Flash:              s.popFlash(r),
+		ActiveNav:          "threads",
+		CurrentUser:        user,
+		Thread:             thread,
+		AssigneeName:       assigneeName,
+		ReopensThread:      reopensThread,
+		ReopenCompletedAt:  reopenCompletedAt,
+		ReopenCompletedBy:  reopenCompletedBy,
+		Emails:             emailViews,
+		Events:             eventViews,
+		Users:              users,
+		DisplayTZ:          displayTZ,
+		ShowAccountUI:      user.HasMultipleAccounts(),
+		AccountName:        s.accountName(thread.AccountID),
+		AccountFromAddress: s.accountFromAddress(thread.AccountID),
+		ReplyAllowed:       replyAllowed,
+		ReplyDraft:         replyDraft,
+		Errors:             headerErrors,
+		ReplyErrors:        replyErrors,
+	}); err != nil && status == http.StatusOK {
+		s.renderError(w, r, http.StatusInternalServerError, "Thread unavailable", "We could not render this conversation.")
+	}
+}
+
+// mergedFollowUpEventIndex returns the index of the reparented follow-up thread's "created" event
+// in a merged thread's event list, or -1 when the thread was never reopened and merged.
+func mergedFollowUpEventIndex(events []sqlc.ThreadEvent) int {
+	followUpStart := -1
+	created := 0
+	for i, ev := range events {
+		if ev.EventType != "created" {
+			continue
+		}
+		created++
+		if created == 2 {
+			followUpStart = i
+			break
+		}
+	}
+	if followUpStart < 0 {
+		return -1
+	}
+	for i := followUpStart + 1; i < len(events); i++ {
+		if events[i].EventType == "reopen_merged" {
+			return followUpStart
+		}
+	}
+	return -1
+}
+
+// eventTargetsStatus reports whether a status_changed event's new_value contains status.
+func eventTargetsStatus(raw json.RawMessage, status string) bool {
+	values := make(map[string]string)
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return false
+	}
+	return values["status"] == status
 }
 
 // HandleIsolatedEmailBody serves the sanitized email body inside a sandboxed iframe with strict CSP.
@@ -299,26 +507,29 @@ func (s *Server) HandleTransitionThread(w http.ResponseWriter, r *http.Request) 
 	user, _ := auth.UserFromContext(ctx)
 	threadID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid thread id", http.StatusBadRequest)
+		s.renderError(w, r, http.StatusBadRequest, "Invalid thread", "That conversation link is not valid.")
 		return
 	}
 	if err := parseBoundedForm(w, r, 64<<10); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.renderError(w, r, http.StatusBadRequest, "Invalid request", "The submitted form could not be read.")
 		return
 	}
-	if _, err := s.loadAuthorizedThread(ctx, user, threadID); err != nil {
-		http.Error(w, "thread not found", http.StatusNotFound)
+	thread, err := s.loadAuthorizedThread(ctx, user, threadID)
+	if err != nil {
+		s.renderError(w, r, http.StatusNotFound, "Thread not found", "This conversation does not exist or you do not have access to its mail account.")
 		return
 	}
 	targetStatus := sqlc.ThreadStatus(strings.TrimSpace(r.FormValue("status")))
 	if err := s.workflow.Transition(ctx, threadID, targetStatus, &user.ID); err != nil {
 		if errors.Is(err, workflow.ErrInvalidTransition) {
-			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity,
+				[]string{"That status change is not allowed from the thread's current state."}, nil, "")
 			return
 		}
-		http.Error(w, "transition failed", http.StatusInternalServerError)
+		s.renderError(w, r, http.StatusInternalServerError, "Update failed", "The status change could not be saved. Please try again.")
 		return
 	}
+	s.setFlash(r, flashKindSuccess, fmt.Sprintf("Thread marked as %s.", views.FormatStatus(targetStatus)))
 	redirectToThread(w, r, threadID)
 }
 
@@ -328,30 +539,47 @@ func (s *Server) HandleAssignThread(w http.ResponseWriter, r *http.Request) {
 	user, _ := auth.UserFromContext(ctx)
 	threadID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid thread id", http.StatusBadRequest)
+		s.renderError(w, r, http.StatusBadRequest, "Invalid thread", "That conversation link is not valid.")
 		return
 	}
 	if err := parseBoundedForm(w, r, 64<<10); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.renderError(w, r, http.StatusBadRequest, "Invalid request", "The submitted form could not be read.")
 		return
 	}
-	if _, err := s.loadAuthorizedThread(ctx, user, threadID); err != nil {
-		http.Error(w, "thread not found", http.StatusNotFound)
+	thread, err := s.loadAuthorizedThread(ctx, user, threadID)
+	if err != nil {
+		s.renderError(w, r, http.StatusNotFound, "Thread not found", "This conversation does not exist or you do not have access to its mail account.")
+		return
+	}
+	switch thread.Status {
+	case sqlc.ThreadStatusSpam:
+		s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity,
+			[]string{"Spam threads cannot be reassigned."}, nil, "")
+		return
+	case sqlc.ThreadStatusCompleted:
+		s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity,
+			[]string{"Completed threads cannot be reassigned. Reopen and merge the customer's follow-up reply first."}, nil, "")
 		return
 	}
 	assigneeID, err := uuid.Parse(strings.TrimSpace(r.FormValue("assignee_id")))
 	if err != nil {
-		http.Error(w, "invalid assignee_id", http.StatusBadRequest)
+		s.setFlash(r, flashKindError, "Choose an assignee before assigning this thread.")
+		redirectToThread(w, r, threadID)
 		return
 	}
 	if err := s.workflow.Reassign(ctx, threadID, assigneeID, &user.ID); err != nil {
+		message := "The thread could not be assigned. Please try again."
 		if errors.Is(err, workflow.ErrAssigneeNoAccountAccess) {
-			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-			return
+			message = "That person does not have access to this thread's mail account."
 		}
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity, []string{message}, nil, "")
 		return
 	}
+	assigneeName := ""
+	if assignee, err := s.store.GetUserByID(ctx, assigneeID); err == nil {
+		assigneeName = assignee.DisplayName
+	}
+	s.setFlash(r, flashKindSuccess, fmt.Sprintf("Thread assigned to %s.", assigneeName))
 	redirectToThread(w, r, threadID)
 }
 
@@ -361,22 +589,25 @@ func (s *Server) HandleReopenMerge(w http.ResponseWriter, r *http.Request) {
 	user, _ := auth.UserFromContext(ctx)
 	threadID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid thread id", http.StatusBadRequest)
+		s.renderError(w, r, http.StatusBadRequest, "Invalid thread", "That conversation link is not valid.")
 		return
 	}
-	if _, err := s.loadAuthorizedThread(ctx, user, threadID); err != nil {
-		http.Error(w, "thread not found", http.StatusNotFound)
+	thread, err := s.loadAuthorizedThread(ctx, user, threadID)
+	if err != nil {
+		s.renderError(w, r, http.StatusNotFound, "Thread not found", "This conversation does not exist or you do not have access to its mail account.")
 		return
 	}
 	reopenedID, err := s.workflow.ReopenAndMerge(ctx, threadID, &user.ID)
 	if err != nil {
 		if errors.Is(err, workflow.ErrCannotReopenMerge) {
-			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity,
+				[]string{"This follow-up can no longer be reopened and merged."}, nil, "")
 			return
 		}
-		http.Error(w, "reopen and merge failed", http.StatusInternalServerError)
+		s.renderError(w, r, http.StatusInternalServerError, "Merge failed", "The thread could not be reopened and merged. Please try again.")
 		return
 	}
+	s.setFlash(r, flashKindSuccess, "Thread reopened and merged into the original conversation.")
 	redirectToThread(w, r, reopenedID)
 }
 
@@ -386,11 +617,12 @@ func (s *Server) HandleReplyThread(w http.ResponseWriter, r *http.Request) {
 	user, _ := auth.UserFromContext(ctx)
 	threadID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		http.Error(w, "invalid thread id", http.StatusBadRequest)
+		s.renderError(w, r, http.StatusBadRequest, "Invalid thread", "That conversation link is not valid.")
 		return
 	}
-	if _, err := s.loadAuthorizedThread(ctx, user, threadID); err != nil {
-		http.Error(w, "thread not found", http.StatusNotFound)
+	thread, err := s.loadAuthorizedThread(ctx, user, threadID)
+	if err != nil {
+		s.renderError(w, r, http.StatusNotFound, "Thread not found", "This conversation does not exist or you do not have access to its mail account.")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
@@ -400,6 +632,21 @@ func (s *Server) HandleReplyThread(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 	}
 	bodyText := strings.TrimSpace(r.FormValue("body_text"))
+
+	// Terminal threads cannot receive outbound mail: spam is a dead end, and a completed
+	// thread must be reopened via Reopen & Merge before it can be discussed again.
+	switch thread.Status {
+	case sqlc.ThreadStatusSpam:
+		s.audit.LogDataAccess(ctx, "thread", thread.ID.String())
+		s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity,
+			nil, []string{"Replies are disabled on spam threads."}, bodyText)
+		return
+	case sqlc.ThreadStatusCompleted:
+		s.audit.LogDataAccess(ctx, "thread", thread.ID.String())
+		s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity,
+			nil, []string{"This thread is completed. Reopen and merge the customer's follow-up reply before sending a reply."}, bodyText)
+		return
+	}
 
 	var uploaded []mail.OutgoingAttachmentInput
 	if r.MultipartForm != nil {
@@ -428,9 +675,11 @@ func (s *Server) HandleReplyThread(w http.ResponseWriter, r *http.Request) {
 		BodyText:     bodyText,
 		Attachments:  uploaded,
 	}); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		s.audit.LogDataAccess(ctx, "thread", thread.ID.String())
+		s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity, nil, []string{err.Error()}, bodyText)
 		return
 	}
+	s.setFlash(r, flashKindSuccess, "Reply queued for delivery.")
 	redirectToThread(w, r, threadID)
 }
 
@@ -477,6 +726,11 @@ func (s *Server) currentDisplayTimezone(ctx context.Context) string {
 
 func parseBoundedForm(w http.ResponseWriter, r *http.Request, maxBytes int64) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err == nil && mediaType == "multipart/form-data" {
+		// #nosec G120 -- request body is bounded via http.MaxBytesReader above
+		return r.ParseMultipartForm(maxBytes)
+	}
 	return r.ParseForm()
 }
 

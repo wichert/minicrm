@@ -29,6 +29,10 @@ func NewRouter(srv *Server, authSvc *auth.Service, sessions *scs.SessionManager)
 	// Static embedded assets
 	fileServer := http.FileServer(http.FS(static.FS))
 	r.Handle("/static/*", http.StripPrefix("/static/", fileServer))
+	// Browsers still probe /favicon.ico; point it at the embedded SVG icon.
+	r.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/static/favicon.svg", http.StatusMovedPermanently)
+	})
 
 	// Public OAuth2 / OIDC routes
 	r.Get("/auth/login", authSvc.HandleLogin)
@@ -55,7 +59,7 @@ func NewRouter(srv *Server, authSvc *auth.Service, sessions *scs.SessionManager)
 
 		// Admin-only settings routes
 		authed.Group(func(admin chi.Router) {
-			admin.Use(auth.RequireAdmin)
+			admin.Use(srv.requireAdmin)
 			admin.Get("/settings", srv.HandleGetSettings)
 			admin.Post("/settings", srv.HandleUpdateSettings)
 			admin.Post("/settings/users", srv.HandlePrecreateUser)

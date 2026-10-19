@@ -1,0 +1,17 @@
+From: Carol Danvers <carol@customer.example>
+To: Customer Support <support@example.com>
+Subject: Feature request: export threads to CSV
+Date: Wed, 07 Oct 2026 08:05:00 +0000
+Message-ID: <feature-request-1@customer.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hi there,
+
+Would it be possible to export a thread list to CSV? Our finance team would
+like to reconcile closed tickets with our bookkeeping.
+
+It is not urgent, but it would save us a lot of copy/paste work.
+
+Best,
+Carol

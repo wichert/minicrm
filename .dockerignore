@@ -1,0 +1,7 @@
+.git
+.github
+bin
+data
+*.test
+*.out
+.DS_Store

@@ -1,0 +1,3 @@
+# Dovecot passwd-file for the local test stack. Development credentials only.
+support@example.com:{PLAIN}secret
+sales@example.com:{PLAIN}secret

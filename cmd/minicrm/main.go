@@ -98,7 +98,7 @@ func run(logger *slog.Logger) error {
 			AccountName: acct.Name,
 			OIDCGroup:   acct.OIDCGroup,
 		})
-		webAccounts = append(webAccounts, web.AccountConfig{ID: acct.ID, Name: acct.Name})
+		webAccounts = append(webAccounts, web.AccountConfig{ID: acct.ID, Name: acct.Name, FromAddress: acct.SMTPFromAddress})
 	}
 	authSvc := auth.NewService(queries, auditLogger, sessions, oidcProvider, cfg.BootstrapAdminMail, accountRules...)
 	if _, _, err := authSvc.SeedBootstrapAdminAndSettings(ctx, cfg.BootstrapAdminMail, cfg.BootstrapAdminName, cfg.DisplayTimezone); err != nil {
@@ -156,7 +156,7 @@ func run(logger *slog.Logger) error {
 	go actionWorker.Run(ctx)
 	go outboxWorker.Run(ctx)
 
-	webSrv := web.NewServer(queries, authSvc, wfSvc, outboxWorker, attStore, auditLogger, webAccounts)
+	webSrv := web.NewServer(queries, authSvc, wfSvc, outboxWorker, attStore, auditLogger, sessions, webAccounts)
 	router := web.NewRouter(webSrv, authSvc, sessions)
 
 	httpServer := &http.Server{

@@ -341,6 +341,7 @@ func (q *Queries) GetThreadByID(ctx context.Context, id uuid.UUID) (Thread, erro
 type ListThreadsFilter struct {
 	Status          *ThreadStatus
 	AssigneeID      *uuid.UUID
+	Unassigned      bool
 	AccountID       *string
 	AllowedAccounts []string
 	Limit           int
@@ -356,11 +357,12 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		FROM threads
 		WHERE ($1::thread_status IS NULL OR status = $1)
 		  AND ($2::uuid IS NULL OR assignee_id = $2)
-		  AND ($3::text IS NULL OR account_id = $3)
-		  AND ($4::text[] IS NULL OR account_id = ANY($4))
+		  AND (NOT $3::boolean OR assignee_id IS NULL)
+		  AND ($4::text IS NULL OR account_id = $4)
+		  AND ($5::text[] IS NULL OR account_id = ANY($5))
 		ORDER BY last_message_at DESC
-		LIMIT $5`
-	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.AccountID, f.AllowedAccounts, f.Limit)
+		LIMIT $6`
+	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.Limit)
 	if err != nil {
 		return nil, err
 	}

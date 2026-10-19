@@ -46,7 +46,7 @@ Every internal package has its own `-race`-enabled test suite:
 | `internal/threading` | `matcher_test.go` | Subject normalization (`Re:`, `Fwd:`, `AW:`), `In-Reply-To`/`References` matching, subject+sender fallback, and `reopens_thread_id` creation when replying to a `completed` thread. |
 | `internal/workflow` | `service_test.go` | Valid (`new -> in_progress -> completed`, `new -> spam`) and invalid state transitions, `move_to_archive` / `move_to_junk` job queueing, and transactional `ReopenAndMerge`. |
 | `internal/mail` | `mime_parser_test.go`, `imap_workers_test.go`, `smtp_sender_test.go` | Multipart MIME parsing, `bluemonday` HTML sanitization, `INBOX` UID sync, moving completed emails to `Archive`, verifying external deletion from `Archive` does not break MiniCRM or `ReopenAndMerge`, and outbound SMTP + `Sent` `APPEND`. |
-| `internal/web` | `web_test.go` | `Content-Security-Policy` and all HTTP security headers on main routes and `/emails/{id}/body`, `credentialless` `<iframe sandbox>`, `display_timezone` rendering, and Reopen & Merge banner rendering. |
+| `internal/web` | `web_test.go` | `Content-Security-Policy` and all HTTP security headers on main routes and `/emails/{id}/body`, sandboxed `<iframe>` without `credentialless`, `display_timezone` rendering, and Reopen & Merge banner rendering. |
 
 Run all package tests with:
 ```bash
@@ -78,6 +78,20 @@ Located in [`e2e/auth_e2e_test.go`](../e2e/auth_e2e_test.go).
 
 2. **Self-Contained Mode (Default `go test ./...` when `MINICRM_E2E_BASE_URL` is unset)**:
    - Automatically starts ephemeral `httptest.Server` instances for both `devidm.Server` and `web.NewRouter` in-process and runs the identical HTTP redirect and session verification steps, so `go test ./...` always executes the E2E test without requiring manual background processes.
+
+### Running the Live E2E Suite Against the Compose Stack
+
+The [Docker Compose stack](../docker-compose.yml) starts PostgreSQL, Dovecot (two seeded accounts), Mailpit, `dev-oidc`, and MiniCRM. This is the easiest way to exercise the live multi-service mode locally, including IMAP ingestion and SMTP delivery:
+
+```bash
+docker compose up --build -d   # or: podman-compose up --build -d
+
+MINICRM_E2E_BASE_URL=http://localhost:8080 \
+MINICRM_DATABASE_URL='postgres://minicrm:minicrm@localhost:5432/minicrm?sslmode=disable' \
+go test -v -race ./e2e/...
+```
+
+See [README.md](../README.md#docker-compose-test-stack) for the seeded accounts, published ports, and reset instructions.
 
 ---
 

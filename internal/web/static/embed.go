@@ -5,5 +5,5 @@ import "embed"
 
 // FS holds embedded static assets (/static/*).
 //
-//go:embed *.css *.js
+//go:embed *.css *.js *.svg
 var FS embed.FS

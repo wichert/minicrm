@@ -24,7 +24,7 @@ When an email is ingested, `mail.SanitizeEmailHTML` sanitizes the raw HTML part 
 
 ## 2. Layer 2: Opaque-Origin `<iframe sandbox>` Isolation (`internal/web/views/views.go`)
 
-Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. Instead, `/threads/{id}` embeds each message inside an isolated, `credentialless` `<iframe>` pointing to `/emails/{id}/body`:
+Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. Instead, `/threads/{id}` embeds each message inside an isolated `<iframe sandbox>` pointing to `/emails/{id}/body`. The iframe deliberately does **not** use `credentialless`: that attribute strips the `minicrm_session` cookie, so `RequireAuth` would redirect the frame to the OIDC issuer and Chromium would block it under `frame-src 'self'`.
 
 ```html
 <iframe
@@ -32,7 +32,6 @@ Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. I
   src="/emails/{{.Email.ID}}/body"
   sandbox="allow-popups allow-popups-to-escape-sandbox"
   referrerpolicy="no-referrer"
-  credentialless
   loading="lazy">
 </iframe>
 ```
@@ -50,7 +49,7 @@ Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. I
 
 | HTTP Header | Main Application Routes (`/threads`, `/settings`) | Isolated Email Body Route (`/emails/{id}/body`) |
 |---|---|---|
-| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'; upgrade-insecure-requests` | `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox; form-action 'none'; base-uri 'none'; object-src 'none'` |
+| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'` plus `upgrade-insecure-requests` when served over HTTPS | `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox; form-action 'none'; base-uri 'none'; object-src 'none'` |
 | `X-Content-Type-Options` | `nosniff` | `nosniff` |
 | `X-Frame-Options` | `DENY` | `SAMEORIGIN` |
 | `Referrer-Policy` | `no-referrer` | `no-referrer` |
@@ -58,6 +57,8 @@ Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. I
 | `Cross-Origin-Resource-Policy` | `same-origin` | `same-origin` |
 | `Cross-Origin-Embedder-Policy` | `require-corp` | `require-corp` |
 | `Permissions-Policy` | Disables `accelerometer`, `autoplay`, `camera`, `clipboard-read`, `clipboard-write`, `display-capture`, `fullscreen`, `geolocation`, `gyroscope`, `hid`, `idle-detection`, `magnetometer`, `microphone`, `midi`, `payment`, `picture-in-picture`, `publickey-credentials-get`, `screen-wake-lock`, `serial`, `usb`, `web-share`, `xr-spatial-tracking` | Same |
+
+`upgrade-insecure-requests` is only emitted for requests that reached MiniCRM over HTTPS (either a direct TLS connection or `X-Forwarded-Proto: https` from a TLS-terminating reverse proxy). Sending it over plain HTTP would make browsers upgrade same-origin asset URLs such as `/static/app.css` to `https://<host>:8080/...`, which breaks local development stacks that serve HTTP only.
 | `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | `max-age=63072000; includeSubDomains; preload` |
 | `Cache-Control` | `no-store, max-age=0` | `private, no-store, max-age=0` |
 

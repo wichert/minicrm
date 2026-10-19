@@ -64,7 +64,7 @@ Mail accounts are configured with numbered `MINICRM_ACCOUNT_<N>_*` environment v
 | **[`docs/imap.md`](./imap.md)** | Mail server requirements (IMAP & SMTP), `INBOX` UID synchronization, asynchronous `Archive` / `Junk` / `Sent` folder jobs, and safe deletion from `Archive`. |
 | **[`docs/storage.md`](./storage.md)** | PostgreSQL schema reference, UTC `TIMESTAMPTZ` + `display_timezone`, immutable audit trails (`audit_logs` & `thread_events`), `pgx.QueryTracer` structured logging, and content-addressed local disk attachment storage. |
 | **[`docs/workflow-and-threading.md`](./workflow-and-threading.md)** | Reply linking (`In-Reply-To`/`References` + subject/sender fallback), completed-thread replies & **Reopen & Merge**, workflow state machine, and pluggable assignment engine. |
-| **[`docs/security.md`](./security.md)** | Defense-in-depth untrusted HTML email rendering (`bluemonday` allowlist, remote image blocking, `credentialless` `<iframe sandbox>`), HTTP security headers (`Content-Security-Policy`, `Permissions-Policy`, COOP/COEP/CORP, HSTS), and CSRF protection. |
+| **[`docs/security.md`](./security.md)** | Defense-in-depth untrusted HTML email rendering (`bluemonday` allowlist, remote image blocking, `<iframe sandbox>`), HTTP security headers (`Content-Security-Policy`, `Permissions-Policy`, COOP/COEP/CORP, HSTS), and CSRF protection. |
 | **[`docs/testing.md`](./testing.md)** | Unit, integration, and end-to-end (`e2e/`) test suites, local hooks (`prek` + `golangci-lint`), and GitHub Actions CI workflows. |
 
 ---

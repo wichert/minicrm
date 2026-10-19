@@ -5,13 +5,22 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // Strict HTTP security header constants.
 const (
-	MainCSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+	mainCSPBase = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
 		"font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; " +
-		"form-action 'self'; base-uri 'none'; object-src 'none'; upgrade-insecure-requests"
+		"form-action 'self'; base-uri 'none'; object-src 'none'"
+
+	// MainCSP is used for pages served over HTTPS. upgrade-insecure-requests must not be
+	// sent over plain HTTP: browsers would then try to fetch /static/* over HTTPS, which
+	// fails on a development server that only listens on http:// (e.g. port 8080).
+	MainCSP = mainCSPBase + "; upgrade-insecure-requests"
+
+	// MainCSPInsecure is the CSP used for pages served over plain HTTP.
+	MainCSPInsecure = mainCSPBase
 
 	EmailBodyCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; " +
 		"frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox; " +
@@ -32,7 +41,11 @@ const (
 func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", MainCSP)
+		csp := MainCSPInsecure
+		if requestIsHTTPS(r) {
+			csp = MainCSP
+		}
+		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
@@ -45,6 +58,19 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// requestIsHTTPS reports whether the browser reached MiniCRM over HTTPS, either directly
+// or through a TLS-terminating reverse proxy that sets X-Forwarded-Proto.
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if i := strings.IndexByte(proto, ','); i >= 0 {
+		proto = proto[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
 // SetIsolatedEmailBodyHeaders overrides CSP and framing headers for the sandboxed email body iframe endpoint.
