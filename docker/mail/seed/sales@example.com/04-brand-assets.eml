@@ -1,0 +1,48 @@
+From: Mia Marketing <mia@partner.example>
+To: Sales <sales@example.com>
+Subject: Co-marketing: our logo and one-pager
+Date: Tue, 13 Oct 2026 10:20:00 +0000
+Message-ID: <brand-assets-1@partner.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-brand-assets"
+
+--mix-brand-assets
+Content-Type: text/plain; charset=utf-8
+
+Hi,
+
+As discussed, attached are our logo (PNG) and the partnership one-pager (PDF).
+
+Cheers,
+Mia
+
+--mix-brand-assets
+Content-Type: image/png; name="partner-logo.png"
+Content-Disposition: attachment; filename="partner-logo.png"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAv0lEQVR42u3ayw2AMAwE0a2OK/0X
+QB1QAL8kRGK9GosC5h2Jrb34CAAAANNmXbb2zwjQ1T1doh/TpzD0e/pHhnzqxwzySR9jyLC+yyDP
++naDbOsbDXKubzHIvP7VEA0wqX82qET9gyEUYFh/Z0gE2NZfGgC4AczrzwYAAAAAAAAAAAAAAHwA
+/NAA+A7gWcUAwNOiAaD86zQLDg9A+R1ZwpYyYU+csKlPuJVIuFYJuRdKuNgKuZkLuVrk8BVA6TkA
+wLdbvXBr0g8AAAAASUVORK5CYII=
+--mix-brand-assets
+Content-Type: application/pdf; name="partnership-one-pager.pdf"
+Content-Disposition: attachment; filename="partnership-one-pager.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2Jq
+CjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2Jq
+CjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA1OTUg
+ODQyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4g
+Pj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCAyMTIgPj4Kc3RyZWFtCkJUCi9GMSAyMCBU
+Zgo3MiA3NjAgVGQKKFBhcnRuZXJzaGlwIG9uZS1wYWdlcikgVGoKL0YxIDEyIFRmCjAgLTMwIFRk
+CjE2IFRMCihQYXJ0bmVyOiBQYXJ0bmVyIEJWKSBUaiBUKgooRm9jdXM6IGNvLW1hcmtldGluZyB3
+ZWJpbmFyKSBUaiBUKgooUHJvcG9zZWQgZGF0ZTogMjAyNi0xMS0xMikgVGogVCoKKENvbnRhY3Q6
+IG1pYUBwYXJ0bmVyLmV4YW1wbGUpIFRqIFQqCkVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8
+PCAvVHlwZSAvRm9udCAvU3VidHlwZSAvVHlwZTEgL0Jhc2VGb250IC9IZWx2ZXRpY2EgPj4KZW5k
+b2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAw
+MDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMTUgMDAwMDAgbiAKMDAwMDAwMDI0MSAwMDAwMCBuIAow
+MDAwMDAwNTA0IDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNiAvUm9vdCAxIDAgUiA+PgpzdGFy
+dHhyZWYKNTc0CiUlRU9GCg==
+--mix-brand-assets--

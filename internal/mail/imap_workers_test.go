@@ -2,8 +2,10 @@ package mail_test
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,8 @@ type fakeIMAPServer struct {
 	uidValidity int64
 	mailboxes   map[string]map[int64][]byte
 	appended    map[string][][]byte
+	lastSince   time.Time
+	batches     [][]int64
 }
 
 func newFakeIMAPServer() *fakeIMAPServer {
@@ -45,18 +49,27 @@ func (s *fakeIMAPServer) SelectMailbox(_ context.Context, mailbox string) (int64
 	return s.uidValidity, nil
 }
 
-func (s *fakeIMAPServer) FetchMessagesSinceUID(_ context.Context, mailbox string, afterUID int64) (int64, []mail.RawIMAPMessage, error) {
-	var out []mail.RawIMAPMessage
-	for uid, raw := range s.mailboxes[mailbox] {
+func (s *fakeIMAPServer) ListUIDsSince(_ context.Context, mailbox string, afterUID int64, since time.Time) ([]int64, error) {
+	s.lastSince = since
+	var out []int64
+	for uid := range s.mailboxes[mailbox] {
 		if uid > afterUID {
-			out = append(out, mail.RawIMAPMessage{
-				UID:         uid,
-				UIDValidity: s.uidValidity,
-				RawRFC822:   raw,
-			})
+			out = append(out, uid)
 		}
 	}
-	return s.uidValidity, out, nil
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func (s *fakeIMAPServer) FetchMessagesByUID(_ context.Context, mailbox string, uids []int64) ([]mail.RawIMAPMessage, error) {
+	s.batches = append(s.batches, append([]int64(nil), uids...))
+	var out []mail.RawIMAPMessage
+	for _, uid := range uids {
+		if raw, ok := s.mailboxes[mailbox][uid]; ok {
+			out = append(out, mail.RawIMAPMessage{UID: uid, UIDValidity: s.uidValidity, RawRFC822: raw})
+		}
+	}
+	return out, nil
 }
 
 func (s *fakeIMAPServer) MoveMessage(_ context.Context, sourceMailbox string, _, uid int64, targetMailbox string) error {
@@ -515,5 +528,114 @@ func TestIMAPSyncSameEmailTwoAccountsCreatesTwoThreadsAndOneBlob(t *testing.T) {
 	}
 	if fileCount != 1 {
 		t.Fatalf("expected exactly 1 attachment blob on disk, found %d", fileCount)
+	}
+}
+
+func TestDialIMAPErrorIdentifiesServerAndUser(t *testing.T) {
+	_, err := mail.DialIMAP("127.0.0.1", 1, "agent@example.com", "secret", true)
+	if err == nil {
+		t.Fatal("expected dial error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "127.0.0.1:1") || !strings.Contains(msg, "agent@example.com") {
+		t.Fatalf("error must name server and username: %q", msg)
+	}
+	if strings.Contains(msg, "secret") {
+		t.Fatalf("error must not leak the password: %q", msg)
+	}
+}
+
+func syncTestRig(t *testing.T, imapSrv *fakeIMAPServer) (*mail.IMAPSyncWorker, *memCRMStore) {
+	t.Helper()
+	store := newMemCRMStore()
+	attStore, err := storage.NewStore(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	auditLogger := audit.NewLogger(store, nil)
+	matcher := threading.NewMatcher(store, assignment.NewEngine(0.5, assignment.NewDefaultAssigneeResolver(store)), auditLogger)
+	dialer := func(_ context.Context) (mail.IMAPClient, error) { return imapSrv, nil }
+	return mail.NewIMAPSyncWorker("support", store, matcher, attStore, dialer, time.Minute, nil), store
+}
+
+func plainMail(n int) []byte {
+	return []byte(fmt.Sprintf("From: C <c%d@client.com>\r\nTo: s@company.com\r\nSubject: Subject %d\r\n"+
+		"Message-ID: <m%d@client.com>\r\nDate: Sun, 12 Apr 2026 10:00:00 +0000\r\n\r\nBody %d\r\n", n, n, n, n))
+}
+
+func TestIMAPSyncInitialCutoffBatchesAndBackfill(t *testing.T) {
+	imapSrv := newFakeIMAPServer()
+	for i := 1; i <= 45; i++ {
+		imapSrv.mailboxes["INBOX"][int64(i)] = plainMail(i)
+	}
+	worker, store := syncTestRig(t, imapSrv)
+	ctx := context.Background()
+
+	n, err := worker.SyncOnce(ctx)
+	if err != nil || n != 45 {
+		t.Fatalf("SyncOnce: n=%d err=%v", n, err)
+	}
+	// New account: only the last 60 days are requested by default.
+	if imapSrv.lastSince.IsZero() || time.Since(imapSrv.lastSince) < 59*24*time.Hour || time.Since(imapSrv.lastSince) > 61*24*time.Hour {
+		t.Fatalf("expected a ~60 day cutoff on the first sync, got %v", imapSrv.lastSince)
+	}
+	// Messages are downloaded in bounded batches rather than all at once.
+	if len(imapSrv.batches) < 3 {
+		t.Fatalf("expected the download to be batched, got %d batch(es)", len(imapSrv.batches))
+	}
+	for _, b := range imapSrv.batches {
+		if len(b) > 20 {
+			t.Fatalf("batch too large: %d", len(b))
+		}
+	}
+	if st := store.syncStates["support/INBOX"]; st.LastSyncedUID != 45 {
+		t.Fatalf("expected watermark 45, got %+v (%v)", st, store.syncStates)
+	}
+
+	// Subsequent syncs have a watermark and no date cutoff.
+	imapSrv.mailboxes["INBOX"][46] = plainMail(46)
+	if n, err := worker.SyncOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("SyncOnce 2: n=%d err=%v", n, err)
+	}
+	if !imapSrv.lastSince.IsZero() {
+		t.Fatalf("expected no cutoff once a watermark exists, got %v", imapSrv.lastSince)
+	}
+
+	// initialSyncDays=0 backfills the complete history (no cutoff).
+	full := newFakeIMAPServer()
+	full.mailboxes["INBOX"][1] = plainMail(1)
+	w2, _ := syncTestRig(t, full)
+	if _, err := w2.WithInitialSyncDays(0).SyncOnce(ctx); err != nil {
+		t.Fatalf("backfill SyncOnce: %v", err)
+	}
+	if !full.lastSince.IsZero() {
+		t.Fatalf("backfill must not apply a cutoff, got %v", full.lastSince)
+	}
+}
+
+func TestIMAPSyncSkipsUnparseableMessageAndContinues(t *testing.T) {
+	imapSrv := newFakeIMAPServer()
+	imapSrv.mailboxes["INBOX"][1] = plainMail(1)
+	imapSrv.mailboxes["INBOX"][2] = []byte("From: a@b.c\r\nSubject: broken\r\nMessage-ID: <broken@x>\r\n" +
+		"Content-Type: multipart/mixed; boundary=zz\r\n\r\n--zz\r\nContent-Type: text/plain\r\n\r\ntruncated")
+	imapSrv.mailboxes["INBOX"][3] = plainMail(3)
+	worker, store := syncTestRig(t, imapSrv)
+
+	n, err := worker.SyncOnce(context.Background())
+	if err != nil {
+		t.Fatalf("a bad message must not fail the sync: %v", err)
+	}
+	if n != 2 && n != 3 {
+		t.Fatalf("unexpected ingested count %d", n)
+	}
+	if got := len(store.emails); got != n {
+		t.Fatalf("emails stored = %d, want %d", got, n)
+	}
+	if st := store.syncStates["support/INBOX"]; st.LastSyncedUID != 3 {
+		t.Fatalf("watermark must advance past the bad message, got %+v", st)
+	}
+	// The next poll has nothing left to do.
+	if n, err := worker.SyncOnce(context.Background()); err != nil || n != 0 {
+		t.Fatalf("second sync: n=%d err=%v", n, err)
 	}
 }

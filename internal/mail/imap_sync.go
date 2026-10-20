@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -34,7 +35,11 @@ type RawIMAPMessage struct {
 // IMAPClient abstracts IMAP operations for syncing INBOX, moving messages to Junk/Archive, and appending Sent.
 type IMAPClient interface {
 	SelectMailbox(ctx context.Context, mailbox string) (uidValidity int64, err error)
-	FetchMessagesSinceUID(ctx context.Context, mailbox string, afterUID int64) (uidValidity int64, msgs []RawIMAPMessage, err error)
+	// ListUIDsSince returns, in ascending order, the UIDs in mailbox that are greater than afterUID.
+	// When since is non-zero only messages received on or after that date are returned.
+	ListUIDsSince(ctx context.Context, mailbox string, afterUID int64, since time.Time) (uids []int64, err error)
+	// FetchMessagesByUID downloads the full messages for the given UIDs of the currently selected or given mailbox.
+	FetchMessagesByUID(ctx context.Context, mailbox string, uids []int64) ([]RawIMAPMessage, error)
 	MoveMessage(ctx context.Context, sourceMailbox string, uidValidity, uid int64, targetMailbox string) error
 	AppendMessage(ctx context.Context, targetMailbox string, rawRFC822 []byte) error
 	Close() error
@@ -43,6 +48,27 @@ type IMAPClient interface {
 // GoIMAPClient implements IMAPClient using github.com/emersion/go-imap/v2/imapclient.
 type GoIMAPClient struct {
 	client *imapclient.Client
+}
+
+// IMAPEndpoint identifies the IMAP server and login used for a mail account; it is attached to
+// log records so failures can be traced to a specific account and server.
+type IMAPEndpoint struct {
+	Host     string
+	Port     int
+	Username string
+}
+
+// Addr returns host:port.
+func (e IMAPEndpoint) Addr() string {
+	return net.JoinHostPort(e.Host, fmt.Sprintf("%d", e.Port))
+}
+
+// LogAttrs returns structured log attributes describing the endpoint (never the password).
+func (e IMAPEndpoint) LogAttrs() []any {
+	if e.Host == "" {
+		return nil
+	}
+	return []any{slog.String("imap_server", e.Addr()), slog.String("imap_username", e.Username)}
 }
 
 // DialIMAP connects and authenticates to the IMAP server using basic username + password.
@@ -62,11 +88,11 @@ func DialIMAP(host string, port int, username, password string, implicitTLS bool
 		c, err = imapclient.DialStartTLS(addr, &imapclient.Options{TLSConfig: tlsCfg})
 	}
 	if err != nil {
-		return nil, fmt.Errorf("dial imap %s: %w", addr, err)
+		return nil, fmt.Errorf("dial imap server %s (user %q): %w", addr, username, err)
 	}
 	if err := c.Login(username, password).Wait(); err != nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("imap login: %w", err)
+		return nil, fmt.Errorf("imap login to server %s as user %q: %w", addr, username, err)
 	}
 	return &GoIMAPClient{client: c}, nil
 }
@@ -80,25 +106,62 @@ func (g *GoIMAPClient) SelectMailbox(_ context.Context, mailbox string) (int64, 
 	return int64(data.UIDValidity), nil
 }
 
-// FetchMessagesSinceUID fetches all messages in mailbox with UID > afterUID using BODY.PEEK[].
-func (g *GoIMAPClient) FetchMessagesSinceUID(ctx context.Context, mailbox string, afterUID int64) (int64, []RawIMAPMessage, error) {
+// ListUIDsSince returns the ascending UIDs in mailbox with UID > afterUID, optionally limited to
+// messages received on or after since (IMAP SEARCH SINCE; only the date is significant).
+func (g *GoIMAPClient) ListUIDsSince(ctx context.Context, mailbox string, afterUID int64, since time.Time) ([]int64, error) {
+	if _, err := g.SelectMailbox(ctx, mailbox); err != nil {
+		return nil, err
+	}
+	criteria := &imap.SearchCriteria{}
+	if afterUID > 0 {
+		startUID, err := toIMAPUID(afterUID + 1)
+		if err != nil {
+			return nil, err
+		}
+		var set imap.UIDSet
+		set.AddRange(startUID, 0) // <afterUID+1>:*
+		criteria.UID = []imap.UIDSet{set}
+	}
+	if !since.IsZero() {
+		criteria.Since = since
+	}
+	data, err := g.client.UIDSearch(criteria, nil).Wait()
+	if err != nil {
+		return nil, fmt.Errorf("imap uid search in %q: %w", mailbox, err)
+	}
+	var out []int64
+	for _, uid := range data.AllUIDs() {
+		// "N:*" always matches the highest UID even when it is below N, so filter explicitly.
+		if int64(uid) > afterUID {
+			out = append(out, int64(uid))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+// FetchMessagesByUID downloads the complete messages (BODY.PEEK[]) for uids from mailbox.
+// A read error on any literal fails the whole call so truncated messages are never ingested.
+func (g *GoIMAPClient) FetchMessagesByUID(ctx context.Context, mailbox string, uids []int64) ([]RawIMAPMessage, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
 	uidVal, err := g.SelectMailbox(ctx, mailbox)
 	if err != nil {
-		return 0, nil, err
-	}
-
-	startUID, err := toIMAPUID(afterUID + 1)
-	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	var uidSet imap.UIDSet
-	uidSet.AddRange(startUID, 0) // <afterUID+1>:*
-	bodySection := &imap.FetchItemBodySection{Peek: true}
+	for _, u := range uids {
+		iu, err := toIMAPUID(u)
+		if err != nil {
+			return nil, err
+		}
+		uidSet.AddNum(iu)
+	}
 	fetchOpts := &imap.FetchOptions{
 		UID:         true,
-		BodySection: []*imap.FetchItemBodySection{bodySection},
+		BodySection: []*imap.FetchItemBodySection{{Peek: true}},
 	}
-
 	fetchCmd := g.client.Fetch(uidSet, fetchOpts)
 	var out []RawIMAPMessage
 	for {
@@ -109,6 +172,7 @@ func (g *GoIMAPClient) FetchMessagesSinceUID(ctx context.Context, mailbox string
 		var (
 			uid     imap.UID
 			rawBody []byte
+			readErr error
 		)
 		for {
 			item := msg.Next()
@@ -119,27 +183,102 @@ func (g *GoIMAPClient) FetchMessagesSinceUID(ctx context.Context, mailbox string
 			case imapclient.FetchItemDataUID:
 				uid = data.UID
 			case imapclient.FetchItemDataBodySection:
-				rawBody, _ = io.ReadAll(data.Literal)
+				rawBody, readErr = io.ReadAll(data.Literal)
 			}
 		}
-		if int64(uid) > afterUID && len(rawBody) > 0 {
-			out = append(out, RawIMAPMessage{
-				UID:         int64(uid),
-				UIDValidity: uidVal,
-				RawRFC822:   rawBody,
-			})
+		if readErr != nil {
+			_ = fetchCmd.Close()
+			return nil, fmt.Errorf("read imap message uid %d: %w", uid, readErr)
 		}
+		out = append(out, RawIMAPMessage{UID: int64(uid), UIDValidity: uidVal, RawRFC822: rawBody})
 	}
 	if err := fetchCmd.Close(); err != nil {
-		return uidVal, nil, fmt.Errorf("imap fetch close: %w", err)
+		return nil, fmt.Errorf("imap fetch close: %w", err)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UID < out[j].UID })
-	return uidVal, out, nil
+	return out, nil
+}
+
+// ensureMailbox maps a configured folder name (e.g. "Junk") onto the server's real mailbox name
+// and creates the folder when it does not exist yet. Servers that keep personal folders below
+// INBOX (namespace prefix "INBOX." or "INBOX/") reject top-level names such as "Junk", so the
+// personal namespace prefix is applied when needed.
+func (g *GoIMAPClient) ensureMailbox(name string) (string, error) {
+	listed, err := g.client.List("", "*", nil).Collect()
+	if err != nil {
+		return "", fmt.Errorf("imap list mailboxes: %w", err)
+	}
+	existing := make([]string, 0, len(listed))
+	var delim rune
+	for _, l := range listed {
+		existing = append(existing, l.Mailbox)
+		if delim == 0 && l.Delim != 0 {
+			delim = l.Delim
+		}
+	}
+	var personalPrefix string
+	if g.client.Caps().Has(imap.CapNamespace) {
+		if ns, err := g.client.Namespace().Wait(); err == nil && len(ns.Personal) > 0 {
+			personalPrefix = ns.Personal[0].Prefix
+			if ns.Personal[0].Delim != 0 {
+				delim = ns.Personal[0].Delim
+			}
+		}
+	}
+	target, exists := resolveMailboxName(name, existing, delim, personalPrefix)
+	if exists {
+		return target, nil
+	}
+	if err := g.client.Create(target, nil).Wait(); err != nil {
+		return "", fmt.Errorf("create imap mailbox %q (configured as %q): %w", target, name, err)
+	}
+	return target, nil
+}
+
+// resolveMailboxName returns the real server-side name for the configured folder name and
+// whether that mailbox already exists. personalPrefix is the NAMESPACE personal prefix (may
+// be empty); when unknown, an "INBOX<delim>" hierarchy among the existing mailboxes is used.
+func resolveMailboxName(name string, existing []string, delim rune, personalPrefix string) (string, bool) {
+	if strings.EqualFold(name, "INBOX") {
+		return "INBOX", true
+	}
+	find := func(candidate string) (string, bool) {
+		for _, e := range existing {
+			if strings.EqualFold(e, candidate) {
+				return e, true
+			}
+		}
+		return "", false
+	}
+	if e, ok := find(name); ok {
+		return e, true
+	}
+	prefix := personalPrefix
+	if prefix == "" && delim != 0 {
+		inboxPrefix := "INBOX" + string(delim)
+		for _, e := range existing {
+			if strings.HasPrefix(strings.ToUpper(e), inboxPrefix) {
+				prefix = inboxPrefix
+				break
+			}
+		}
+	}
+	if prefix == "" || strings.HasPrefix(strings.ToUpper(name), strings.ToUpper(prefix)) {
+		return name, false
+	}
+	candidate := prefix + name
+	if e, ok := find(candidate); ok {
+		return e, true
+	}
+	return candidate, false
 }
 
 // MoveMessage moves a message by UID from sourceMailbox to targetMailbox (creating targetMailbox if needed).
 func (g *GoIMAPClient) MoveMessage(ctx context.Context, sourceMailbox string, uidValidity, uid int64, targetMailbox string) error {
-	_ = g.client.Create(targetMailbox, nil).Wait()
+	targetMailbox, err := g.ensureMailbox(targetMailbox)
+	if err != nil {
+		return err
+	}
 	curValidity, err := g.SelectMailbox(ctx, sourceMailbox)
 	if err != nil {
 		return err
@@ -162,7 +301,10 @@ func (g *GoIMAPClient) MoveMessage(ctx context.Context, sourceMailbox string, ui
 
 // AppendMessage appends a raw RFC 822 message to targetMailbox with the \Seen flag.
 func (g *GoIMAPClient) AppendMessage(_ context.Context, targetMailbox string, rawRFC822 []byte) error {
-	_ = g.client.Create(targetMailbox, nil).Wait()
+	targetMailbox, err := g.ensureMailbox(targetMailbox)
+	if err != nil {
+		return err
+	}
 	appendCmd := g.client.Append(targetMailbox, int64(len(rawRFC822)), &imap.AppendOptions{
 		Flags: []imap.Flag{imap.FlagSeen},
 		Time:  time.Now().UTC(),
@@ -204,13 +346,19 @@ type SyncStore interface {
 
 // IMAPSyncWorker pulls incoming emails from the IMAP INBOX and ingests them into PostgreSQL + disk.
 type IMAPSyncWorker struct {
-	accountID   string
-	store       SyncStore
-	matcher     *threading.Matcher
-	attachments *storage.Store
-	dialer      func(ctx context.Context) (IMAPClient, error)
-	pollEvery   time.Duration
-	logger      *slog.Logger
+	accountID string
+	endpoint  IMAPEndpoint
+	// initialSyncDays limits the very first sync of an account to messages received within
+	// the last N days; 0 downloads the complete mailbox history.
+	initialSyncDays int
+	batchSize       int
+	now             func() time.Time
+	store           SyncStore
+	matcher         *threading.Matcher
+	attachments     *storage.Store
+	dialer          func(ctx context.Context) (IMAPClient, error)
+	pollEvery       time.Duration
+	logger          *slog.Logger
 }
 
 // NewIMAPSyncWorker creates a new IMAPSyncWorker.
@@ -237,7 +385,31 @@ func NewIMAPSyncWorker(
 		dialer:      dialer,
 		pollEvery:   pollEvery,
 		logger:      logger,
+
+		initialSyncDays: DefaultInitialSyncDays,
+		batchSize:       defaultSyncBatchSize,
+		now:             time.Now,
 	}
+}
+
+// DefaultInitialSyncDays is how far back a brand-new account is synchronized by default.
+const DefaultInitialSyncDays = 60
+
+const defaultSyncBatchSize = 20
+
+// WithInitialSyncDays sets how many days of history the first sync downloads (0 = everything).
+func (w *IMAPSyncWorker) WithInitialSyncDays(days int) *IMAPSyncWorker {
+	if days < 0 {
+		days = 0
+	}
+	w.initialSyncDays = days
+	return w
+}
+
+// WithEndpoint records the IMAP server and username so log records identify them.
+func (w *IMAPSyncWorker) WithEndpoint(e IMAPEndpoint) *IMAPSyncWorker {
+	w.endpoint = e
+	return w
 }
 
 // Run starts the periodic IMAP sync loop until ctx is canceled.
@@ -247,7 +419,7 @@ func (w *IMAPSyncWorker) Run(ctx context.Context) {
 
 	for {
 		if _, err := w.SyncOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			w.logger.ErrorContext(ctx, "imap_sync_error", slog.String("error", err.Error()))
+			w.logger.ErrorContext(ctx, "imap_sync_error", w.attrs(slog.String("error", err.Error()))...)
 		}
 		select {
 		case <-ctx.Done():
@@ -291,20 +463,56 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 		afterUID = 0
 	}
 
-	_, msgs, err := client.FetchMessagesSinceUID(ctx, inbox, afterUID)
+	// A brand-new account (no watermark) only pulls recent history unless a full backfill is configured.
+	var since time.Time
+	if afterUID == 0 && w.initialSyncDays > 0 {
+		since = w.now().UTC().AddDate(0, 0, -w.initialSyncDays)
+	}
+
+	uids, err := client.ListUIDsSince(ctx, inbox, afterUID, since)
 	if err != nil {
 		return 0, err
 	}
+	if afterUID == 0 && len(uids) > 0 {
+		w.logger.InfoContext(ctx, "imap_initial_sync_started", w.attrs(
+			slog.Int("messages", len(uids)),
+			slog.Int("initial_sync_days", w.initialSyncDays),
+		)...)
+	}
 
-	ingested := 0
+	ingested, skipped := 0, 0
 	highestUID := afterUID
-	for _, rawMsg := range msgs {
-		if err := w.ingestOne(ctx, inbox, uidVal, rawMsg); err != nil {
-			return ingested, fmt.Errorf("ingest uid %d: %w", rawMsg.UID, err)
+	for start := 0; start < len(uids); start += w.batchSize {
+		if err := ctx.Err(); err != nil {
+			return ingested, err
 		}
-		if rawMsg.UID > highestUID {
-			highestUID = rawMsg.UID
+		end := min(start+w.batchSize, len(uids))
+		msgs, err := client.FetchMessagesByUID(ctx, inbox, uids[start:end])
+		if err != nil {
+			return ingested, err
 		}
+		for _, rawMsg := range msgs {
+			if len(rawMsg.RawRFC822) == 0 {
+				skipped++
+				w.logger.WarnContext(ctx, "imap_message_skipped", w.attrs(
+					slog.Int64("uid", rawMsg.UID), slog.String("reason", "empty message body"))...)
+			} else if err := w.ingestOne(ctx, inbox, uidVal, rawMsg); err != nil {
+				var parseErr *parseMessageError
+				if !errors.As(err, &parseErr) {
+					return ingested, fmt.Errorf("ingest uid %d: %w", rawMsg.UID, err)
+				}
+				// A message that cannot be parsed will never succeed; skip it so it cannot block the mailbox.
+				skipped++
+				w.logger.WarnContext(ctx, "imap_message_skipped", w.attrs(
+					slog.Int64("uid", rawMsg.UID), slog.String("reason", err.Error()))...)
+			} else {
+				ingested++
+			}
+			if rawMsg.UID > highestUID {
+				highestUID = rawMsg.UID
+			}
+		}
+		// Persist progress after every batch so a failure never re-downloads completed work.
 		if err := w.store.UpsertIMAPSyncState(ctx, sqlc.IMAPSyncState{
 			AccountID:     w.accountID,
 			Mailbox:       inbox,
@@ -313,15 +521,30 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 		}); err != nil {
 			return ingested, fmt.Errorf("update imap_sync_state: %w", err)
 		}
-		ingested++
+	}
+	if ingested > 0 || skipped > 0 {
+		w.logger.InfoContext(ctx, "imap_sync_completed", w.attrs(
+			slog.Int("ingested", ingested), slog.Int("skipped", skipped), slog.Int64("last_uid", highestUID))...)
 	}
 	return ingested, nil
 }
 
+// attrs returns log attributes identifying this worker's account and IMAP server, plus extra.
+func (w *IMAPSyncWorker) attrs(extra ...any) []any {
+	out := append([]any{slog.String("account_id", w.accountID)}, w.endpoint.LogAttrs()...)
+	return append(out, extra...)
+}
+
+// parseMessageError marks a message that is permanently unparseable (as opposed to a transient failure).
+type parseMessageError struct{ err error }
+
+func (e *parseMessageError) Error() string { return "parse rfc5322: " + e.err.Error() }
+func (e *parseMessageError) Unwrap() error { return e.err }
+
 func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValidity int64, rawMsg RawIMAPMessage) error {
 	parsed, err := ParseRFC5322(bytes.NewReader(rawMsg.RawRFC822))
 	if err != nil {
-		return fmt.Errorf("parse rfc5322: %w", err)
+		return &parseMessageError{err: err}
 	}
 
 	// Deduplicate by Message-ID within this account, so an email delivered to several

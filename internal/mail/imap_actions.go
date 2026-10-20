@@ -29,6 +29,7 @@ type IMAPActionWorker struct {
 	store       ActionJobStore
 	attachments *storage.Store
 	dialer      AccountDialer
+	endpoints   map[string]IMAPEndpoint
 	wakeCh      <-chan struct{}
 	logger      *slog.Logger
 }
@@ -51,6 +52,12 @@ func NewIMAPActionWorker(
 		wakeCh:      wakeCh,
 		logger:      logger,
 	}
+}
+
+// WithEndpoints records the IMAP server and username per account ID for log records.
+func (w *IMAPActionWorker) WithEndpoints(endpoints map[string]IMAPEndpoint) *IMAPActionWorker {
+	w.endpoints = endpoints
+	return w
 }
 
 // Run processes IMAP jobs until ctx is canceled.
@@ -87,12 +94,14 @@ func (w *IMAPActionWorker) ProcessPending(ctx context.Context) (int, error) {
 			backoff := time.Duration(1<<min(job.Attempts, 8)) * time.Second
 			nextRun := time.Now().UTC().Add(backoff)
 			_ = w.store.FailIMAPJob(ctx, job.ID, job.Attempts, job.MaxAttempts, err.Error(), nextRun)
-			w.logger.WarnContext(ctx, "imap_job_failed",
+			attrs := []any{
 				slog.String("job_id", job.ID.String()),
 				slog.String("job_type", job.JobType),
-				slog.Int("attempts", job.Attempts),
-				slog.String("error", err.Error()),
-			)
+				slog.String("account_id", job.AccountID),
+			}
+			attrs = append(attrs, w.endpoints[job.AccountID].LogAttrs()...)
+			attrs = append(attrs, slog.Int("attempts", job.Attempts), slog.String("error", err.Error()))
+			w.logger.WarnContext(ctx, "imap_job_failed", attrs...)
 			continue
 		}
 		processed++

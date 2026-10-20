@@ -78,10 +78,10 @@ func (t *GoMailTransport) Send(ctx context.Context, msg *gomail.Msg) error {
 	}
 	client, err := gomail.NewClient(t.host, opts...)
 	if err != nil {
-		return fmt.Errorf("create smtp client: %w", err)
+		return fmt.Errorf("create smtp client for server %s:%d (user %q): %w", t.host, t.port, t.username, err)
 	}
 	if err := client.DialAndSendWithContext(ctx, msg); err != nil {
-		return fmt.Errorf("smtp dial and send: %w", err)
+		return fmt.Errorf("smtp send via server %s:%d (user %q): %w", t.host, t.port, t.username, err)
 	}
 	return nil
 }
@@ -111,6 +111,10 @@ type AccountSenderConfig struct {
 	FromAddress string
 	FromName    string
 	Transport   SMTPTransport
+	// SMTPServer (host:port) and SMTPUsername are used only to identify the account's
+	// SMTP login in log records; they are optional.
+	SMTPServer   string
+	SMTPUsername string
 }
 
 // OutboxWorker composes outbound replies, sends them via SMTP, and queues IMAP Sent folder APPENDs.
@@ -348,25 +352,39 @@ func (w *OutboxWorker) ProcessPending(ctx context.Context) (int, error) {
 		if err != nil {
 			return sentCount, fmt.Errorf("claim outbox email: %w", err)
 		}
-		if err := w.sendOne(ctx, item); err != nil {
+		if accountID, err := w.sendOne(ctx, item); err != nil {
 			backoff := time.Duration(1<<min(item.Attempts, 8)) * time.Second
 			_ = w.store.FailOutboxEmail(ctx, item.ID, item.Attempts, err.Error(), time.Now().UTC().Add(backoff))
-			w.logger.WarnContext(ctx, "smtp_send_failed",
+			attrs := []any{
 				slog.String("outbox_id", item.ID.String()),
 				slog.String("email_id", item.EmailID.String()),
-				slog.String("error", err.Error()),
-			)
+				slog.String("account_id", accountID),
+			}
+			if cfg, ok := w.senders[accountID]; ok && cfg.SMTPServer != "" {
+				attrs = append(attrs, slog.String("smtp_server", cfg.SMTPServer), slog.String("smtp_username", cfg.SMTPUsername))
+			}
+			attrs = append(attrs, slog.String("error", err.Error()))
+			w.logger.WarnContext(ctx, "smtp_send_failed", attrs...)
 			continue
 		}
 		sentCount++
 	}
 }
 
-func (w *OutboxWorker) sendOne(ctx context.Context, item sqlc.OutboxEmail) error {
+// sendOne delivers a single outbox email and reports the owning account ID (empty if the
+// email could not be loaded) so failures can be attributed to an account in logs.
+func (w *OutboxWorker) sendOne(ctx context.Context, item sqlc.OutboxEmail) (string, error) {
+	accountID := ""
+	err := w.sendOneInner(ctx, item, &accountID)
+	return accountID, err
+}
+
+func (w *OutboxWorker) sendOneInner(ctx context.Context, item sqlc.OutboxEmail, accountID *string) error {
 	emailRec, err := w.store.GetEmailByID(ctx, item.EmailID)
 	if err != nil {
 		return fmt.Errorf("load email %s: %w", item.EmailID, err)
 	}
+	*accountID = emailRec.AccountID
 	atts, err := w.store.ListAttachmentsByEmail(ctx, emailRec.ID)
 	if err != nil {
 		return fmt.Errorf("load attachments for email %s: %w", emailRec.ID, err)

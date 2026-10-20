@@ -68,6 +68,11 @@ IMAP Server (INBOX)                      IMAPSyncWorker                         
         |                                       |-------------------------------------->|
 ```
 
+### Initial Sync Window, Batching & Bad Messages
+- **Recent history only by default**: when an account has no watermark yet (or `UIDVALIDITY` changed), `SyncOnce` issues `UID SEARCH SINCE <today - N days>` and only ingests those messages. `N` is `MINICRM_ACCOUNT_<N>_IMAP_INITIAL_SYNC_DAYS` (default `60`). Set it to `0` to backfill the complete mailbox history (can take very long on large mailboxes). Once a watermark exists the cutoff is no longer applied.
+- **Batched download**: matching UIDs are fetched in batches of 20 (`UID FETCH <uids> BODY.PEEK[]`), ingested, and the `imap_sync_state` watermark is saved after every batch, so memory stays bounded, progress is visible (`imap_initial_sync_started` / `imap_sync_completed` logs), and a failure never re-downloads completed work.
+- **Poison messages**: a message that cannot be parsed (or is empty) is logged as `imap_message_skipped` (with account, server, username, UID and reason) and skipped; the watermark advances past it so it cannot block the mailbox. Truncated IMAP literals fail the fetch instead of being parsed.
+
 ### UID Watermark & `UIDVALIDITY` Handling
 - MiniCRM stores `(mailbox, uid_validity, last_synced_uid)` in the `imap_sync_state` table for `INBOX`.
 - On each sync pass (`SyncOnce`):

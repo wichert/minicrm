@@ -1,0 +1,38 @@
+From: Bob Builder <bob@customer.example>
+To: Customer Support <support@example.com>
+Subject: Payment receipt for INV-2026-0042
+Date: Thu, 15 Oct 2026 09:10:00 +0000
+Message-ID: <payment-receipt-1@customer.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-payment-receipt"
+
+--mix-payment-receipt
+Content-Type: text/plain; charset=utf-8
+
+Hello,
+
+For your records, the bank receipt for the corrected invoice is attached as a PDF.
+
+Regards,
+Bob Builder
+
+--mix-payment-receipt
+Content-Type: application/pdf; name="receipt-INV-2026-0042.pdf"
+Content-Disposition: attachment; filename="receipt-INV-2026-0042.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2Jq
+CjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2Jq
+CjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA1OTUg
+ODQyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4g
+Pj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCAyMjkgPj4Kc3RyZWFtCkJUCi9GMSAyMCBU
+Zgo3MiA3NjAgVGQKKFBheW1lbnQgcmVjZWlwdCkgVGoKL0YxIDEyIFRmCjAgLTMwIFRkCjE2IFRM
+CihJbnZvaWNlOiBJTlYtMjAyNi0wMDQyKSBUaiBUKgooQW1vdW50OiBFVVIgMSwyNTAuMDApIFRq
+IFQqCihQYWlkIG9uOiAyMDI2LTEwLTE0KSBUaiBUKgooUGF5ZXI6IEFjbWUgQ29uc3RydWN0aW9u
+KSBUaiBUKgooUmVmZXJlbmNlOiBjb3JyZWN0ZWQgaW52b2ljZSkgVGogVCoKRVQKZW5kc3RyZWFt
+CmVuZG9iago1IDAgb2JqCjw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQg
+L0hlbHZldGljYSA+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAw
+MDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAowMDAw
+MDAwMjQxIDAwMDAwIG4gCjAwMDAwMDA1MjEgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA2IC9S
+b290IDEgMCBSID4+CnN0YXJ0eHJlZgo1OTEKJSVFT0YK
+--mix-payment-receipt--

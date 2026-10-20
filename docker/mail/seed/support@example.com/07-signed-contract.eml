@@ -1,0 +1,64 @@
+From: Carla Contract <carla@acme.example>
+To: Customer Support <support@example.com>
+Subject: Signed support contract
+Date: Fri, 16 Oct 2026 13:30:00 +0000
+Message-ID: <signed-contract-1@acme.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="rel-signed-contract"
+
+--rel-signed-contract
+Content-Type: multipart/related; boundary="rel-inner"
+
+--rel-inner
+Content-Type: multipart/alternative; boundary="alt-inner"
+
+--alt-inner
+Content-Type: text/plain; charset=utf-8
+
+Hi team,
+
+Please find our signed support contract attached.
+
+Best,
+Carla
+
+--alt-inner
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Hi team,</p><p>Please find our signed support contract attached. Our logo is below for the website listing.</p><p><img src="cid:logo@acme" alt="Acme logo" width="64" height="64"></p><p>Best,<br>Carla</p></body></html>
+
+--alt-inner--
+
+--rel-inner
+Content-Type: image/png; name="logo.png"
+Content-ID: <logo@acme>
+Content-Disposition: inline; filename="logo.png"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAv0lEQVR42u3ayw2AMAwE0a2OK/0X
+QB1QAL8kRGK9GosC5h2Jrb34CAAAANNmXbb2zwjQ1T1doh/TpzD0e/pHhnzqxwzySR9jyLC+yyDP
++naDbOsbDXKubzHIvP7VEA0wqX82qET9gyEUYFh/Z0gE2NZfGgC4AczrzwYAAAAAAAAAAAAAAHwA
+/NAA+A7gWcUAwNOiAaD86zQLDg9A+R1ZwpYyYU+csKlPuJVIuFYJuRdKuNgKuZkLuVrk8BVA6TkA
+wLdbvXBr0g8AAAAASUVORK5CYII=
+--rel-inner--
+
+--rel-signed-contract
+Content-Type: application/pdf; name="support-contract-signed.pdf"
+Content-Disposition: attachment; filename="support-contract-signed.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2Jq
+CjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2Jq
+CjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA1OTUg
+ODQyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4g
+Pj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCAyMTMgPj4Kc3RyZWFtCkJUCi9GMSAyMCBU
+Zgo3MiA3NjAgVGQKKFN1cHBvcnQgY29udHJhY3QpIFRqCi9GMSAxMiBUZgowIC0zMCBUZAoxNiBU
+TAooQ3VzdG9tZXI6IEFjbWUgQ29ycCkgVGogVCoKKFBsYW46IFByZW1pdW0gc3VwcG9ydCkgVGog
+VCoKKFRlcm06IDEyIG1vbnRocykgVGogVCoKKFNpZ25lZCBieTogQ2FybGEgQ29udHJhY3QpIFRq
+IFQqCihEYXRlOiAyMDI2LTEwLTE2KSBUaiBUKgpFVAplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoK
+PDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVu
+ZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAw
+MDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyNDEgMDAwMDAgbiAK
+MDAwMDAwMDUwNSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3Rh
+cnR4cmVmCjU3NQolJUVPRgo=
+--rel-signed-contract--

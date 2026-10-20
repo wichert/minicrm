@@ -76,6 +76,7 @@ MiniCRM is configured via environment variables:
 | `MINICRM_ACCOUNT_<N>_IMAP_PASSWORD` | **Yes** | — | IMAP password |
 | `MINICRM_ACCOUNT_<N>_IMAP_IMPLICIT_TLS` | No | `true` | Use implicit TLS (`true`) or STARTTLS (`false`) |
 | `MINICRM_ACCOUNT_<N>_IMAP_POLL_INTERVAL` | No | `2m` | Polling interval for this account's `INBOX` synchronization |
+| `MINICRM_ACCOUNT_<N>_IMAP_INITIAL_SYNC_DAYS` | No | `60` | On the first sync of a new account, only download mail received in the last N days. Set to `0` to backfill the complete mailbox history (large mailboxes can take a long time) |
 | `MINICRM_ACCOUNT_<N>_SMTP_HOST` | **Yes** | — | SMTP server hostname |
 | `MINICRM_ACCOUNT_<N>_SMTP_PORT` | No | `587` | SMTP server port |
 | `MINICRM_ACCOUNT_<N>_SMTP_USERNAME` | **Yes** | — | SMTP username |

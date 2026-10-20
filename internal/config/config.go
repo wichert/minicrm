@@ -31,6 +31,9 @@ type MailAccountConfig struct {
 	IMAPPassword     string        `env:"IMAP_PASSWORD,required"`
 	IMAPImplicitTLS  bool          `env:"IMAP_IMPLICIT_TLS" envDefault:"true"`
 	IMAPPollInterval time.Duration `env:"IMAP_POLL_INTERVAL" envDefault:"2m"`
+	// IMAPInitialSyncDays limits the first synchronization of a new account to mail received in
+	// the last N days. Set to 0 to backfill the complete mailbox history.
+	IMAPInitialSyncDays int `env:"IMAP_INITIAL_SYNC_DAYS" envDefault:"60"`
 
 	// SMTP configuration (username + password authentication)
 	SMTPHost        string `env:"SMTP_HOST,required"`
@@ -142,6 +145,9 @@ func (c *Config) Validate() error {
 		}
 		if acct.OIDCGroup == "" {
 			return fmt.Errorf("mail account %q: OIDC_GROUP must not be empty", acct.ID)
+		}
+		if acct.IMAPInitialSyncDays < 0 {
+			return fmt.Errorf("mail account %q: IMAP_INITIAL_SYNC_DAYS must be 0 (full backfill) or positive", acct.ID)
 		}
 		if acct.IMAPHost == "" {
 			return fmt.Errorf("mail account %q: IMAP_HOST must not be empty", acct.ID)

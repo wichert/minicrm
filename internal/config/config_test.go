@@ -207,3 +207,25 @@ func TestLoadInvalidPorts(t *testing.T) {
 		}
 	})
 }
+
+func TestIMAPInitialSyncDays(t *testing.T) {
+	setRequiredEnv(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Accounts[0].IMAPInitialSyncDays; got != 60 {
+		t.Fatalf("default initial sync days = %d, want 60", got)
+	}
+
+	t.Setenv("MINICRM_ACCOUNT_1_IMAP_INITIAL_SYNC_DAYS", "0")
+	cfg, err = config.Load()
+	if err != nil || cfg.Accounts[0].IMAPInitialSyncDays != 0 {
+		t.Fatalf("0 (full backfill) must be accepted: %v %+v", err, cfg)
+	}
+
+	t.Setenv("MINICRM_ACCOUNT_1_IMAP_INITIAL_SYNC_DAYS", "-5")
+	if _, err := config.Load(); err == nil {
+		t.Fatal("negative initial sync days must be rejected")
+	}
+}

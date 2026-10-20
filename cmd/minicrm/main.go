@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -113,6 +115,7 @@ func run(logger *slog.Logger) error {
 
 	// One IMAP sync worker per configured mail account.
 	accountDialers := make(map[string]func(context.Context) (mail.IMAPClient, error), len(cfg.Accounts))
+	accountEndpoints := make(map[string]mail.IMAPEndpoint, len(cfg.Accounts))
 	accountSenders := make([]mail.AccountSenderConfig, 0, len(cfg.Accounts))
 	syncWorkers := make([]*mail.IMAPSyncWorker, 0, len(cfg.Accounts))
 	for _, acct := range cfg.Accounts {
@@ -121,13 +124,17 @@ func run(logger *slog.Logger) error {
 			return mail.DialIMAP(acct.IMAPHost, acct.IMAPPort, acct.IMAPUsername, acct.IMAPPassword, acct.IMAPImplicitTLS)
 		}
 		accountDialers[acct.ID] = dialer
+		endpoint := mail.IMAPEndpoint{Host: acct.IMAPHost, Port: acct.IMAPPort, Username: acct.IMAPUsername}
+		accountEndpoints[acct.ID] = endpoint
 		syncWorkers = append(syncWorkers,
-			mail.NewIMAPSyncWorker(acct.ID, queries, matcher, attStore, dialer, acct.IMAPPollInterval, logger))
+			mail.NewIMAPSyncWorker(acct.ID, queries, matcher, attStore, dialer, acct.IMAPPollInterval, logger).WithEndpoint(endpoint).WithInitialSyncDays(acct.IMAPInitialSyncDays))
 		accountSenders = append(accountSenders, mail.AccountSenderConfig{
-			AccountID:   acct.ID,
-			FromAddress: acct.SMTPFromAddress,
-			FromName:    acct.SMTPFromName,
-			Transport:   mail.NewGoMailTransport(acct.SMTPHost, acct.SMTPPort, acct.SMTPUsername, acct.SMTPPassword, acct.SMTPTLSMode),
+			AccountID:    acct.ID,
+			FromAddress:  acct.SMTPFromAddress,
+			FromName:     acct.SMTPFromName,
+			Transport:    mail.NewGoMailTransport(acct.SMTPHost, acct.SMTPPort, acct.SMTPUsername, acct.SMTPPassword, acct.SMTPTLSMode),
+			SMTPServer:   net.JoinHostPort(acct.SMTPHost, strconv.Itoa(acct.SMTPPort)),
+			SMTPUsername: acct.SMTPUsername,
 		})
 	}
 
@@ -138,7 +145,7 @@ func run(logger *slog.Logger) error {
 		}
 		return dialer(ctx)
 	}
-	actionWorker := mail.NewIMAPActionWorker(queries, attStore, accountDialer, imapJobWakeCh, logger)
+	actionWorker := mail.NewIMAPActionWorker(queries, attStore, accountDialer, imapJobWakeCh, logger).WithEndpoints(accountEndpoints)
 
 	outboxWorker := mail.NewOutboxWorker(
 		queries,
