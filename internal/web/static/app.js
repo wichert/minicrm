@@ -78,15 +78,49 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
-  document.querySelectorAll("[data-frame-expand]").forEach(function (button) {
+  // Email bodies are sandboxed without same-origin access, so the server supplies an
+  // estimated content height instead of the page measuring the frame.
+  document.querySelectorAll(".email-frame[data-height]").forEach(function (frame) {
+    var h = parseInt(frame.getAttribute("data-height"), 10);
+    if (h > 0) {
+      frame.style.height = h + "px";
+    }
+  });
+
+  document.querySelectorAll("[data-auto-submit]").forEach(function (el) {
+    el.addEventListener("change", function () {
+      if (el.form) {
+        el.form.submit();
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-toggle-messages]").forEach(function (button) {
     button.addEventListener("click", function () {
-      var message = button.closest(".message");
-      var frame = message ? message.querySelector(".email-frame") : null;
-      if (!frame) {
+      var expand = button.getAttribute("aria-pressed") !== "true";
+      document.querySelectorAll("details.message").forEach(function (d) {
+        d.open = expand;
+      });
+      button.setAttribute("aria-pressed", expand ? "true" : "false");
+      button.textContent = expand ? "Collapse older" : "Expand all";
+      if (!expand) {
+        var all = document.querySelectorAll("details.message");
+        if (all.length) {
+          all[all.length - 1].open = true;
+        }
+      }
+    });
+  });
+
+  document.querySelectorAll("tr[data-row-href]").forEach(function (row) {
+    row.addEventListener("click", function (event) {
+      if (event.target.closest("a, button, input, select")) {
         return;
       }
-      var expanded = frame.classList.toggle("email-frame-expanded");
-      button.textContent = expanded ? "Collapse" : "Expand";
+      if (window.getSelection && String(window.getSelection())) {
+        return;
+      }
+      window.location.href = row.getAttribute("data-row-href");
     });
   });
 });

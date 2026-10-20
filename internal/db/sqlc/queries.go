@@ -340,6 +340,7 @@ func (q *Queries) GetThreadByID(ctx context.Context, id uuid.UUID) (Thread, erro
 // ListThreadsFilter specifies optional filters for listing threads.
 type ListThreadsFilter struct {
 	Status          *ThreadStatus
+	OpenOnly        bool
 	AssigneeID      *uuid.UUID
 	Unassigned      bool
 	AccountID       *string
@@ -347,30 +348,55 @@ type ListThreadsFilter struct {
 	Limit           int
 }
 
-// ListThreads returns threads matching the given filter ordered by last_message_at DESC.
+// ListThreads returns threads matching the given filter ordered by last_message_at DESC,
+// enriched with latest-message preview metadata and message count.
 func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Thread, error) {
 	if f.Limit <= 0 {
 		f.Limit = 100
 	}
 	const query = `
-		SELECT ` + threadColumns + `
-		FROM threads
-		WHERE ($1::thread_status IS NULL OR status = $1)
-		  AND ($2::uuid IS NULL OR assignee_id = $2)
-		  AND (NOT $3::boolean OR assignee_id IS NULL)
-		  AND ($4::text IS NULL OR account_id = $4)
-		  AND ($5::text[] IS NULL OR account_id = ANY($5))
-		ORDER BY last_message_at DESC
-		LIMIT $6`
-	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.Limit)
+		SELECT t.id, t.account_id, t.subject_normalized, t.subject_display, t.status, t.assignee_id,
+		       t.assignment_source, t.customer_email, COALESCE(t.customer_name, ''), t.reopens_thread_id, t.last_message_at,
+		       COALESCE(stats.message_count, 0),
+		       COALESCE(latest.body_text, ''),
+		       COALESCE(latest.body_html_sanitized, ''),
+		       COALESCE(latest.direction, ''),
+		       COALESCE(stats.opened_at, t.last_message_at)
+		FROM threads t
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*)::int AS message_count,
+			       MIN(e.sent_at) AS opened_at
+			FROM emails e
+			WHERE e.thread_id = t.id
+		) stats ON true
+		LEFT JOIN LATERAL (
+			SELECT e.body_text, e.body_html_sanitized, e.direction
+			FROM emails e
+			WHERE e.thread_id = t.id
+			ORDER BY e.sent_at DESC, e.received_at DESC
+			LIMIT 1
+		) latest ON true
+		WHERE ($1::thread_status IS NULL OR t.status = $1)
+		  AND ($2::uuid IS NULL OR t.assignee_id = $2)
+		  AND (NOT $3::boolean OR t.assignee_id IS NULL)
+		  AND ($4::text IS NULL OR t.account_id = $4)
+		  AND ($5::text[] IS NULL OR t.account_id = ANY($5))
+		  AND (NOT $6::boolean OR t.status IN ('new', 'in_progress'))
+		ORDER BY t.last_message_at DESC
+		LIMIT $7`
+	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var list []Thread
 	for rows.Next() {
-		t, err := scanThread(rows)
-		if err != nil {
+		var t Thread
+		if err := rows.Scan(
+			&t.ID, &t.AccountID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
+			&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
+			&t.MessageCount, &t.LatestBodyText, &t.LatestBodyHTML, &t.LatestDirection, &t.OpenedAt,
+		); err != nil {
 			return nil, err
 		}
 		list = append(list, t)

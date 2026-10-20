@@ -181,6 +181,9 @@ func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) 
 		if f.Status != nil && t.Status != *f.Status {
 			continue
 		}
+		if f.OpenOnly && t.Status != sqlc.ThreadStatusNew && t.Status != sqlc.ThreadStatusInProgress {
+			continue
+		}
 		if f.AccountID != nil && t.AccountID != *f.AccountID {
 			continue
 		}
@@ -335,9 +338,12 @@ func (s *testWebStore) InsertThreadEvent(_ context.Context, ev sqlc.ThreadEvent)
 func TestFormatTimestampDisplayTimezone(t *testing.T) {
 	utcTime := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 	got := views.FormatTimestamp(utcTime, "Europe/Amsterdam")
-	// Amsterdam in January is CET (UTC+1) -> 13:00:00
-	if !strings.Contains(got, "2026-01-15 13:00:00") {
-		t.Fatalf("got %q, expected 2026-01-15 13:00:00 CET", got)
+	// Amsterdam in January is CET (UTC+1); visible timestamps omit seconds and timezone suffix.
+	if got != "2026-01-15 13:00" {
+		t.Fatalf("got %q, expected 2026-01-15 13:00", got)
+	}
+	if full := views.FormatTimestampFull(utcTime, "Europe/Amsterdam"); full != "2026-01-15 13:00:00 CET" {
+		t.Fatalf("got %q, expected full timestamp with zone", full)
 	}
 }
 
@@ -855,8 +861,12 @@ func TestThreadDetailSemanticsAndNoInlineStyles(t *testing.T) {
 		`<label for="reply-body">Message</label>`,
 		`>Start working<`,
 		`data-confirm=`,
-		`-- Unassigned --`,
+		`>Unassigned<`,
+		`data-auto-submit`,
 		`>Assign to me<`,
+		`Back to threads`,
+		`<details class="card message message-inbound" open>`,
+		`data-height="`,
 		`From</dt><dd>Customer Support &lt;support@example.com&gt;`,
 		`>Customer<`,
 	} {
@@ -1066,7 +1076,7 @@ func newMultipartRequest(t *testing.T, method, target string, fields url.Values)
 	return req
 }
 
-func TestInboxUnknownStatusFilterFallsBackToAllStatuses(t *testing.T) {
+func TestInboxUnknownStatusFilterFallsBackToOpenQueue(t *testing.T) {
 	_, store, router, _, _ := buildAccountTestServer(t)
 	threadID := uuid.New()
 	store.threads[threadID] = sqlc.Thread{
@@ -1084,7 +1094,7 @@ func TestInboxUnknownStatusFilterFallsBackToAllStatuses(t *testing.T) {
 		t.Fatalf("unknown status must not render an error page: %s", body)
 	}
 	if !strings.Contains(body, "Visible thread") {
-		t.Fatalf("unknown status should fall back to all statuses: %s", body)
+		t.Fatalf("unknown status should fall back to the open queue: %s", body)
 	}
 	if strings.Contains(body, `value="bogus"`) {
 		t.Fatalf("unknown status must not be echoed into the filter form: %s", body)
@@ -1306,5 +1316,57 @@ func TestLayoutAccessibilityAndStaticAssets(t *testing.T) {
 	icon, err := static.FS.ReadFile("favicon.svg")
 	if err != nil || !strings.Contains(string(icon), "<svg") {
 		t.Fatalf("expected embedded favicon.svg, err=%v", err)
+	}
+}
+
+func TestInboxDefaultsToOpenQueueAndShowsSnippets(t *testing.T) {
+	_, store, router, multiUser, _ := buildAccountTestServer(t)
+	for name, status := range map[string]sqlc.ThreadStatus{
+		"Open one": sqlc.ThreadStatusNew, "Done one": sqlc.ThreadStatusCompleted, "Junk one": sqlc.ThreadStatusSpam,
+	} {
+		id := uuid.New()
+		store.threads[id] = sqlc.Thread{
+			ID: id, AccountID: "support", SubjectDisplay: name, Status: status, AssigneeID: &multiUser.ID,
+			CustomerEmail: "a@client.com", LastMessageAt: time.Now().UTC(),
+			MessageCount: 3, LatestBodyText: "Latest   words\nhere", LatestDirection: "outbound",
+			OpenedAt: time.Now().UTC().Add(-50 * time.Hour),
+		}
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, "Open one") || strings.Contains(body, "Done one") || strings.Contains(body, "Junk one") {
+		t.Fatalf("default inbox must only list open threads: %s", body)
+	}
+	for _, want := range []string{"Latest words here", "You:", `class="count-pill"`, "Waiting 2d", "wait-urgent"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %q in inbox: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "Europe/Amsterdam") || strings.Contains(body, "</time>CEST") || strings.Contains(body, "00 CEST</") {
+		t.Fatalf("inbox must not repeat the timezone: %s", body)
+	}
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=all", nil))
+	body = rec.Body.String()
+	if !strings.Contains(body, "Done one") || !strings.Contains(body, "Junk one") {
+		t.Fatalf("status=all must list every thread: %s", body)
+	}
+}
+
+func TestExtractSnippetAndWaitDuration(t *testing.T) {
+	if got := views.ExtractEmailSnippet("", "<p>Hello &amp; <b>welcome</b></p>", 50); got != "Hello & welcome" {
+		t.Fatalf("html snippet = %q", got)
+	}
+	if got := views.ExtractEmailSnippet("abcdefghij", "", 5); got != "abcde…" {
+		t.Fatalf("truncated snippet = %q", got)
+	}
+	now := time.Now()
+	if label, tier := views.FormatWaitDuration(now.Add(-5*time.Hour), now); label != "Waiting 5h" || tier != "warning" {
+		t.Fatalf("wait = %q %q", label, tier)
+	}
+	if got := views.EstimateEmailHeight(sqlc.Email{}); got < 64 {
+		t.Fatalf("empty estimate = %d", got)
 	}
 }

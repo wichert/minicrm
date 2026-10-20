@@ -74,6 +74,7 @@ func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user sql
 		}
 		auditEntries = append(auditEntries, views.AuditEntryView{
 			FormattedTime: views.FormatTimestamp(entry.OccurredAt, settings.DisplayTimezone),
+			FullTime:      views.FormatTimestampFull(entry.OccurredAt, settings.DisplayTimezone),
 			ActorName:     actorName,
 			TargetName:    targetName,
 			Label:         label,

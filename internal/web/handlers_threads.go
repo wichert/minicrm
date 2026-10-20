@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/alexedwards/scs/v2"
 	"github.com/go-chi/chi/v5"
@@ -213,15 +214,24 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user, _ := auth.UserFromContext(ctx)
 
-	statusStr := strings.TrimSpace(r.URL.Query().Get("status"))
+	rawStatus := strings.TrimSpace(r.URL.Query().Get("status"))
+	var statusStr string
 	var statusFilter *sqlc.ThreadStatus
-	switch sqlc.ThreadStatus(statusStr) {
-	case sqlc.ThreadStatusNew, sqlc.ThreadStatusInProgress, sqlc.ThreadStatusCompleted, sqlc.ThreadStatusSpam:
-		st := sqlc.ThreadStatus(statusStr)
+	openOnly := false
+	switch rawStatus {
+	case "", "open":
+		statusStr = "open"
+		openOnly = true
+	case "all":
+		statusStr = "all"
+	case string(sqlc.ThreadStatusNew), string(sqlc.ThreadStatusInProgress), string(sqlc.ThreadStatusCompleted), string(sqlc.ThreadStatusSpam):
+		st := sqlc.ThreadStatus(rawStatus)
 		statusFilter = &st
+		statusStr = rawStatus
 	default:
-		// Unknown or empty status values fall back to "All statuses" instead of reaching PostgreSQL.
-		statusStr = ""
+		// Unknown status values fall back to the default open queue instead of reaching PostgreSQL.
+		statusStr = "open"
+		openOnly = true
 	}
 
 	accountFilter := strings.TrimSpace(r.URL.Query().Get("account"))
@@ -255,6 +265,7 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		var err error
 		threads, err = s.store.ListThreads(ctx, sqlc.ListThreadsFilter{
 			Status:          statusFilter,
+			OpenOnly:        openOnly,
 			AssigneeID:      assigneeID,
 			Unassigned:      unassigned,
 			AccountID:       accountIDFilter,
@@ -272,6 +283,7 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		userNames[u.ID] = u.DisplayName
 	}
 	displayTZ := s.currentDisplayTimezone(ctx)
+	now := time.Now().UTC()
 
 	items := make([]views.ThreadSummaryItem, 0, len(threads))
 	for _, th := range threads {
@@ -279,11 +291,26 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		if th.AssigneeID != nil {
 			assigneeName = userNames[*th.AssigneeID]
 		}
+		waitSince := th.OpenedAt
+		if waitSince.IsZero() {
+			waitSince = th.LastMessageAt
+		}
+		waitLabel, waitUrgency := "", ""
+		if th.Status == sqlc.ThreadStatusNew {
+			waitLabel, waitUrgency = views.FormatWaitDuration(waitSince, now)
+		}
 		items = append(items, views.ThreadSummaryItem{
-			Thread:        th,
-			AssigneeName:  assigneeName,
-			AccountName:   s.accountName(th.AccountID),
-			FormattedTime: views.FormatTimestamp(th.LastMessageAt, displayTZ),
+			Thread:          th,
+			AssigneeName:    assigneeName,
+			AccountName:     s.accountName(th.AccountID),
+			FormattedTime:   views.FormatTimestamp(th.LastMessageAt, displayTZ),
+			FullTime:        views.FormatTimestampFull(th.LastMessageAt, displayTZ),
+			RelativeTime:    views.FormatRelativeTime(th.LastMessageAt, now),
+			WaitLabel:       waitLabel,
+			WaitUrgency:     waitUrgency,
+			LatestSnippet:   views.ExtractEmailSnippet(th.LatestBodyText, th.LatestBodyHTML, 130),
+			LatestDirection: th.LatestDirection,
+			MessageCount:    th.MessageCount,
 		})
 	}
 
@@ -352,13 +379,17 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		return
 	}
 	displayTZ := s.currentDisplayTimezone(ctx)
+	now := time.Now().UTC()
 	emailViews := make([]views.EmailItemView, 0, len(emails))
-	for _, em := range emails {
+	for i, em := range emails {
 		atts, _ := s.store.ListAttachmentsByEmail(ctx, em.ID)
 		emailViews = append(emailViews, views.EmailItemView{
 			Email:         em,
 			FormattedSent: views.FormatTimestamp(em.SentAt, displayTZ),
+			FullSent:      views.FormatTimestampFull(em.SentAt, displayTZ),
+			Snippet:       views.ExtractEmailSnippet(em.BodyText, em.BodyHTMLSanitized, 110),
 			Attachments:   atts,
+			IsLatest:      i == len(emails)-1,
 		})
 	}
 
@@ -389,6 +420,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		eventViews = append(eventViews, views.EventItemView{
 			Event:         ev,
 			FormattedTime: views.FormatTimestamp(ev.OccurredAt, displayTZ),
+			FullTime:      views.FormatTimestampFull(ev.OccurredAt, displayTZ),
 			Summary:       views.FormatThreadEventSummary(ev, actorName, userNames),
 		})
 	}
@@ -412,6 +444,15 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		}
 	}
 
+	waitLabel, waitUrgency := "", ""
+	if thread.Status == sqlc.ThreadStatusNew {
+		waitSince := thread.LastMessageAt
+		if len(emails) > 0 && !emails[0].SentAt.IsZero() {
+			waitSince = emails[0].SentAt
+		}
+		waitLabel, waitUrgency = views.FormatWaitDuration(waitSince, now)
+	}
+
 	replyAllowed := thread.Status != sqlc.ThreadStatusSpam && thread.Status != sqlc.ThreadStatusCompleted
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -425,6 +466,8 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		CurrentUser:        user,
 		Thread:             thread,
 		AssigneeName:       assigneeName,
+		WaitLabel:          waitLabel,
+		WaitUrgency:        waitUrgency,
 		ReopensThread:      reopensThread,
 		ReopenCompletedAt:  reopenCompletedAt,
 		ReopenCompletedBy:  reopenCompletedBy,

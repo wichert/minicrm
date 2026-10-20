@@ -80,6 +80,12 @@ type Thread struct {
 	CustomerName      string       `json:"customer_name"`
 	ReopensThreadID   *uuid.UUID   `json:"reopens_thread_id,omitempty"`
 	LastMessageAt     time.Time    `json:"last_message_at"`
+	// Summary fields populated by ListThreads for inbox triage.
+	MessageCount    int       `json:"message_count,omitempty"`
+	LatestBodyText  string    `json:"latest_body_text,omitempty"`
+	LatestBodyHTML  string    `json:"latest_body_html,omitempty"`
+	LatestDirection string    `json:"latest_direction,omitempty"`
+	OpenedAt        time.Time `json:"opened_at,omitempty"`
 }
 
 // Address represents an RFC 5322 email participant.

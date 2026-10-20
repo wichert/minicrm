@@ -4,10 +4,13 @@ package views
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"html/template"
 	"io"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/wichert/minicrm/internal/db/sqlc"
@@ -27,10 +30,17 @@ type Flash struct {
 
 // ThreadSummaryItem holds display fields for a single row in the inbox list.
 type ThreadSummaryItem struct {
-	Thread        sqlc.Thread
-	AssigneeName  string
-	AccountName   string
-	FormattedTime string
+	Thread          sqlc.Thread
+	AssigneeName    string
+	AccountName     string
+	FormattedTime   string
+	FullTime        string
+	RelativeTime    string
+	WaitLabel       string
+	WaitUrgency     string
+	LatestSnippet   string
+	LatestDirection string
+	MessageCount    int
 }
 
 // InboxViewData holds data for rendering the threads inbox view.
@@ -57,13 +67,17 @@ type InboxViewData struct {
 type EmailItemView struct {
 	Email         sqlc.Email
 	FormattedSent string
+	FullSent      string
+	Snippet       string
 	Attachments   []sqlc.Attachment
+	IsLatest      bool
 }
 
 // EventItemView holds a formatted thread audit event sentence.
 type EventItemView struct {
 	Event         sqlc.ThreadEvent
 	FormattedTime string
+	FullTime      string
 	Summary       string
 	// Section, when set, renders a subheading before this event to distinguish merged history.
 	Section string
@@ -77,6 +91,8 @@ type ThreadDetailViewData struct {
 	CurrentUser   sqlc.User
 	Thread        sqlc.Thread
 	AssigneeName  string
+	WaitLabel     string
+	WaitUrgency   string
 	ReopensThread *sqlc.Thread
 	// ReopenCompletedAt and ReopenCompletedBy describe when/by whom the referenced thread was completed.
 	ReopenCompletedAt string
@@ -115,6 +131,7 @@ type NewUserForm struct {
 // AuditEntryView is a human-readable row for the settings activity table.
 type AuditEntryView struct {
 	FormattedTime string
+	FullTime      string
 	ActorName     string
 	TargetName    string
 	Label         string
@@ -147,13 +164,103 @@ type ErrorViewData struct {
 	Message     string
 }
 
-// FormatTimestamp converts t into the configured IANA displayTimezone.
+// FormatTimestamp converts t into the configured IANA displayTimezone without repeating
+// the timezone suffix or seconds (the active timezone is configured and shown in Settings).
 func FormatTimestamp(t time.Time, displayTimezone string) string {
 	loc, err := time.LoadLocation(displayTimezone)
 	if err != nil {
 		loc = time.UTC
 	}
+	return t.In(loc).Format("2006-01-02 15:04")
+}
+
+// FormatTimestampFull converts t into the configured IANA displayTimezone with full seconds
+// and timezone abbreviation for hover tooltips.
+func FormatTimestampFull(t time.Time, displayTimezone string) string {
+	loc, err := time.LoadLocation(displayTimezone)
+	if err != nil {
+		loc = time.UTC
+	}
 	return t.In(loc).Format("2006-01-02 15:04:05 MST")
+}
+
+// FormatRelativeTime returns a compact relative age string (e.g. "2h ago", "14d ago").
+func FormatRelativeTime(t, now time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := now.Sub(t)
+	if d < time.Minute {
+		return "Just now"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
+	days := int(d.Hours() / 24)
+	if days == 1 {
+		return "1d ago"
+	}
+	return fmt.Sprintf("%dd ago", days)
+}
+
+// FormatWaitDuration computes how long a New thread has been waiting for attention
+// and returns a human label plus an urgency tier ("fresh", "warning", "urgent").
+func FormatWaitDuration(since, now time.Time) (string, string) {
+	if since.IsZero() {
+		return "Waiting", "fresh"
+	}
+	d := now.Sub(since)
+	if d < time.Minute {
+		return "Waiting <1m", "fresh"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("Waiting %dm", int(d.Minutes())), "fresh"
+	}
+	if d < 4*time.Hour {
+		return fmt.Sprintf("Waiting %dh", int(d.Hours())), "fresh"
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("Waiting %dh", int(d.Hours())), "warning"
+	}
+	days := int(d.Hours() / 24)
+	return fmt.Sprintf("Waiting %dd", days), "urgent"
+}
+
+var htmlTagRe = regexp.MustCompile(`<[^>]+>`)
+
+// ExtractEmailSnippet extracts a clean single-line preview blurb from an email's plain text
+// or sanitized HTML fallback.
+func ExtractEmailSnippet(bodyText, bodyHTML string, maxRunes int) string {
+	raw := strings.TrimSpace(bodyText)
+	if raw == "" && strings.TrimSpace(bodyHTML) != "" {
+		raw = html.UnescapeString(htmlTagRe.ReplaceAllString(bodyHTML, " "))
+	}
+	if raw == "" {
+		return ""
+	}
+	// Prefer non-quoted lines when present.
+	lines := strings.Split(raw, "\n")
+	var kept []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, ">") {
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	if len(kept) == 0 {
+		kept = lines
+	}
+	joined := strings.Join(kept, " ")
+	collapsed := strings.Join(strings.Fields(joined), " ")
+	if maxRunes <= 0 || utf8.RuneCountInString(collapsed) <= maxRunes {
+		return collapsed
+	}
+	runes := []rune(collapsed)
+	return strings.TrimSpace(string(runes[:maxRunes])) + "…"
 }
 
 // FormatStatus returns the single human-readable label for a workflow status.
@@ -381,6 +488,7 @@ var templateFuncs = template.FuncMap{
 	"roleLabel":        FormatRole,
 	"auditEventLabel":  FormatAuditEvent,
 	"hasAccount":       hasAccount,
+	"estHeight":        EstimateEmailHeight,
 }
 
 var (
@@ -423,6 +531,49 @@ type IsolatedEmailBodyData struct {
 	HasHTML       bool
 }
 
+// EstimateEmailHeight estimates the rendered height in pixels of an email body so the
+// sandboxed iframe can be sized without scripts running inside it (no nested scrollbar
+// for typical messages, no tall blank box for short ones).
+func EstimateEmailHeight(email sqlc.Email) int {
+	const (
+		charsPerLine = 90
+		lineHeight   = 23
+		padding      = 28
+		minHeight    = 64
+		maxHeight    = 5000
+	)
+	text := email.BodyText
+	extra := 0
+	if email.BodyHTMLSanitized != "" {
+		h := email.BodyHTMLSanitized
+		extra = strings.Count(h, "<img") * 220
+		for _, tag := range []string{"</p>", "<br", "</div>", "</li>", "</tr>", "</h1>", "</h2>", "</h3>", "</blockquote>"} {
+			h = strings.ReplaceAll(h, tag, tag+"\n")
+		}
+		text = html.UnescapeString(htmlTagRe.ReplaceAllString(h, ""))
+	}
+	if strings.TrimSpace(text) == "" {
+		return minHeight
+	}
+	lines := 0
+	for _, line := range strings.Split(strings.TrimRight(text, "\n\r "), "\n") {
+		n := utf8.RuneCountInString(strings.TrimRight(line, "\r"))
+		if n == 0 {
+			lines++
+			continue
+		}
+		lines += (n + charsPerLine - 1) / charsPerLine
+	}
+	height := lines*lineHeight + padding + extra
+	if height < minHeight {
+		height = minHeight
+	}
+	if height > maxHeight {
+		height = maxHeight
+	}
+	return height
+}
+
 // RenderIsolatedEmailBody renders a single email's content for the sandboxed iframe endpoint.
 func RenderIsolatedEmailBody(w io.Writer, email sqlc.Email) error {
 	data := IsolatedEmailBodyData{
@@ -451,7 +602,7 @@ const layoutHeader = `<!DOCTYPE html>
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header>
     <nav class="navbar" aria-label="Main">
-      <a class="navbar-brand" href="/threads">MiniCRM</a>
+      <a class="navbar-brand" href="/threads"><svg class="brand-mark" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" fill="#6366f1"/><path d="M7 11.5h18v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="m7.5 12 8.5 6.5L24.5 12" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>MiniCRM</span></a>
       <ul class="nav-links">
         <li><a href="/threads"{{if eq .ActiveNav "threads"}} aria-current="page"{{end}}>Threads</a></li>
         {{if eq .CurrentUser.Role "admin"}}<li><a href="/settings"{{if eq .ActiveNav "settings"}} aria-current="page"{{end}}>Settings</a></li>{{end}}
@@ -495,25 +646,32 @@ const inboxTablePartial = `
     <thead>
       <tr>
         {{if .ShowAccountUI}}<th scope="col">Account</th>{{end}}
-        <th scope="col">Subject</th>
+        <th scope="col">Thread</th>
         <th scope="col">Customer</th>
         <th scope="col">Status</th>
         <th scope="col">Assignee</th>
-        <th scope="col">Last message ({{.DisplayTZ}})</th>
+        <th scope="col">Age</th>
       </tr>
     </thead>
     <tbody>
       {{range .Threads}}
-      <tr>
+      <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}" data-row-href="/threads/{{.Thread.ID}}">
         {{if $.ShowAccountUI}}<td><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
-        <td><a href="/threads/{{.Thread.ID}}">{{.Thread.SubjectDisplay}}</a></td>
-        <td>
+        <td class="thread-cell">
+          <a class="thread-link" href="/threads/{{.Thread.ID}}">{{.Thread.SubjectDisplay}}</a>{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
+          <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
+        </td>
+        <td class="customer-cell">
           <span class="customer-name">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else}}Unknown customer{{end}}</span>
-          <span class="customer-email">{{.Thread.CustomerEmail}}</span>
+          <span class="customer-email" title="{{.Thread.CustomerEmail}}">{{.Thread.CustomerEmail}}</span>
         </td>
         <td><span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span></td>
         <td>{{if .AssigneeName}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}</td>
-        <td class="nowrap">{{.FormattedTime}}</td>
+        <td class="nowrap age-cell">
+          {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="First message received {{.FullTime}}">{{.WaitLabel}}</span>
+          {{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}
+          <span class="muted age-date">{{.FormattedTime}}</span>
+        </td>
       </tr>
       {{end}}
     </tbody>
@@ -528,58 +686,61 @@ const inboxBody = `
 <div class="page-heading">
   <h1>Threads</h1>
 </div>
-<form method="get" action="/threads" class="card filter-bar">
-  <label class="field">Status
-    <select name="status" data-hx-get="/threads">
-      <option value="">All statuses</option>
-      <option value="new" {{if eq .StatusFilter "new"}}selected{{end}}>New</option>
-      <option value="in_progress" {{if eq .StatusFilter "in_progress"}}selected{{end}}>In progress</option>
-      <option value="completed" {{if eq .StatusFilter "completed"}}selected{{end}}>Completed</option>
-      <option value="spam" {{if eq .StatusFilter "spam"}}selected{{end}}>Spam</option>
-    </select>
-  </label>
-  <label class="field">Assignee
-    <select name="assignee" data-hx-get="/threads">
-      <option value="" {{if eq .AssigneeFilter ""}}selected{{end}}>Anyone</option>
-      <option value="me" {{if eq .AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
-      <option value="unassigned" {{if eq .AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
-      {{range .Users}}
-      <option value="{{.ID}}" {{if eq .ID.String $.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
-      {{end}}
-    </select>
-  </label>
-  {{if .ShowAccountUI}}
-  <label class="field">Account
-    <select name="account" data-hx-get="/threads">
-      <option value="">All accounts</option>
-      {{range .Accounts}}
-      <option value="{{.ID}}" {{if eq .ID $.AccountFilter}}selected{{end}}>{{.Name}}</option>
-      {{end}}
-    </select>
-  </label>
-  {{end}}
-  <noscript><button type="submit" class="btn btn-secondary">Filter</button></noscript>
-</form>
+<div class="toolbar">
+  <nav class="tabs" aria-label="Thread status">
+    <a class="tab" href="/threads?status=open&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "open"}} aria-current="true"{{end}}>Open</a>
+    <a class="tab" href="/threads?status=new&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "new"}} aria-current="true"{{end}}>New</a>
+    <a class="tab" href="/threads?status=in_progress&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "in_progress"}} aria-current="true"{{end}}>In progress</a>
+    <a class="tab" href="/threads?status=completed&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "completed"}} aria-current="true"{{end}}>Completed</a>
+    <a class="tab" href="/threads?status=spam&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "spam"}} aria-current="true"{{end}}>Spam</a>
+    <a class="tab" href="/threads?status=all&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "all"}} aria-current="true"{{end}}>All</a>
+  </nav>
+  <form method="get" action="/threads" class="filter-inline">
+    <input type="hidden" name="status" value="{{.StatusFilter}}">
+    <label class="inline-field">Assignee
+      <select name="assignee" data-hx-get="/threads">
+        <option value="" {{if eq .AssigneeFilter ""}}selected{{end}}>Anyone</option>
+        <option value="me" {{if eq .AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
+        <option value="unassigned" {{if eq .AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
+        {{range .Users}}
+        <option value="{{.ID}}" {{if eq .ID.String $.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
+        {{end}}
+      </select>
+    </label>
+    {{if .ShowAccountUI}}
+    <label class="inline-field">Account
+      <select name="account" data-hx-get="/threads">
+        <option value="">All accounts</option>
+        {{range .Accounts}}
+        <option value="{{.ID}}" {{if eq .ID $.AccountFilter}}selected{{end}}>{{.Name}}</option>
+        {{end}}
+      </select>
+    </label>
+    {{end}}
+    <noscript><button type="submit" class="btn btn-secondary">Filter</button></noscript>
+  </form>
+</div>
 <p class="results-count">
   Showing {{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}{{if .Truncated}} (first {{.Limit}}; narrow the filters to see more){{end}}
 </p>
 ` + inboxTablePartial
 
 const threadDetailBody = `
+<a class="back-link" href="/threads">&larr; Back to threads</a>
 <div class="card thread-header-card">
   <div class="thread-header">
     <div>
       <h1>{{.Thread.SubjectDisplay}}</h1>
       <ul class="meta-list">
-        <li><span class="meta-label">Status</span> <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span></li>
-        {{if .ShowAccountUI}}<li><span class="meta-label">Account</span> <span class="badge badge-account">{{.AccountName}}</span></li>{{end}}
+        <li><span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span></li>
+        {{if .WaitLabel}}<li><span class="wait-badge wait-{{.WaitUrgency}}">{{.WaitLabel}}</span></li>{{end}}
+        {{if .ShowAccountUI}}<li><span class="badge badge-account">{{.AccountName}}</span></li>{{end}}
         <li><span class="meta-label">Customer</span> <strong>{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else}}Unknown customer{{end}}</strong> <span class="customer-email">{{.Thread.CustomerEmail}}</span></li>
-        <li><span class="meta-label">Assignee</span>
-          {{if .Thread.AssigneeID}}{{.AssigneeName}}{{with assignmentLabel .Thread.AssignmentSource}} <span class="muted">({{.}})</span>{{end}}{{else}}<span class="muted">Unassigned</span>{{end}}
-        </li>
+        {{if or (eq .Thread.Status "completed") (eq .Thread.Status "spam")}}
+        <li><span class="meta-label">Assignee</span> {{if .Thread.AssigneeID}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}</li>
+        {{end}}
       </ul>
     </div>
-    {{if .ReplyAllowed}}<a class="btn btn-secondary" href="#reply">Reply</a>{{end}}
   </div>
 
   {{if .ReopensThread}}
@@ -604,29 +765,32 @@ const threadDetailBody = `
   {{end}}
 
   <div class="actions-bar">
-    {{if eq .Thread.Status "new"}}
-    <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form">
-      <input type="hidden" name="status" value="in_progress">
-      <button type="submit" class="btn btn-primary">Start working</button>
-    </form>
-    <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Mark this thread as spam and move its messages to the Junk folder?" data-confirm-action="Move to Junk">
-      <input type="hidden" name="status" value="spam">
-      <button type="submit" class="btn btn-danger">Mark as spam</button>
-    </form>
-    {{end}}
-    {{if eq .Thread.Status "in_progress"}}
-    <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Mark this thread complete and move its messages to the Archive folder?" data-confirm-action="Move to Archive">
-      <input type="hidden" name="status" value="completed">
-      <button type="submit" class="btn btn-primary">Mark complete</button>
-    </form>
-    {{end}}
-
-    {{if eq .Thread.Status "spam"}}
-    <p class="helper">This thread is marked as spam. Replies and assignment are disabled.</p>
-    {{else}}
+    <div class="actions-group">
+      {{if eq .Thread.Status "new"}}
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form">
+        <input type="hidden" name="status" value="in_progress">
+        <button type="submit" class="btn btn-primary">Start working</button>
+      </form>
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Mark this thread as spam and move its messages to the Junk folder?" data-confirm-action="Move to Junk">
+        <input type="hidden" name="status" value="spam">
+        <button type="submit" class="btn btn-danger">Mark as spam</button>
+      </form>
+      {{end}}
+      {{if eq .Thread.Status "in_progress"}}
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Mark this thread complete and move its messages to the Archive folder?" data-confirm-action="Move to Archive">
+        <input type="hidden" name="status" value="completed">
+        <button type="submit" class="btn btn-primary">Mark complete</button>
+      </form>
+      {{end}}
+      {{if eq .Thread.Status "spam"}}
+      <p class="helper">This thread is marked as spam. Replies and assignment are disabled.</p>
+      {{end}}
       {{if eq .Thread.Status "completed"}}
       <p class="helper">This thread is completed. Replies and assignment are disabled until a follow-up reply is reopened and merged.</p>
-      {{else}}
+      {{end}}
+    </div>
+    {{if and (ne .Thread.Status "spam") (ne .Thread.Status "completed")}}
+    <div class="actions-group actions-assign">
       {{if not .Thread.AssigneeID}}
       <form method="post" action="/threads/{{.Thread.ID}}/assign" class="inline-form">
         <input type="hidden" name="assignee_id" value="{{.CurrentUser.ID}}">
@@ -634,40 +798,44 @@ const threadDetailBody = `
       </form>
       {{end}}
       <form method="post" action="/threads/{{.Thread.ID}}/assign" class="assign-form">
-        <label class="field" for="assignee-{{.Thread.ID}}">Assignee
-          <select id="assignee-{{.Thread.ID}}" name="assignee_id">
-            <option value="" {{if not .Thread.AssigneeID}}selected{{end}} disabled>-- Unassigned --</option>
+        <label class="inline-field" for="assignee-{{.Thread.ID}}">Assignee
+          <select id="assignee-{{.Thread.ID}}" name="assignee_id" data-auto-submit>
+            <option value="" {{if not .Thread.AssigneeID}}selected{{end}} disabled>Unassigned</option>
             {{range .Users}}
-            <option value="{{.ID}}" {{if and $.Thread.AssigneeID (eq .ID.String $.Thread.AssigneeID.String)}}selected{{end}}>{{.DisplayName}} ({{.Email}})</option>
+            <option value="{{.ID}}" {{if and $.Thread.AssigneeID (eq .ID.String $.Thread.AssigneeID.String)}}selected{{end}}>{{.DisplayName}}</option>
             {{end}}
           </select>
         </label>
-        <button type="submit" class="btn btn-secondary">Assign</button>
+        <noscript><button type="submit" class="btn btn-secondary">Assign</button></noscript>
       </form>
-      {{end}}
+      {{with assignmentLabel .Thread.AssignmentSource}}{{if $.Thread.AssigneeID}}<span class="muted assign-note">({{.}})</span>{{end}}{{end}}
+    </div>
     {{end}}
   </div>
 </div>
 
-<h2>Messages</h2>
+<div class="section-heading">
+  <h2>Messages ({{len .Emails}})</h2>
+  {{if gt (len .Emails) 1}}<button type="button" class="btn btn-ghost btn-small" data-toggle-messages aria-pressed="false">Expand all</button>{{end}}
+</div>
 {{range .Emails}}
-<article class="card message message-{{directionClass .Email.Direction}}">
-  <header class="message-header">
+<details class="card message message-{{directionClass .Email.Direction}}"{{if .IsLatest}} open{{end}}>
+  <summary class="message-header">
     <span class="{{directionBadge .Email.Direction}}">{{directionLabel .Email.Direction}}</span>
-    <span class="message-from"><strong>{{if .Email.FromName}}{{.Email.FromName}}{{else}}{{.Email.FromAddress}}{{end}}</strong> &lt;{{.Email.FromAddress}}&gt;</span>
-    <time class="muted">{{.FormattedSent}}</time>
-  </header>
+    <span class="message-from"><strong>{{if .Email.FromName}}{{.Email.FromName}}{{else}}{{.Email.FromAddress}}{{end}}</strong><span class="message-address"> &lt;{{.Email.FromAddress}}&gt;</span></span>
+    <span class="message-snippet">{{if .Snippet}}{{.Snippet}}{{else}}<em>(No message content)</em>{{end}}</span>
+    {{if .Attachments}}<span class="attachment-chip" title="{{len .Attachments}} attachment(s)">&#128206; {{len .Attachments}}</span>{{end}}
+    <time class="muted message-time" title="{{.FullSent}}">{{.FormattedSent}}</time>
+  </summary>
   <iframe
     class="email-frame"
     src="/emails/{{.Email.ID}}/body"
     title="Email message from {{.Email.FromAddress}}"
     sandbox="allow-popups allow-popups-to-escape-sandbox"
     referrerpolicy="no-referrer"
+    data-height="{{estHeight .Email}}"
     loading="lazy">
   </iframe>
-  <div class="message-actions">
-    <button type="button" class="btn btn-ghost btn-small" data-frame-expand>Expand</button>
-  </div>
   {{if .Attachments}}
   <div class="attachments">
     <strong>Attachments</strong>
@@ -678,7 +846,7 @@ const threadDetailBody = `
     </ul>
   </div>
   {{end}}
-</article>
+</details>
 {{end}}
 
 {{if not .ReplyAllowed}}
@@ -723,26 +891,27 @@ const threadDetailBody = `
       <label for="reply-body">Message</label>
       <textarea id="reply-body" class="reply-textarea" name="body_text" rows="6" required placeholder="Write your reply...">{{.ReplyDraft}}</textarea>
     </div>
-    <div class="field">
-      <label for="reply-attachment">Attachment (optional)</label>
-      <input id="reply-attachment" type="file" name="attachment">
+    <div class="reply-footer">
+      <label class="file-field" for="reply-attachment">Attachment (optional)
+        <input id="reply-attachment" type="file" name="attachment">
+      </label>
+      <button type="submit" class="btn btn-primary">Send reply</button>
     </div>
-    <button type="submit" class="btn btn-primary">Send reply</button>
   </form>
 </section>
 {{end}}
 
-<section class="card">
-  <h2>Activity ({{.DisplayTZ}})</h2>
+<details class="card activity-card">
+  <summary><h2>Activity ({{len .Events}})</h2></summary>
   <ol class="timeline">
     {{range .Events}}
     {{if .Section}}<li class="timeline-section"><h3>{{.Section}}</h3></li>{{end}}
-    <li><time class="muted">{{.FormattedTime}}</time> <span>{{.Summary}}</span></li>
+    <li><time class="muted" title="{{.FullTime}}">{{.FormattedTime}}</time> <span>{{.Summary}}</span></li>
     {{else}}
     <li class="muted">No activity recorded yet.</li>
     {{end}}
   </ol>
-</section>
+</details>
 `
 
 const errorBody = `
@@ -766,7 +935,7 @@ const settingsBody = `
 {{end}}
 
 <form method="post" action="/settings" class="card">
-  <h2>Mailbox settings</h2>
+  <h2>Routing &amp; display</h2>
   {{range .AccountSettings}}
   <fieldset>
     <legend>{{.Account.Name}}</legend>
@@ -787,10 +956,15 @@ const settingsBody = `
   <div class="form-grid">
     <label class="field">Display timezone (IANA)
       <input type="text" name="display_timezone" value="{{.Settings.DisplayTimezone}}" required>
+      <span class="helper">All times in MiniCRM are shown in this timezone.</span>
     </label>
     <label class="field">Subject match window (days)
       <input type="number" name="subject_match_window_days" value="{{.Settings.SubjectMatchWindowDays}}" min="1" max="365" required>
     </label>
+  </div>
+  <fieldset>
+    <legend>IMAP folder mapping</legend>
+  <div class="form-grid">
     <label class="field">IMAP INBOX folder
       <input type="text" name="imap_inbox_mailbox" value="{{.Settings.IMAPInboxMailbox}}" required>
     </label>
@@ -804,6 +978,7 @@ const settingsBody = `
       <input type="text" name="imap_sent_mailbox" value="{{.Settings.IMAPSentMailbox}}" required>
     </label>
   </div>
+  </fieldset>
   <button type="submit" class="btn btn-primary">Save settings</button>
 </form>
 
@@ -885,7 +1060,7 @@ const settingsBody = `
       <tbody>
         {{range .AuditLogs}}
         <tr>
-          <td class="nowrap">{{.FormattedTime}}</td>
+          <td class="nowrap"><time title="{{.FullTime}}">{{.FormattedTime}}</time></td>
           <td>{{.ActorName}}</td>
           <td>{{.Label}}</td>
           <td>{{if .TargetName}}{{.TargetName}}{{else}}<span class="muted">—</span>{{end}}</td>
@@ -915,14 +1090,17 @@ const isolatedEmailBodyHTML = `<!DOCTYPE html>
     th, td { border: 1px solid #e2e8f0; padding: 0.35rem 0.5rem; text-align: left; }
     blockquote { margin: 0.75rem 0; padding-left: 0.75rem; border-left: 3px solid #e2e8f0; color: #475569; }
     pre { white-space: pre-wrap; font-family: inherit; margin: 0; }
-    a { color: #2563eb; }
+    a { color: #4338ca; }
+    .empty-body { color: #64748b; font-style: italic; margin: 0; }
   </style>
 </head>
 <body>
   {{if .HasHTML}}
     <div>{{.SanitizedHTML}}</div>
-  {{else}}
+  {{else if .PlainText}}
     <pre>{{.PlainText}}</pre>
+  {{else}}
+    <p class="empty-body">(No message content)</p>
   {{end}}
 </body>
 </html>
