@@ -2,6 +2,8 @@
 /dev-oidc
 /bin/
 /data/
+/.pi
+/compose.*.yaml
 *.test
 *.out
 .DS_Store

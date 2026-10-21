@@ -81,7 +81,7 @@ Located in [`e2e/auth_e2e_test.go`](../e2e/auth_e2e_test.go).
 
 ### Running the Live E2E Suite Against the Compose Stack
 
-The [Docker Compose stack](../docker-compose.yml) starts PostgreSQL, Dovecot (two seeded accounts), Mailpit, `dev-oidc`, and MiniCRM. This is the easiest way to exercise the live multi-service mode locally, including IMAP ingestion and SMTP delivery:
+The [Docker Compose stack](../compose.yaml) starts PostgreSQL, Dovecot (two seeded accounts), Mailpit, `dev-oidc`, and MiniCRM. This is the easiest way to exercise the live multi-service mode locally, including IMAP ingestion and SMTP delivery:
 
 ```bash
 docker compose up --build -d   # or: podman-compose up --build -d

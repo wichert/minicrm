@@ -137,7 +137,7 @@ go build -o minicrm ./cmd/minicrm
 
 ### Docker Compose Test Stack
 
-[`docker-compose.yml`](./docker-compose.yml) starts a complete, self-contained environment for exercising MiniCRM end-to-end:
+[`compose.yaml`](./compose.yaml) starts a complete, self-contained environment for exercising MiniCRM end-to-end:
 
 | Service | Purpose | Host ports |
 |---|---|---|
