@@ -63,6 +63,9 @@ func TestSeedFixturesParseWithAttachments(t *testing.T) {
 				t.Errorf("%s: expected a %s attachment, got %v", key, parts[0], counts)
 			}
 		}
+		if key == "support@example.com/07-signed-contract.eml" && !strings.Contains(parsed.BodyHTMLSanitized, `src="cid:logo@acme"`) {
+			t.Errorf("%s: expected cid:logo@acme preserved in BodyHTMLSanitized, got %q", key, parsed.BodyHTMLSanitized)
+		}
 		delete(want, key)
 	}
 	if len(want) != 0 {

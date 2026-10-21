@@ -22,7 +22,7 @@ When an email is ingested, `mail.SanitizeEmailHTML` sanitizes the raw HTML part 
 
 ---
 
-## 2. Layer 2: Opaque-Origin `<iframe sandbox>` Isolation (`internal/web/views/views.go`)
+## 2. Layer 2: `<iframe sandbox>` Script Isolation (`internal/web/views/views.go`)
 
 Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. Instead, `/threads/{id}` embeds each message inside an isolated `<iframe sandbox>` pointing to `/emails/{id}/body`. The iframe deliberately does **not** use `credentialless`: that attribute strips the `minicrm_session` cookie, so `RequireAuth` would redirect the frame to the OIDC issuer and Chromium would block it under `frame-src 'self'`.
 
@@ -30,14 +30,14 @@ Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. I
 <iframe
   class="email-frame"
   src="/emails/{{.Email.ID}}/body"
-  sandbox="allow-popups allow-popups-to-escape-sandbox"
+  sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
   referrerpolicy="no-referrer"
   loading="lazy">
 </iframe>
 ```
 
-- **`allow-scripts` is omitted**: Even if an HTML sanitizer bypass ever existed, the browser engine refuses to execute JavaScript inside the frame.
-- **`allow-same-origin` is omitted**: The frame runs in a unique opaque origin (`null`) and cannot access parent cookies, `localStorage`, or DOM nodes.
+- **`allow-scripts` is omitted** (and `Content-Security-Policy` sets `default-src 'none'`): Even if an HTML sanitizer bypass ever existed, the browser engine refuses to execute JavaScript inside the frame.
+- **`allow-same-origin` without `allow-scripts`**: Because script execution is disabled inside the embedded browsing context, the inert email DOM cannot run scripts or access parent state, while the parent page (`static/app.js`) can observe `contentDocument.body` via `ResizeObserver` to size every email frame to its exact rendered height across Safari, Chrome, and Firefox (alongside `<meta name="responsive-embedded-sizing">` and `frame-sizing: content-block-size`).
 - **`allow-forms` and `allow-top-navigation` are omitted**: The email cannot submit forms or navigate the operator's top-level window.
 - **`allow-popups allow-popups-to-escape-sandbox`**: Clicking an external `<a target="_blank" rel="noopener noreferrer">` link opens cleanly in a new browser tab without `window.opener` access.
 
@@ -49,7 +49,7 @@ Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. I
 
 | HTTP Header | Main Application Routes (`/threads`, `/settings`) | Isolated Email Body Route (`/emails/{id}/body`) |
 |---|---|---|
-| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'` plus `upgrade-insecure-requests` when served over HTTPS | `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox; form-action 'none'; base-uri 'none'; object-src 'none'` |
+| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'` plus `upgrade-insecure-requests` when served over HTTPS | `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'; sandbox allow-same-origin allow-popups allow-popups-to-escape-sandbox; form-action 'none'; base-uri 'none'; object-src 'none'` |
 | `X-Content-Type-Options` | `nosniff` | `nosniff` |
 | `X-Frame-Options` | `DENY` | `SAMEORIGIN` |
 | `Referrer-Policy` | `no-referrer` | `no-referrer` |
@@ -68,16 +68,16 @@ In addition, `/emails/{id}/body` embeds a `<meta http-equiv="Content-Security-Po
 
 ## 4. Layer 4: Attachment Downloads, CSRF & Request Bounds
 
-- **Account-Scoped Attachment Download Authorization**:
-  - `/attachments/{id}/download` resolves `attachment -> email -> account_id` and requires the signed-in user to have access to that mail account (`sqlc.User.HasAccountAccess`), returning `404 Not Found` otherwise. This holds even when the same content-addressed blob is shared by attachments of several accounts.
+- **Account-Scoped Attachment Authorization**:
+  - `/attachments/{id}/view` and `/attachments/{id}/download` resolve `attachment -> email -> account_id` and require the signed-in user to have access to that mail account (`sqlc.User.HasAccountAccess`), returning `404 Not Found` otherwise. This holds even when the same content-addressed blob is shared by attachments of several accounts.
   - `/emails/{id}/body` performs the same account-access check before rendering the isolated email body.
-- **Attachment Download Hardening (`SetAttachmentDownloadHeaders`)**:
+- **Attachment Viewing & Download Hardening (`SetAttachmentInlineHeaders`, `SetAttachmentDownloadHeaders`)**:
   - `/attachments/{id}/download` sets:
     - `Content-Disposition: attachment; filename*=UTF-8''<url-escaped-name>`
     - `Content-Security-Policy: default-src 'none'; sandbox`
     - `X-Content-Type-Options: nosniff`
     - `X-Download-Options: noopen`
-  - Browsers are forced to save the file rather than rendering uploaded HTML, SVG, or scriptable documents inline in the CRM origin.
+  - `/attachments/{id}/view` only serves an explicit allowlist of non-scriptable media types (`image/png`, `image/jpeg`, `image/gif`, `image/webp`, `application/pdf`, and `text/plain; charset=utf-8`) with `Content-Disposition: inline`, `X-Content-Type-Options: nosniff`, `Cross-Origin-Resource-Policy: same-origin`, and strict CSP (`AttachmentInlineCSP` / `AttachmentPDFCSP`). Any non-allowlisted type (such as HTML or SVG) automatically falls back to `SetAttachmentDownloadHeaders` so browsers never execute uploaded documents in the CRM origin.
 - **Cross-Site Request Forgery (CSRF) Protection**:
   - Enforced globally via Go's `http.NewCrossOriginProtection()` (`Sec-Fetch-Site` and `Origin` header validation) paired with `SameSite=Lax`, `HttpOnly`, `__Host-` prefixed `Secure` session cookies.
 - **Request Body Size Bounds**:

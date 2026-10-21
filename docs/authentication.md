@@ -214,7 +214,7 @@ A user with `"groups": ["crm-support"]` can access `support` only; `["crm-suppor
 - Users matching **no** configured account group are refused at login with `403 Forbidden` and a `user_login_failed` audit event (`reason: "no_account_access"`).
 - The bootstrap admin is granted access to all configured accounts.
 - Admins can pre-create users and select their initial account access in `/settings`.
-- `sqlc.User.HasAccountAccess(accountID)` and `sqlc.User.HasMultipleAccounts()` drive all thread, email body (`/emails/{id}/body`), and attachment (`/attachments/{id}/download`) authorization checks, as well as whether the account filter/column/badge is shown in the UI.
+- `sqlc.User.HasAccountAccess(accountID)` and `sqlc.User.HasMultipleAccounts()` drive all thread, email body (`/emails/{id}/body`), and attachment (`/attachments/{id}/view`, `/attachments/{id}/download`) authorization checks, as well as whether the account filter/column/badge is shown in the UI.
 
 ---
 

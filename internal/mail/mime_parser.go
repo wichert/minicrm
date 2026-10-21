@@ -59,15 +59,16 @@ func buildStrictEmailHTMLPolicy() *bluemonday.Policy {
 		"table", "thead", "tbody", "tfoot", "tr", "th", "td",
 		"b", "i", "u", "strong", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
 	)
-	p.AllowAttrs("href").OnElements("a")
-	p.AllowURLSchemes("http", "https", "mailto")
+	p.AllowAttrs("href").Matching(regexp.MustCompile(`(?i)^(https?://|mailto:)`)).OnElements("a")
+	p.AllowURLSchemes("http", "https", "mailto", "cid", "data")
 	p.RequireNoReferrerOnLinks(true)
 	p.AddTargetBlankToFullyQualifiedLinks(true)
 	p.RequireNoFollowOnLinks(true)
 
-	// Allow inline cid: or data: images; remote http(s) images are rewritten to data-blocked-src first.
+	// Allow inline cid:, data:, or bare filename images; remote http(s) images are rewritten to data-blocked-src first.
 	p.AllowAttrs("alt", "title", "data-blocked-src").OnElements("img")
-	p.AllowAttrs("src").Matching(regexp.MustCompile(`(?i)^(cid:|data:image/(png|jpeg|gif|webp);base64,)`)).OnElements("img")
+	p.AllowAttrs("width", "height").Matching(regexp.MustCompile(`^\d+$`)).OnElements("img")
+	p.AllowAttrs("src").Matching(regexp.MustCompile(`(?i)^(cid:|data:image/(png|jpeg|gif|webp);base64,|[a-z0-9._-]+\.(png|jpe?g|gif|webp)$)`)).OnElements("img")
 	return p
 }
 
@@ -155,8 +156,12 @@ func ParseRFC5322(r io.Reader) (*ParsedEmail, error) {
 			case "text/html":
 				htmlParts = append(htmlParts, string(bodyBytes))
 			default:
-				if cid != "" {
-					filename := ctParams["name"]
+				filename := ctParams["name"]
+				if filename == "" {
+					_, dispParams, _ := h.ContentDisposition()
+					filename = dispParams["filename"]
+				}
+				if cid != "" || filename != "" {
 					if filename == "" {
 						filename = cid
 					}

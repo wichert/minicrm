@@ -78,13 +78,76 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
-  // Email bodies are sandboxed without same-origin access, so the server supplies an
-  // estimated content height instead of the page measuring the frame.
-  document.querySelectorAll(".email-frame[data-height]").forEach(function (frame) {
-    var h = parseInt(frame.getAttribute("data-height"), 10);
-    if (h > 0) {
-      frame.style.height = h + "px";
+  function syncEmailFrameHeight(frame) {
+    try {
+      var doc = frame.contentDocument;
+      if (!doc || !doc.body) {
+        return;
+      }
+      var h = Math.ceil(doc.body.getBoundingClientRect().height);
+      if (doc.documentElement && doc.documentElement.scrollWidth > doc.documentElement.clientWidth) {
+        h += 16;
+      }
+      if (h > 0) {
+        frame.style.height = h + "px";
+      }
+    } catch (_err) {
+      // Fallback to CSS height if contentDocument is unavailable.
     }
+  }
+
+  function observeEmailFrame(frame) {
+    syncEmailFrameHeight(frame);
+    try {
+      var doc = frame.contentDocument;
+      if (!doc || !doc.body || doc.body.dataset.resizeObserved === "true") {
+        return;
+      }
+      doc.body.dataset.resizeObserved = "true";
+      if (typeof ResizeObserver === "function") {
+        var ro = new ResizeObserver(function () {
+          syncEmailFrameHeight(frame);
+        });
+        ro.observe(doc.body);
+        if (doc.documentElement) {
+          ro.observe(doc.documentElement);
+        }
+      }
+      doc.querySelectorAll("img").forEach(function (img) {
+        if (!img.complete) {
+          img.addEventListener("load", function () {
+            syncEmailFrameHeight(frame);
+          });
+        }
+      });
+    } catch (_err) {
+      // Ignore if frame document is not yet ready.
+    }
+  }
+
+  document.querySelectorAll(".email-frame").forEach(function (frame) {
+    frame.addEventListener("load", function () {
+      observeEmailFrame(frame);
+    });
+    if (frame.contentDocument && frame.contentDocument.readyState === "complete") {
+      observeEmailFrame(frame);
+    }
+  });
+
+  document.querySelectorAll("details.message").forEach(function (details) {
+    details.addEventListener("toggle", function () {
+      if (details.open) {
+        details.querySelectorAll(".email-frame").forEach(function (frame) {
+          observeEmailFrame(frame);
+        });
+      }
+    });
+  });
+
+  window.addEventListener("resize", function () {
+    document.querySelectorAll(".email-frame").forEach(function (frame) {
+      syncEmailFrameHeight(frame);
+    });
   });
 
   document.querySelectorAll("[data-auto-submit]").forEach(function (el) {

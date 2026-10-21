@@ -491,7 +491,7 @@ func TestSecurityHeadersSandboxedIframeAndReopenBanner(t *testing.T) {
 		t.Fatalf("missing security headers: %+v", rec1.Header())
 	}
 	body1 := rec1.Body.String()
-	if !strings.Contains(body1, `sandbox="allow-popups allow-popups-to-escape-sandbox"`) || strings.Contains(body1, "credentialless") {
+	if !strings.Contains(body1, `sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"`) || strings.Contains(body1, "credentialless") {
 		t.Fatalf("expected sandboxed iframe without credentialless in thread detail: %s", body1)
 	}
 	if !strings.Contains(body1, `title="Email message from client@example.com"`) {
@@ -514,6 +514,9 @@ func TestSecurityHeadersSandboxedIframeAndReopenBanner(t *testing.T) {
 	}
 	if rec2.Header().Get("X-Frame-Options") != "SAMEORIGIN" {
 		t.Fatalf("expected X-Frame-Options SAMEORIGIN on email body, got %s", rec2.Header().Get("X-Frame-Options"))
+	}
+	if !strings.Contains(rec2.Body.String(), `<meta name="responsive-embedded-sizing">`) {
+		t.Fatalf("expected responsive-embedded-sizing meta in isolated email body: %s", rec2.Body.String())
 	}
 
 	// 3. Test updating settings (including display_timezone and Archive folder)
@@ -612,8 +615,13 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/emails/"), "/body")
 			srv.HandleIsolatedEmailBody(w, web.WithChiParam(r, "id", id))
 		case strings.HasPrefix(r.URL.Path, "/attachments/"):
-			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/attachments/"), "/download")
-			srv.HandleDownloadAttachment(w, web.WithChiParam(r, "id", id))
+			rest := strings.TrimPrefix(r.URL.Path, "/attachments/")
+			switch {
+			case strings.HasSuffix(rest, "/view"):
+				srv.HandleViewAttachment(w, web.WithChiParam(r, "id", strings.TrimSuffix(rest, "/view")))
+			default:
+				srv.HandleDownloadAttachment(w, web.WithChiParam(r, "id", strings.TrimSuffix(rest, "/download")))
+			}
 		}
 	})))
 	return srv, store, router, multiUser, singleUser
@@ -691,6 +699,7 @@ func TestAccountIsolationAndConditionalAccountsUI(t *testing.T) {
 	for _, target := range []string{
 		"/threads/" + salesThread.String() + "?as=single",
 		"/emails/" + salesEmail.String() + "/body?as=single",
+		"/attachments/" + salesAtt.String() + "/view?as=single",
 		"/attachments/" + salesAtt.String() + "/download?as=single",
 	} {
 		rec = httptest.NewRecorder()
@@ -866,7 +875,7 @@ func TestThreadDetailSemanticsAndNoInlineStyles(t *testing.T) {
 		`>Assign to me<`,
 		`Back to threads`,
 		`<details class="card message message-inbound" open>`,
-		`data-height="`,
+		`sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"`,
 		`From</dt><dd>Customer Support &lt;support@example.com&gt;`,
 		`>Customer<`,
 	} {
@@ -1366,8 +1375,132 @@ func TestExtractSnippetAndWaitDuration(t *testing.T) {
 	if label, tier := views.FormatWaitDuration(now.Add(-5*time.Hour), now); label != "Waiting 5h" || tier != "warning" {
 		t.Fatalf("wait = %q %q", label, tier)
 	}
-	if got := views.EstimateEmailHeight(sqlc.Email{}); got < 64 {
-		t.Fatalf("empty estimate = %d", got)
+}
+
+func TestAttachmentPreviewAndViewEndpoints(t *testing.T) {
+	store := newTestWebStore()
+	auditLogger := audit.NewLogger(store, nil)
+	attStore, err := storage.NewStore(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wfSvc := workflow.NewService(store, auditLogger, nil)
+	outbox := mail.NewOutboxWorker(nil, attStore, []mail.AccountSenderConfig{
+		{AccountID: "support", FromAddress: "support@example.com", FromName: "Support", Transport: &noopSMTP{}},
+	}, auditLogger, "example.com", nil, nil)
+	sm := auth.NewSessionManager(false)
+	authSvc := auth.NewService(store, auditLogger, sm, nil, "admin@example.com")
+	srv := web.NewServer(store, authSvc, wfSvc, outbox, attStore, auditLogger, sm, testAccounts())
+	multiUser := store.adminUser
+
+	mux := web.SecurityHeadersMiddleware(sm.LoadAndSave(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(auth.WithUser(r.Context(), multiUser))
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/threads/"):
+			srv.HandleViewThread(w, web.WithChiParam(r, "id", strings.TrimPrefix(r.URL.Path, "/threads/")))
+		case strings.HasPrefix(r.URL.Path, "/emails/"):
+			srv.HandleIsolatedEmailBody(w, web.WithChiParam(r, "id", strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/emails/"), "/body")))
+		case strings.HasSuffix(r.URL.Path, "/view"):
+			srv.HandleViewAttachment(w, web.WithChiParam(r, "id", strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/attachments/"), "/view")))
+		case strings.HasSuffix(r.URL.Path, "/download"):
+			srv.HandleDownloadAttachment(w, web.WithChiParam(r, "id", strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/attachments/"), "/download")))
+		}
+	})))
+
+	blob, err := attStore.Save(context.Background(), strings.NewReader("fake-blob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	threadID := uuid.New()
+	emailID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Attachments thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "erin@customer.example", LastMessageAt: time.Now().UTC(),
+	}
+	store.emails[emailID] = sqlc.Email{
+		ID: emailID, ThreadID: threadID, AccountID: "support", Direction: "inbound",
+		FromAddress:       "erin@customer.example",
+		BodyHTMLSanitized: `<p><img src="cid:logo@acme" alt="Logo"></p>`,
+		SentAt:            time.Now().UTC(),
+	}
+
+	inlineLogoAtt := uuid.New()
+	store.attachments[inlineLogoAtt] = sqlc.Attachment{
+		ID: inlineLogoAtt, EmailID: emailID, Filename: "logo.png", ContentType: "image/png",
+		SizeBytes: 512, ContentID: "logo@acme", IsInline: true, StorageRelPath: blob.StorageRelPath,
+	}
+	pngAtt := uuid.New()
+	store.attachments[pngAtt] = sqlc.Attachment{
+		ID: pngAtt, EmailID: emailID, Filename: "screenshot.png", ContentType: "image/png",
+		SizeBytes: 1024, StorageRelPath: blob.StorageRelPath,
+	}
+	pdfAtt := uuid.New()
+	store.attachments[pdfAtt] = sqlc.Attachment{
+		ID: pdfAtt, EmailID: emailID, Filename: "receipt.pdf", ContentType: "application/pdf",
+		SizeBytes: 2048, StorageRelPath: blob.StorageRelPath,
+	}
+	svgAtt := uuid.New()
+	store.attachments[svgAtt] = sqlc.Attachment{
+		ID: svgAtt, EmailID: emailID, Filename: "unsafe.svg", ContentType: "image/svg+xml",
+		SizeBytes: 512, StorageRelPath: blob.StorageRelPath,
+	}
+
+	// 1. Thread detail lists non-inline attachments with thumbnails and icon actions, omitting the inline CID logo.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("thread detail status %d", rec.Code)
+	}
+	detailHTML := rec.Body.String()
+	for _, want := range []string{
+		`<img class="attachment-preview-img" src="/attachments/` + pngAtt.String() + `/view"`,
+		`aria-label="View screenshot.png"`,
+		`aria-label="Download screenshot.png"`,
+		`Image &middot; 1.0 KB`,
+		`PDF document &middot; 2.0 KB`,
+		`href="/attachments/` + pdfAtt.String() + `/view"`,
+		`href="/attachments/` + pdfAtt.String() + `/download"`,
+		`href="/attachments/` + svgAtt.String() + `/download"`,
+	} {
+		if !strings.Contains(detailHTML, want) {
+			t.Fatalf("expected %q in thread detail HTML: %s", want, detailHTML)
+		}
+	}
+	if strings.Contains(detailHTML, inlineLogoAtt.String()) || strings.Contains(detailHTML, "logo.png") {
+		t.Fatalf("inline CID image referenced by <img> must not be listed as an attachment: %s", detailHTML)
+	}
+	if strings.Contains(detailHTML, `/attachments/`+svgAtt.String()+`/view`) {
+		t.Fatalf("unsafe SVG attachment must not have an inline view link: %s", detailHTML)
+	}
+
+	// 2. Isolated email body resolves cid:logo@acme to /attachments/<inlineLogoAtt>/view.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/emails/"+emailID.String()+"/body", nil))
+	if !strings.Contains(rec.Body.String(), `src="/attachments/`+inlineLogoAtt.String()+`/view"`) {
+		t.Fatalf("expected cid: image resolved to attachment view URL, got: %s", rec.Body.String())
+	}
+
+	// 3. /attachments/{id}/view serves PNG and PDF inline, but forces attachment download for SVG.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/attachments/"+pngAtt.String()+"/view", nil))
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "inline;") || rec.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("unexpected PNG view headers: %+v", rec.Header())
+	}
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/attachments/"+pdfAtt.String()+"/view", nil))
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "inline;") || rec.Header().Get("Content-Type") != "application/pdf" {
+		t.Fatalf("unexpected PDF view headers: %+v", rec.Header())
+	}
+	if rec.Header().Get("Cross-Origin-Embedder-Policy") != "" {
+		t.Fatalf("PDF inline view must omit COEP so browser PDF viewers can load: %+v", rec.Header())
+	}
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/attachments/"+svgAtt.String()+"/view", nil))
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "attachment;") {
+		t.Fatalf("unsafe SVG on /view must fall back to Content-Disposition: attachment, got: %+v", rec.Header())
 	}
 }
 

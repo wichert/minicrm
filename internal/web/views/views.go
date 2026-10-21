@@ -7,6 +7,8 @@ import (
 	"html"
 	"html/template"
 	"io"
+	"mime"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -482,18 +484,161 @@ func assignmentLabel(source string) string {
 	}
 }
 
+// ClassifyAttachment determines whether an attachment is safe to render inline in the browser
+// and returns its canonical MIME type, whether it is an inline-renderable image, and whether
+// it is safe to view in a browser tab. Non-allowlisted types (including HTML and SVG) return
+// isViewable = false so they are only ever served as downloads.
+func ClassifyAttachment(contentType, filename string) (safeContentType string, isImage bool, isViewable bool) {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(contentType))
+	if err != nil || mediaType == "" {
+		mediaType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	} else {
+		mediaType = strings.ToLower(mediaType)
+	}
+	if mediaType == "" || mediaType == "application/octet-stream" {
+		switch strings.ToLower(filepath.Ext(filename)) {
+		case ".png":
+			mediaType = "image/png"
+		case ".jpg", ".jpeg":
+			mediaType = "image/jpeg"
+		case ".gif":
+			mediaType = "image/gif"
+		case ".webp":
+			mediaType = "image/webp"
+		case ".pdf":
+			mediaType = "application/pdf"
+		case ".txt", ".log", ".csv":
+			mediaType = "text/plain"
+		}
+	}
+	switch mediaType {
+	case "image/png":
+		return "image/png", true, true
+	case "image/jpeg", "image/jpg":
+		return "image/jpeg", true, true
+	case "image/gif":
+		return "image/gif", true, true
+	case "image/webp":
+		return "image/webp", true, true
+	case "application/pdf":
+		return "application/pdf", false, true
+	case "text/plain", "text/csv":
+		return "text/plain; charset=utf-8", false, true
+	default:
+		return "", false, false
+	}
+}
+
+// IsImageAttachment reports whether att is a safe raster image that can be previewed inline.
+func IsImageAttachment(att sqlc.Attachment) bool {
+	_, isImage, _ := ClassifyAttachment(att.ContentType, att.Filename)
+	return isImage
+}
+
+// IsViewableAttachment reports whether att can be safely opened inline in a browser tab.
+func IsViewableAttachment(att sqlc.Attachment) bool {
+	_, _, isViewable := ClassifyAttachment(att.ContentType, att.Filename)
+	return isViewable
+}
+
+// HasImageAttachments reports whether atts contains at least one safe inline-previewable image.
+func HasImageAttachments(atts []sqlc.Attachment) bool {
+	for _, att := range atts {
+		if IsImageAttachment(att) {
+			return true
+		}
+	}
+	return false
+}
+
+// AttachmentKindLabel returns a user-friendly label for an attachment's file type.
+func AttachmentKindLabel(att sqlc.Attachment) string {
+	safeType, isImage, _ := ClassifyAttachment(att.ContentType, att.Filename)
+	if isImage {
+		return "Image"
+	}
+	switch safeType {
+	case "application/pdf":
+		return "PDF document"
+	case "text/plain; charset=utf-8":
+		return "Text file"
+	default:
+		return "File"
+	}
+}
+
+func attachmentInlineTokens(att sqlc.Attachment) []string {
+	var tokens []string
+	if att.ContentID != "" {
+		tokens = append(tokens, "cid:"+att.ContentID)
+	}
+	if att.Filename != "" {
+		tokens = append(tokens, "cid:"+att.Filename, att.Filename)
+	}
+	return tokens
+}
+
+func resolveAndFilterInlineImages(sanitizedHTML string, atts []sqlc.Attachment) (string, []sqlc.Attachment) {
+	if sanitizedHTML == "" || len(atts) == 0 {
+		return sanitizedHTML, atts
+	}
+	out := sanitizedHTML
+	listed := make([]sqlc.Attachment, 0, len(atts))
+
+	for _, att := range atts {
+		if !IsImageAttachment(att) {
+			listed = append(listed, att)
+			continue
+		}
+		viewURL := "/attachments/" + att.ID.String() + "/view"
+		used := false
+		for _, token := range attachmentInlineTokens(att) {
+			doubleAttr := `src="` + token + `"`
+			singleAttr := `src='` + token + `'`
+			if strings.Contains(out, doubleAttr) || strings.Contains(out, singleAttr) {
+				out = strings.ReplaceAll(out, doubleAttr, `src="`+viewURL+`"`)
+				out = strings.ReplaceAll(out, singleAttr, `src='`+viewURL+`'`)
+				used = true
+			}
+		}
+		if !used {
+			listed = append(listed, att)
+		}
+	}
+	return out, listed
+}
+
+// FilterListedAttachments returns only the attachments that should be shown in the message's
+// attachment list, omitting image attachments that are already rendered inline via an <img>
+// element in sanitizedHTML.
+func FilterListedAttachments(sanitizedHTML string, atts []sqlc.Attachment) []sqlc.Attachment {
+	_, listed := resolveAndFilterInlineImages(sanitizedHTML, atts)
+	return listed
+}
+
+// ResolveInlineCIDImages rewrites cid:<ContentID> (or inline filename) image sources in
+// sanitizedHTML to point at /attachments/<id>/view for matching image attachments belonging
+// to the same email.
+func ResolveInlineCIDImages(sanitizedHTML string, atts []sqlc.Attachment) string {
+	resolved, _ := resolveAndFilterInlineImages(sanitizedHTML, atts)
+	return resolved
+}
+
 var templateFuncs = template.FuncMap{
-	"statusLabel":      FormatStatus,
-	"statusBadgeClass": statusBadgeClass,
-	"directionLabel":   directionLabel,
-	"directionClass":   directionClass,
-	"directionBadge":   directionBadgeClass,
-	"formatSize":       FormatFileSize,
-	"assignmentLabel":  assignmentLabel,
-	"roleLabel":        FormatRole,
-	"auditEventLabel":  FormatAuditEvent,
-	"hasAccount":       hasAccount,
-	"estHeight":        EstimateEmailHeight,
+	"statusLabel":          FormatStatus,
+	"statusBadgeClass":     statusBadgeClass,
+	"directionLabel":       directionLabel,
+	"directionClass":       directionClass,
+	"directionBadge":       directionBadgeClass,
+	"formatSize":           FormatFileSize,
+	"assignmentLabel":      assignmentLabel,
+	"roleLabel":            FormatRole,
+	"auditEventLabel":      FormatAuditEvent,
+	"hasAccount":           hasAccount,
+	"isImageAttachment":    IsImageAttachment,
+	"isViewableAttachment": IsViewableAttachment,
+	"hasImageAttachments":  HasImageAttachments,
+	"attachmentKind":       AttachmentKindLabel,
 }
 
 var (
@@ -534,49 +679,6 @@ type IsolatedEmailBodyData struct {
 	SanitizedHTML template.HTML
 	PlainText     string
 	HasHTML       bool
-}
-
-// EstimateEmailHeight estimates the rendered height in pixels of an email body so the
-// sandboxed iframe can be sized without scripts running inside it (no nested scrollbar
-// for typical messages, no tall blank box for short ones).
-func EstimateEmailHeight(email sqlc.Email) int {
-	const (
-		charsPerLine = 90
-		lineHeight   = 23
-		padding      = 28
-		minHeight    = 64
-		maxHeight    = 5000
-	)
-	text := email.BodyText
-	extra := 0
-	if email.BodyHTMLSanitized != "" {
-		h := email.BodyHTMLSanitized
-		extra = strings.Count(h, "<img") * 220
-		for _, tag := range []string{"</p>", "<br", "</div>", "</li>", "</tr>", "</h1>", "</h2>", "</h3>", "</blockquote>"} {
-			h = strings.ReplaceAll(h, tag, tag+"\n")
-		}
-		text = html.UnescapeString(htmlTagRe.ReplaceAllString(h, ""))
-	}
-	if strings.TrimSpace(text) == "" {
-		return minHeight
-	}
-	lines := 0
-	for _, line := range strings.Split(strings.TrimRight(text, "\n\r "), "\n") {
-		n := utf8.RuneCountInString(strings.TrimRight(line, "\r"))
-		if n == 0 {
-			lines++
-			continue
-		}
-		lines += (n + charsPerLine - 1) / charsPerLine
-	}
-	height := lines*lineHeight + padding + extra
-	if height < minHeight {
-		height = minHeight
-	}
-	if height > maxHeight {
-		height = maxHeight
-	}
-	return height
 }
 
 // RenderIsolatedEmailBody renders a single email's content for the sandboxed iframe endpoint.
@@ -836,17 +938,43 @@ const threadDetailBody = `
     class="email-frame"
     src="/emails/{{.Email.ID}}/body"
     title="Email message from {{.Email.FromAddress}}"
-    sandbox="allow-popups allow-popups-to-escape-sandbox"
+    sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
     referrerpolicy="no-referrer"
-    data-height="{{estHeight .Email}}"
     loading="lazy">
   </iframe>
   {{if .Attachments}}
   <div class="attachments">
-    <strong>Attachments</strong>
-    <ul>
+    <ul class="attachment-grid" aria-label="Attachments">
       {{range .Attachments}}
-      <li><a href="/attachments/{{.ID}}/download">{{.Filename}}</a> <span class="muted">{{formatSize .SizeBytes}}</span></li>
+      <li class="attachment-card">
+        {{if isImageAttachment .}}
+        <a class="attachment-thumb attachment-thumb-image" href="/attachments/{{.ID}}/view" target="_blank" rel="noopener" tabindex="-1" aria-hidden="true">
+          <img class="attachment-preview-img" src="/attachments/{{.ID}}/view" alt="{{.Filename}}" loading="lazy">
+        </a>
+        {{else}}
+        <span class="attachment-thumb attachment-thumb-doc" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+        </span>
+        {{end}}
+        <div class="attachment-meta">
+          {{if isViewableAttachment .}}
+          <a class="attachment-name" href="/attachments/{{.ID}}/view" target="_blank" rel="noopener" title="{{.Filename}}">{{.Filename}}</a>
+          {{else}}
+          <a class="attachment-name" href="/attachments/{{.ID}}/download" title="{{.Filename}}">{{.Filename}}</a>
+          {{end}}
+          <span class="attachment-sub muted">{{attachmentKind .}} &middot; {{formatSize .SizeBytes}}</span>
+        </div>
+        <div class="attachment-actions">
+          {{if isViewableAttachment .}}
+          <a class="btn-icon" href="/attachments/{{.ID}}/view" target="_blank" rel="noopener" title="View {{.Filename}}" aria-label="View {{.Filename}}">
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </a>
+          {{end}}
+          <a class="btn-icon" href="/attachments/{{.ID}}/download" title="Download {{.Filename}}" aria-label="Download {{.Filename}}">
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </a>
+        </div>
+      </li>
       {{end}}
     </ul>
   </div>
@@ -1084,12 +1212,13 @@ const isolatedEmailBodyHTML = `<!DOCTYPE html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="responsive-embedded-sizing">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'none'; base-uri 'none'; object-src 'none'">
   <meta name="referrer" content="no-referrer">
   <title>Email message</title>
   <style>
     html, body { margin: 0; padding: 0; background: #ffffff; color: #0f172a; }
-    body { font-family: system-ui, -apple-system, sans-serif; font-size: 15px; line-height: 1.55; padding: 0.75rem 1rem; overflow-wrap: anywhere; }
+    body { display: flow-root; font-family: system-ui, -apple-system, sans-serif; font-size: 15px; line-height: 1.55; padding: 0.75rem 1rem; overflow-wrap: anywhere; }
     img { max-width: 100%; height: auto; }
     table { border-collapse: collapse; max-width: 100%; }
     th, td { border: 1px solid #e2e8f0; padding: 0.35rem 0.5rem; text-align: left; }

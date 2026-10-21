@@ -13,13 +13,18 @@ func TestSanitizeEmailHTML(t *testing.T) {
 		<script>alert(1)</script>
 		<iframe src="https://evil.example/frame"></iframe>
 		<a href="javascript:alert(2)">Bad Link</a>
+		<a href="data:text/html,<script>alert(4)</script>">Bad Data Link</a>
 		<a href="https://example.com/docs">Safe Link</a>
+		<img src="cid:logo@acme" alt="Acme logo" width="64" height="64">
 		<img src="https://tracker.example/pixel.gif" onerror="alert(3)" alt="pixel">
 	</div>`
 
 	got := mail.SanitizeEmailHTML(malicious)
-	if strings.Contains(got, "<script") || strings.Contains(got, "onclick") || strings.Contains(got, "onerror") || strings.Contains(got, "<iframe") || strings.Contains(got, "javascript:") {
+	if strings.Contains(got, "<script") || strings.Contains(got, "onclick") || strings.Contains(got, "onerror") || strings.Contains(got, "<iframe") || strings.Contains(got, "javascript:") || strings.Contains(got, "data:text/html") {
 		t.Fatalf("sanitizer failed to strip dangerous HTML: %s", got)
+	}
+	if !strings.Contains(got, `src="cid:logo@acme"`) {
+		t.Fatalf("expected cid: image src to be preserved: %s", got)
 	}
 	if !strings.Contains(got, `data-blocked-src="https://tracker.example/pixel.gif"`) {
 		t.Fatalf("expected remote image src to be rewritten to data-blocked-src: %s", got)

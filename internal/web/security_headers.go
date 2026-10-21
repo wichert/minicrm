@@ -23,10 +23,16 @@ const (
 	MainCSPInsecure = mainCSPBase
 
 	EmailBodyCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; " +
-		"frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox; " +
+		"frame-ancestors 'self'; sandbox allow-same-origin allow-popups allow-popups-to-escape-sandbox; " +
 		"form-action 'none'; base-uri 'none'; object-src 'none'"
 
 	AttachmentCSP = "default-src 'none'; sandbox"
+
+	AttachmentInlineCSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; " +
+		"frame-ancestors 'self'; sandbox; form-action 'none'; base-uri 'none'; object-src 'none'"
+
+	AttachmentPDFCSP = "default-src 'none'; object-src 'self'; frame-ancestors 'self'; " +
+		"form-action 'none'; base-uri 'none'"
 
 	PermissionsPolicyValue = "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), " +
 		"clipboard-write=(), display-capture=(), fullscreen=(), geolocation=(), gyroscope=(), " +
@@ -96,5 +102,23 @@ func SetAttachmentDownloadHeaders(w http.ResponseWriter, filename, contentType s
 	h.Set("Content-Security-Policy", AttachmentCSP)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Download-Options", "noopen")
+	h.Set("Cache-Control", "private, no-store, max-age=0")
+}
+
+// SetAttachmentInlineHeaders sets hardened headers for safe inline attachment viewing (images, PDFs, plain text).
+func SetAttachmentInlineHeaders(w http.ResponseWriter, filename, safeContentType string) {
+	escapedName := url.PathEscape(filename)
+	h := w.Header()
+	h.Set("Content-Type", safeContentType)
+	h.Set("Content-Disposition", fmt.Sprintf("inline; filename*=UTF-8''%s", escapedName))
+	if safeContentType == "application/pdf" {
+		h.Set("Content-Security-Policy", AttachmentPDFCSP)
+		h.Del("Cross-Origin-Embedder-Policy")
+	} else {
+		h.Set("Content-Security-Policy", AttachmentInlineCSP)
+	}
+	h.Set("X-Frame-Options", "SAMEORIGIN")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Cross-Origin-Resource-Policy", "same-origin")
 	h.Set("Cache-Control", "private, no-store, max-age=0")
 }

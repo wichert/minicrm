@@ -55,6 +55,7 @@ func NewRouter(srv *Server, authSvc *auth.Service, sessions *scs.SessionManager)
 		authed.Post("/threads/{id}/reply", srv.HandleReplyThread)
 
 		authed.Get("/emails/{id}/body", srv.HandleIsolatedEmailBody)
+		authed.Get("/attachments/{id}/view", srv.HandleViewAttachment)
 		authed.Get("/attachments/{id}/download", srv.HandleDownloadAttachment)
 
 		// Admin-only settings routes

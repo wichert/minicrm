@@ -34,12 +34,12 @@ When modifying MiniCRM, preserve the following invariants (documented in full in
    - Every data read (`data_access`) and mutation (`data_change`) must be logged via `log/slog` (`internal/db/sqlc/tracer.go` and `internal/audit/logger.go`).
    - Store all timestamps in UTC (`TIMESTAMPTZ`) and format them in the UI using `system_settings.display_timezone` (`views.FormatTimestamp`).
 4. **Untrusted HTML & HTTP Security (`internal/mail/mime_parser.go`, `internal/web/security_headers.go`)**:
-   - Never render email HTML directly in the main DOM; always sanitize with `mail.SanitizeEmailHTML` and serve inside the isolated `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" credentialless>` via `/emails/{id}/body`.
+   - Never render email HTML directly in the main DOM; always sanitize with `mail.SanitizeEmailHTML` and serve inside the isolated `<iframe sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer">` via `/emails/{id}/body` (with `allow-scripts` omitted and `script-src 'none'`).
    - Keep `SecurityHeadersMiddleware`, `http.NewCrossOriginProtection()`, and `http.MaxBytesReader` form bounds enabled on all routes.
 5. **Multi-Account Isolation (`internal/db/migrations/002_multi_account.sql`, `internal/web/`)**:
    - Mail accounts are configured via numbered `MINICRM_ACCOUNT_<N>_*` env vars; each account maps an OIDC group (`OIDC_GROUP`) to its `ID`, and `users.allowed_accounts` is derived from the ID token's groups claim on every login.
    - Every `threads`/`emails`/`imap_jobs`/`imap_sync_state` row is scoped by `account_id`, and `emails` uniqueness is `(account_id, message_id)` so one email delivered to several accounts yields one thread per account. Thread matching (`internal/threading`) must always filter by `account_id`.
-   - All thread, email-body (`/emails/{id}/body`), and attachment (`/attachments/{id}/download`) access must verify `sqlc.User.HasAccountAccess(...)` of the owning account (`404` otherwise), even when attachments share a content-addressed blob.
+   - All thread, email-body (`/emails/{id}/body`), and attachment (`/attachments/{id}/view`, `/attachments/{id}/download`) access must verify `sqlc.User.HasAccountAccess(...)` of the owning account (`404` otherwise), even when attachments share a content-addressed blob.
    - A thread may only be assigned to (or default-assigned to) a user with access to its account; threads without a configured default assignee stay unassigned (`assignee_id IS NULL`) until one is set or an operator takes them.
 
 ---

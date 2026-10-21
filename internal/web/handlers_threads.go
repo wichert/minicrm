@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -383,12 +384,13 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 	emailViews := make([]views.EmailItemView, 0, len(emails))
 	for i, em := range emails {
 		atts, _ := s.store.ListAttachmentsByEmail(ctx, em.ID)
+		listedAtts := views.FilterListedAttachments(em.BodyHTMLSanitized, atts)
 		emailViews = append(emailViews, views.EmailItemView{
 			Email:         em,
 			FormattedSent: views.FormatTimestamp(em.SentAt, displayTZ),
 			FullSent:      views.FormatTimestampFull(em.SentAt, displayTZ),
 			Snippet:       views.ExtractEmailSnippet(em.BodyText, em.BodyHTMLSanitized, 110),
-			Attachments:   atts,
+			Attachments:   listedAtts,
 			IsLatest:      i == len(emails)-1,
 		})
 	}
@@ -535,6 +537,12 @@ func (s *Server) HandleIsolatedEmailBody(w http.ResponseWriter, r *http.Request)
 	if err != nil || !user.HasAccountAccess(emailRec.AccountID) {
 		http.Error(w, "email not found", http.StatusNotFound)
 		return
+	}
+
+	if emailRec.BodyHTMLSanitized != "" && strings.Contains(strings.ToLower(emailRec.BodyHTMLSanitized), "<img") {
+		if atts, err := s.store.ListAttachmentsByEmail(ctx, emailRec.ID); err == nil {
+			emailRec.BodyHTMLSanitized = views.ResolveInlineCIDImages(emailRec.BodyHTMLSanitized, atts)
+		}
 	}
 
 	s.audit.LogDataAccess(ctx, "email_body", emailRec.ID.String())
@@ -726,30 +734,32 @@ func (s *Server) HandleReplyThread(w http.ResponseWriter, r *http.Request) {
 	redirectToThread(w, r, threadID)
 }
 
+// HandleViewAttachment streams a safe attachment inline (images, PDFs, plain text) and
+// falls back to download headers for non-allowlisted file types.
+func (s *Server) HandleViewAttachment(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	att, f, status, msg := s.openAuthorizedAttachment(ctx, r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	s.audit.LogDataAccess(ctx, "attachment", att.ID.String())
+	if safeContentType, _, viewable := views.ClassifyAttachment(att.ContentType, att.Filename); viewable {
+		SetAttachmentInlineHeaders(w, att.Filename, safeContentType)
+	} else {
+		SetAttachmentDownloadHeaders(w, att.Filename, att.ContentType)
+	}
+	_, _ = io.Copy(w, f)
+}
+
 // HandleDownloadAttachment streams an attachment file from local disk with hardened download headers.
 func (s *Server) HandleDownloadAttachment(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	attID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "invalid attachment id", http.StatusBadRequest)
-		return
-	}
-	user, _ := auth.UserFromContext(ctx)
-	att, err := s.store.GetAttachmentByID(ctx, attID)
-	if err != nil {
-		http.Error(w, "attachment not found", http.StatusNotFound)
-		return
-	}
-	// Attachments are only served when the user has access to the mail account of the
-	// email/thread the attachment belongs to, even when the blob is shared across accounts.
-	ownerEmail, err := s.store.GetEmailByID(ctx, att.EmailID)
-	if err != nil || !user.HasAccountAccess(ownerEmail.AccountID) {
-		http.Error(w, "attachment not found", http.StatusNotFound)
-		return
-	}
-	f, err := s.attachments.Open(ctx, att.StorageRelPath)
-	if err != nil {
-		http.Error(w, "attachment file unavailable", http.StatusNotFound)
+	att, f, status, msg := s.openAuthorizedAttachment(ctx, r)
+	if status != 0 {
+		http.Error(w, msg, status)
 		return
 	}
 	defer func() { _ = f.Close() }()
@@ -757,6 +767,29 @@ func (s *Server) HandleDownloadAttachment(w http.ResponseWriter, r *http.Request
 	s.audit.LogDataAccess(ctx, "attachment", att.ID.String())
 	SetAttachmentDownloadHeaders(w, att.Filename, att.ContentType)
 	_, _ = io.Copy(w, f)
+}
+
+func (s *Server) openAuthorizedAttachment(ctx context.Context, r *http.Request) (sqlc.Attachment, *os.File, int, string) {
+	attID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		return sqlc.Attachment{}, nil, http.StatusBadRequest, "invalid attachment id"
+	}
+	user, _ := auth.UserFromContext(ctx)
+	att, err := s.store.GetAttachmentByID(ctx, attID)
+	if err != nil {
+		return sqlc.Attachment{}, nil, http.StatusNotFound, "attachment not found"
+	}
+	// Attachments are only served when the user has access to the mail account of the
+	// email/thread the attachment belongs to, even when the blob is shared across accounts.
+	ownerEmail, err := s.store.GetEmailByID(ctx, att.EmailID)
+	if err != nil || !user.HasAccountAccess(ownerEmail.AccountID) {
+		return sqlc.Attachment{}, nil, http.StatusNotFound, "attachment not found"
+	}
+	f, err := s.attachments.Open(ctx, att.StorageRelPath)
+	if err != nil {
+		return sqlc.Attachment{}, nil, http.StatusNotFound, "attachment file unavailable"
+	}
+	return att, f, 0, ""
 }
 
 func (s *Server) currentDisplayTimezone(ctx context.Context) string {
