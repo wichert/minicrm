@@ -105,3 +105,8 @@ WHERE account_id = $1
   AND status <> 'spam'
 ORDER BY last_message_at DESC
 LIMIT 1;
+
+-- name: SetEmailIMAPLocation :execrows
+UPDATE emails
+   SET imap_mailbox = $2, imap_uidvalidity = $3, imap_uid = $4
+ WHERE id = $1 AND imap_uid IS NULL;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -72,41 +73,9 @@ func (m *Matcher) ResolveThread(ctx context.Context, msg InboundMessageMetadata)
 		normSubject = displaySubject
 	}
 
-	var matchedThread *sqlc.Thread
-	var parentEmailID *uuid.UUID
-
-	// Step B.1: Header match via In-Reply-To and References
-	candidateIDs := buildCandidateMessageIDs(msg.InReplyTo, msg.ReferencesIDs)
-	if len(candidateIDs) > 0 {
-		matchedEmail, err := m.store.FindEmailByMessageIDs(ctx, msg.AccountID, candidateIDs)
-		if err == nil {
-			parentEmailID = &matchedEmail.ID
-			t, tErr := m.store.GetThreadByID(ctx, matchedEmail.ThreadID)
-			if tErr == nil {
-				matchedThread = &t
-			}
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			return ResolutionResult{}, fmt.Errorf("lookup parent email by message-id: %w", err)
-		}
-	}
-
-	// Step B.2: Subject + Sender fallback if no header match was found
-	if matchedThread == nil && normSubject != "" && normSubject != "(No Subject)" {
-		windowDays := 30
-		if settings, err := m.store.GetSystemSettings(ctx); err == nil && settings.SubjectMatchWindowDays > 0 {
-			windowDays = settings.SubjectMatchWindowDays
-		}
-		refTime := msg.SentAt
-		if refTime.IsZero() {
-			refTime = time.Now().UTC()
-		}
-		since := refTime.AddDate(0, 0, -windowDays)
-		t, err := m.store.FindThreadBySubjectAndParticipant(ctx, msg.AccountID, normSubject, msg.FromAddress, since)
-		if err == nil {
-			matchedThread = &t
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			return ResolutionResult{}, fmt.Errorf("fallback subject+participant lookup: %w", err)
-		}
+	matchedThread, parentEmailID, err := m.findExisting(ctx, msg.AccountID, msg.InReplyTo, msg.ReferencesIDs, normSubject, msg.FromAddress, msg.SentAt)
+	if err != nil {
+		return ResolutionResult{}, err
 	}
 
 	// Step C: Thread Resolution & Completed-Thread Handling
@@ -137,22 +106,226 @@ func (m *Matcher) ResolveThread(ctx context.Context, msg InboundMessageMetadata)
 		reopensThread = matchedThread
 	}
 
+	newThread, err := m.createThread(ctx, createThreadParams{
+		AccountID: msg.AccountID, NormSubject: normSubject, DisplaySubject: displaySubject,
+		CustomerEmail: msg.FromAddress, CustomerName: msg.FromName,
+		BodyText: msg.BodyText, ToAddresses: msg.ToAddresses, SentAt: msg.SentAt,
+		ReopensThreadID: reopensThreadID,
+	})
+	if err != nil {
+		return ResolutionResult{}, err
+	}
+	return ResolutionResult{
+		Thread:           newThread,
+		ParentEmailID:    parentEmailID,
+		CreatedNewThread: true,
+		ReopensThread:    reopensThread,
+	}, nil
+}
+
+// findExisting looks for an existing thread an incoming message belongs to: first by
+// In-Reply-To/References header match, then by normalized subject + customer address within
+// the configured window. It returns the matched thread (or nil) and the parent email, if any.
+func (m *Matcher) findExisting(ctx context.Context, accountID, inReplyTo string, references []string, normSubject, customerEmail string, sentAt time.Time) (*sqlc.Thread, *uuid.UUID, error) {
+	var matchedThread *sqlc.Thread
+	var parentEmailID *uuid.UUID
+
+	// Step B.1: Header match via In-Reply-To and References
+	candidateIDs := buildCandidateMessageIDs(inReplyTo, references)
+	if len(candidateIDs) > 0 {
+		matchedEmail, err := m.store.FindEmailByMessageIDs(ctx, accountID, candidateIDs)
+		if err == nil {
+			parentEmailID = &matchedEmail.ID
+			t, tErr := m.store.GetThreadByID(ctx, matchedEmail.ThreadID)
+			if tErr == nil {
+				matchedThread = &t
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, fmt.Errorf("lookup parent email by message-id: %w", err)
+		}
+	}
+
+	// Step B.2: Subject + participant fallback if no header match was found
+	if matchedThread == nil && normSubject != "" && normSubject != "(No Subject)" {
+		windowDays := 30
+		if settings, err := m.store.GetSystemSettings(ctx); err == nil && settings.SubjectMatchWindowDays > 0 {
+			windowDays = settings.SubjectMatchWindowDays
+		}
+		refTime := sentAt
+		if refTime.IsZero() {
+			refTime = time.Now().UTC()
+		}
+		since := refTime.AddDate(0, 0, -windowDays)
+		t, err := m.store.FindThreadBySubjectAndParticipant(ctx, accountID, normSubject, customerEmail, since)
+		if err == nil {
+			matchedThread = &t
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, fmt.Errorf("fallback subject+participant lookup: %w", err)
+		}
+	}
+	return matchedThread, parentEmailID, nil
+}
+
+// HasExistingThread reports whether an inbound message already belongs to a known thread,
+// i.e. whether ResolveThread would attach it instead of creating a new thread.
+func (m *Matcher) HasExistingThread(ctx context.Context, msg InboundMessageMetadata) (bool, error) {
+	normSubject, _ := NormalizeSubject(msg.Subject)
+	thread, _, err := m.findExisting(ctx, msg.AccountID, msg.InReplyTo, msg.ReferencesIDs, normSubject, msg.FromAddress, msg.SentAt)
+	return thread != nil, err
+}
+
+// CandidateMessageIDs returns the normalized parent Message-IDs a message refers to, most recent first.
+func CandidateMessageIDs(inReplyTo string, references []string) []string {
+	return buildCandidateMessageIDs(inReplyTo, references)
+}
+
+// OutboundMessageMetadata holds the fields needed to link a message sent by the team (found in
+// the Sent folder) to a thread.
+type OutboundMessageMetadata struct {
+	AccountID     string
+	MessageID     string
+	InReplyTo     string
+	ReferencesIDs []string
+	FromAddress   string
+	Recipients    []sqlc.Address // To followed by Cc
+	Subject       string
+	BodyText      string
+	SentAt        time.Time
+	// OwnAddresses are addresses of the mail account itself; they are never treated as the customer.
+	OwnAddresses []string
+}
+
+// OutboundResolution describes where an externally sent message belongs.
+type OutboundResolution struct {
+	Found         bool
+	Thread        sqlc.Thread
+	ParentEmailID *uuid.UUID
+}
+
+// ResolveOutboundThread links a message found in the Sent folder to an existing thread. It never
+// creates a thread and never changes thread status; spam threads are ignored. When a thread is
+// found it advances last_message_at (never beyond now) and records a reply_sent_external event.
+func (m *Matcher) ResolveOutboundThread(ctx context.Context, msg OutboundMessageMetadata) (OutboundResolution, error) {
+	normSubject, _ := NormalizeSubject(msg.Subject)
+	var thread *sqlc.Thread
+	var parent *uuid.UUID
+
+	thread, parent, err := m.findExisting(ctx, msg.AccountID, msg.InReplyTo, msg.ReferencesIDs, "", "", msg.SentAt)
+	if err != nil {
+		return OutboundResolution{}, err
+	}
+	if thread == nil {
+		// No headers matched: fall back to subject + the customer being one of the recipients.
+		for _, r := range msg.Recipients {
+			if isOwnAddress(r.Email, msg.FromAddress, msg.OwnAddresses) {
+				continue
+			}
+			thread, parent, err = m.findExisting(ctx, msg.AccountID, "", nil, normSubject, r.Email, msg.SentAt)
+			if err != nil {
+				return OutboundResolution{}, err
+			}
+			if thread != nil {
+				break
+			}
+		}
+	}
+	if thread == nil || thread.Status == sqlc.ThreadStatusSpam {
+		return OutboundResolution{}, nil
+	}
+
+	sentAt := msg.SentAt
+	if now := time.Now().UTC(); sentAt.IsZero() || sentAt.After(now) {
+		sentAt = now
+	}
+	if err := m.store.TouchThreadLastMessageAt(ctx, thread.ID, sentAt); err != nil {
+		return OutboundResolution{}, fmt.Errorf("update thread last_message_at: %w", err)
+	}
+	if err := m.audit.LogThreadEvent(ctx, audit.ThreadEventParams{
+		ThreadID:  thread.ID,
+		EventType: "reply_sent_external",
+		NewValue:  map[string]string{"message_id": msg.MessageID, "from": msg.FromAddress},
+	}); err != nil {
+		return OutboundResolution{}, err
+	}
+	return OutboundResolution{Found: true, Thread: *thread, ParentEmailID: parent}, nil
+}
+
+// CreateThreadFromOutbound creates a new thread for a message that was first sent from outside
+// MiniCRM and has since received a customer reply. The customer is the first recipient that is not
+// one of the account's own addresses; ok is false when there is none.
+func (m *Matcher) CreateThreadFromOutbound(ctx context.Context, msg OutboundMessageMetadata) (thread sqlc.Thread, ok bool, err error) {
+	var customer sqlc.Address
+	for _, r := range msg.Recipients {
+		if r.Email != "" && !isOwnAddress(r.Email, msg.FromAddress, msg.OwnAddresses) {
+			customer = r
+			break
+		}
+	}
+	if customer.Email == "" {
+		return sqlc.Thread{}, false, nil
+	}
+	normSubject, _ := NormalizeSubject(msg.Subject)
+	displaySubject := msg.Subject
+	if displaySubject == "" {
+		displaySubject = "(No Subject)"
+	}
+	if normSubject == "" {
+		normSubject = displaySubject
+	}
+	toList := make([]string, 0, len(msg.Recipients))
+	for _, r := range msg.Recipients {
+		toList = append(toList, r.Email)
+	}
+	// The customer's reply (which triggered this import) needs attention, so the thread starts as "new".
+	created, err := m.createThread(ctx, createThreadParams{
+		AccountID: msg.AccountID, NormSubject: normSubject, DisplaySubject: displaySubject,
+		CustomerEmail: customer.Email, CustomerName: customer.Name,
+		BodyText: msg.BodyText, ToAddresses: toList, SentAt: msg.SentAt, Origin: "outbound",
+	})
+	return created, err == nil, err
+}
+
+func isOwnAddress(addr, from string, own []string) bool {
+	if strings.EqualFold(addr, from) {
+		return true
+	}
+	for _, o := range own {
+		if strings.EqualFold(addr, o) {
+			return true
+		}
+	}
+	return false
+}
+
+type createThreadParams struct {
+	AccountID, NormSubject, DisplaySubject string
+	CustomerEmail, CustomerName            string
+	BodyText                               string
+	ToAddresses                            []string
+	SentAt                                 time.Time
+	ReopensThreadID                        *uuid.UUID
+	// Origin is recorded on the "created" event ("" for inbound customer mail).
+	Origin string
+}
+
+// createThread creates a new "new" thread, resolving the default assignee and logging events.
+func (m *Matcher) createThread(ctx context.Context, p createThreadParams) (sqlc.Thread, error) {
 	cand, err := m.assigner.Resolve(ctx, assignment.EmailInput{
-		AccountID:         msg.AccountID,
-		FromAddress:       msg.FromAddress,
-		FromName:          msg.FromName,
-		ToAddresses:       msg.ToAddresses,
-		Subject:           msg.Subject,
-		SubjectNormalized: normSubject,
-		BodyText:          msg.BodyText,
-		PreviousThreadID:  reopensThreadID,
+		AccountID:         p.AccountID,
+		FromAddress:       p.CustomerEmail,
+		FromName:          p.CustomerName,
+		ToAddresses:       p.ToAddresses,
+		Subject:           p.DisplaySubject,
+		SubjectNormalized: p.NormSubject,
+		BodyText:          p.BodyText,
+		PreviousThreadID:  p.ReopensThreadID,
 	})
 	// No default assignee configured for this account: create the thread unassigned
 	// so it can be picked up later, when a default assignee is configured or an
 	// operator takes/assigns the thread.
 	unassigned := errors.Is(err, assignment.ErrNoAssigneeAvailable)
 	if err != nil && !unassigned {
-		return ResolutionResult{}, fmt.Errorf("resolve assignee for new thread: %w", err)
+		return sqlc.Thread{}, fmt.Errorf("resolve assignee for new thread: %w", err)
 	}
 
 	var assigneeID *uuid.UUID
@@ -164,31 +337,35 @@ func (m *Matcher) ResolveThread(ctx context.Context, msg InboundMessageMetadata)
 	}
 
 	newThread, err := m.store.CreateThread(ctx, sqlc.Thread{
-		AccountID:         msg.AccountID,
-		SubjectNormalized: normSubject,
-		SubjectDisplay:    displaySubject,
+		AccountID:         p.AccountID,
+		SubjectNormalized: p.NormSubject,
+		SubjectDisplay:    p.DisplaySubject,
 		Status:            sqlc.ThreadStatusNew,
 		AssigneeID:        assigneeID,
 		AssignmentSource:  assignmentSource,
-		CustomerEmail:     msg.FromAddress,
-		CustomerName:      msg.FromName,
-		ReopensThreadID:   reopensThreadID,
-		LastMessageAt:     msg.SentAt,
+		CustomerEmail:     p.CustomerEmail,
+		CustomerName:      p.CustomerName,
+		ReopensThreadID:   p.ReopensThreadID,
+		LastMessageAt:     p.SentAt,
 	})
 	if err != nil {
-		return ResolutionResult{}, fmt.Errorf("create thread: %w", err)
+		return sqlc.Thread{}, fmt.Errorf("create thread: %w", err)
 	}
 
+	created := map[string]any{
+		"account_id":        newThread.AccountID,
+		"status":            newThread.Status,
+		"reopens_thread_id": p.ReopensThreadID,
+	}
+	if p.Origin != "" {
+		created["origin"] = p.Origin
+	}
 	if err := m.audit.LogThreadEvent(ctx, audit.ThreadEventParams{
 		ThreadID:  newThread.ID,
 		EventType: "created",
-		NewValue: map[string]any{
-			"account_id":        newThread.AccountID,
-			"status":            newThread.Status,
-			"reopens_thread_id": reopensThreadID,
-		},
+		NewValue:  created,
 	}); err != nil {
-		return ResolutionResult{}, err
+		return sqlc.Thread{}, err
 	}
 	if assigneeID != nil {
 		if err := m.audit.LogThreadEvent(ctx, audit.ThreadEventParams{
@@ -199,16 +376,10 @@ func (m *Matcher) ResolveThread(ctx context.Context, msg InboundMessageMetadata)
 				"source":      assignmentSource,
 			},
 		}); err != nil {
-			return ResolutionResult{}, err
+			return sqlc.Thread{}, err
 		}
 	}
-
-	return ResolutionResult{
-		Thread:           newThread,
-		ParentEmailID:    parentEmailID,
-		CreatedNewThread: true,
-		ReopensThread:    reopensThread,
-	}, nil
+	return newThread, nil
 }
 
 func buildCandidateMessageIDs(inReplyTo string, references []string) []string {

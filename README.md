@@ -84,6 +84,8 @@ MiniCRM is configured via environment variables:
 | `MINICRM_ACCOUNT_<N>_SMTP_FROM_ADDRESS` | **Yes** | — | Sender email address for outbound replies |
 | `MINICRM_ACCOUNT_<N>_SMTP_FROM_NAME` | No | `MiniCRM Support` | Sender display name for outbound replies |
 | `MINICRM_ACCOUNT_<N>_SMTP_TLS_MODE` | No | `starttls` | SMTP TLS mode: `starttls`, `implicit`, or `none` |
+
+> **Mail server requirement:** MiniCRM also reads each account's `Sent` folder (after `INBOX`) so replies sent from other mail clients appear in the thread. MiniCRM's own replies are de-duplicated by `Message-ID`, so the SMTP server must preserve the `Message-ID` MiniCRM sets, and any copy stored in `Sent` must carry the same one. See [`docs/imap.md`](./docs/imap.md).
 | `MINICRM_OIDC_ISSUER_URL` | **Yes** | — | OIDC issuer URL (must serve `.well-known/openid-configuration`). For Kanidm this is `https://<host>/oauth2/openid/<client>` |
 | `MINICRM_OIDC_CLIENT_ID` | **Yes** | — | OAuth2 client ID |
 | `MINICRM_OIDC_CLIENT_SECRET` | **Yes** | — | OAuth2 client secret |

@@ -41,6 +41,9 @@ Leading reply and forward prefixes are stripped iteratively (case-insensitive):
 
 ---
 
+### Replies From Other Mail Clients (outbound threading)
+Messages found in the `Sent` folder are linked with `Matcher.ResolveOutboundThread`: header match first, then subject + recipient-as-customer. It is **attach-only**: it never creates a thread, ignores `spam` threads, never changes status itself, and never reopens a `completed` thread (the reply is attached silently). The IMAP sync worker then moves a `new` thread to `in_progress` via `workflow.Service.Transition` (no new transitions are introduced). `Matcher.CreateThreadFromOutbound` creates a thread only when a customer replies to an externally sent message that no thread contains (see [`docs/imap.md`](./imap.md)). External replies never assign the thread.
+
 ## 2. Workflow State Machine (`internal/workflow/service.go`)
 
 ```text

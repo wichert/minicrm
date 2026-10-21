@@ -50,7 +50,9 @@ func (s *fakeIMAPServer) SelectMailbox(_ context.Context, mailbox string) (int64
 }
 
 func (s *fakeIMAPServer) ListUIDsSince(_ context.Context, mailbox string, afterUID int64, since time.Time) ([]int64, error) {
-	s.lastSince = since
+	if mailbox == "INBOX" {
+		s.lastSince = since
+	}
 	var out []int64
 	for uid := range s.mailboxes[mailbox] {
 		if uid > afterUID {
@@ -68,6 +70,24 @@ func (s *fakeIMAPServer) FetchMessagesByUID(_ context.Context, mailbox string, u
 		if raw, ok := s.mailboxes[mailbox][uid]; ok {
 			out = append(out, mail.RawIMAPMessage{UID: uid, UIDValidity: s.uidValidity, RawRFC822: raw})
 		}
+	}
+	return out, nil
+}
+
+func (s *fakeIMAPServer) ResolveMailbox(_ context.Context, name string) (string, bool, error) {
+	_, ok := s.mailboxes[name]
+	return name, ok, nil
+}
+
+func (s *fakeIMAPServer) SearchByMessageID(_ context.Context, mailbox, messageID string, limit int) ([]mail.RawIMAPMessage, error) {
+	var out []mail.RawIMAPMessage
+	for uid, raw := range s.mailboxes[mailbox] {
+		if strings.Contains(string(raw), "Message-ID: <"+messageID+">") {
+			out = append(out, mail.RawIMAPMessage{UID: uid, UIDValidity: s.uidValidity, RawRFC822: raw})
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }
@@ -227,6 +247,16 @@ func (m *memCRMStore) TouchThreadLastMessageAt(_ context.Context, id uuid.UUID, 
 	t.LastMessageAt = ts
 	m.threads[id] = t
 	return nil
+}
+
+func (m *memCRMStore) SetEmailIMAPLocation(_ context.Context, id uuid.UUID, mailbox string, uidValidity, uid int64) (bool, error) {
+	e, ok := m.emails[id]
+	if !ok || e.IMAPUID != nil {
+		return false, nil
+	}
+	e.IMAPMailbox, e.IMAPUIDValidity, e.IMAPUID = &mailbox, &uidValidity, &uid
+	m.emails[id] = e
+	return true, nil
 }
 
 func (m *memCRMStore) UpdateThreadStatus(_ context.Context, id uuid.UUID, status sqlc.ThreadStatus) error {
@@ -555,7 +585,10 @@ func syncTestRig(t *testing.T, imapSrv *fakeIMAPServer) (*mail.IMAPSyncWorker, *
 	auditLogger := audit.NewLogger(store, nil)
 	matcher := threading.NewMatcher(store, assignment.NewEngine(0.5, assignment.NewDefaultAssigneeResolver(store)), auditLogger)
 	dialer := func(_ context.Context) (mail.IMAPClient, error) { return imapSrv, nil }
-	return mail.NewIMAPSyncWorker("support", store, matcher, attStore, dialer, time.Minute, nil), store
+	worker := mail.NewIMAPSyncWorker("support", store, matcher, attStore, dialer, time.Minute, nil).
+		WithTransitioner(workflow.NewService(wfStoreAdapter{store}, auditLogger, nil)).
+		WithOwnAddresses("support@company.com")
+	return worker, store
 }
 
 func plainMail(n int) []byte {
@@ -637,5 +670,231 @@ func TestIMAPSyncSkipsUnparseableMessageAndContinues(t *testing.T) {
 	// The next poll has nothing left to do.
 	if n, err := worker.SyncOnce(context.Background()); err != nil || n != 0 {
 		t.Fatalf("second sync: n=%d err=%v", n, err)
+	}
+}
+
+func customerMail(id, subject, from, to, inReplyTo string) []byte {
+	reply := ""
+	if inReplyTo != "" {
+		reply = "In-Reply-To: <" + inReplyTo + ">\r\n"
+	}
+	return []byte("From: " + from + "\r\nTo: " + to + "\r\nSubject: " + subject + "\r\nMessage-ID: <" + id + ">\r\n" +
+		reply + "Date: Sun, 12 Apr 2026 10:00:00 +0000\r\n\r\nBody of " + id + "\r\n")
+}
+
+func emailsOf(store *memCRMStore, threadID uuid.UUID) (inbound, outbound int) {
+	for _, e := range store.emails {
+		if e.ThreadID != threadID {
+			continue
+		}
+		if e.Direction == "outbound" {
+			outbound++
+		} else {
+			inbound++
+		}
+	}
+	return inbound, outbound
+}
+
+func onlyThread(t *testing.T, store *memCRMStore) sqlc.Thread {
+	t.Helper()
+	if len(store.threads) != 1 {
+		t.Fatalf("expected exactly 1 thread, got %d", len(store.threads))
+	}
+	for _, th := range store.threads {
+		return th
+	}
+	return sqlc.Thread{}
+}
+
+func hasThreadEvent(store *memCRMStore, threadID uuid.UUID, eventType string) bool {
+	for _, ev := range store.threadEvents {
+		if ev.ThreadID == threadID && ev.EventType == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSentSyncExternalReplyAttachesAndStartsWork(t *testing.T) {
+	imapSrv := newFakeIMAPServer()
+	imapSrv.mailboxes["INBOX"][1] = customerMail("c1@client.com", "Help me", "Cust <cust@client.com>", "support@company.com", "")
+	imapSrv.mailboxes["Sent"][1] = customerMail("out1@company.com", "Re: Help me", "Support <support@company.com>", "cust@client.com", "c1@client.com")
+	worker, store := syncTestRig(t, imapSrv)
+	ctx := context.Background()
+
+	if _, err := worker.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	th := onlyThread(t, store)
+	if in, out := emailsOf(store, th.ID); in != 1 || out != 1 {
+		t.Fatalf("expected 1 inbound + 1 outbound email, got %d/%d", in, out)
+	}
+	if th.Status != sqlc.ThreadStatusInProgress {
+		t.Fatalf("external reply must move a new thread to in_progress, got %s", th.Status)
+	}
+	if th.AssigneeID != nil {
+		t.Fatalf("external reply must not assign the thread, got %v", th.AssigneeID)
+	}
+	if !hasThreadEvent(store, th.ID, "reply_sent_external") || !hasThreadEvent(store, th.ID, "status_changed") {
+		t.Fatalf("expected reply_sent_external and status_changed events, got %+v", store.threadEvents)
+	}
+	if !th.LastMessageAt.After(time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("last_message_at must reflect the reply, got %v", th.LastMessageAt)
+	}
+	for _, e := range store.emails {
+		if e.Direction == "outbound" && (e.IMAPMailbox == nil || *e.IMAPMailbox != "Sent") {
+			t.Fatalf("outbound email must record its Sent location: %+v", e)
+		}
+	}
+
+	// Syncing again neither duplicates the reply nor re-sends events.
+	if _, err := worker.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce 2: %v", err)
+	}
+	if in, out := emailsOf(store, th.ID); in != 1 || out != 1 {
+		t.Fatalf("second sync duplicated mail: %d/%d", in, out)
+	}
+}
+
+func TestSentSyncDoesNotDuplicateMiniCRMReplyAndBackfillsLocation(t *testing.T) {
+	imapSrv := newFakeIMAPServer()
+	imapSrv.mailboxes["INBOX"][1] = customerMail("c1@client.com", "Help me", "Cust <cust@client.com>", "support@company.com", "")
+	worker, store := syncTestRig(t, imapSrv)
+	ctx := context.Background()
+	if _, err := worker.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	th := onlyThread(t, store)
+
+	// A reply MiniCRM sent itself: stored at send time without an IMAP location.
+	ownID := uuid.New()
+	store.emails[ownID] = sqlc.Email{
+		ID: ownID, ThreadID: th.ID, AccountID: "support", Direction: "outbound",
+		MessageID: "own@minicrm.local", FromAddress: "support@company.com", SentAt: time.Now().UTC(),
+	}
+	imapSrv.mailboxes["Sent"][7] = customerMail("own@minicrm.local", "Re: Help me", "Support <support@company.com>", "cust@client.com", "c1@client.com")
+
+	if _, err := worker.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce 2: %v", err)
+	}
+	if _, out := emailsOf(store, th.ID); out != 1 {
+		t.Fatalf("MiniCRM's own reply was imported again: %d outbound emails", out)
+	}
+	got := store.emails[ownID]
+	if got.IMAPUID == nil || *got.IMAPUID != 7 || got.IMAPMailbox == nil || *got.IMAPMailbox != "Sent" {
+		t.Fatalf("expected IMAP location backfilled, got %+v", got)
+	}
+	if hasThreadEvent(store, th.ID, "reply_sent_external") {
+		t.Fatal("MiniCRM's own reply must not be recorded as an external reply")
+	}
+}
+
+func TestSentSyncStatusRules(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     sqlc.ThreadStatus
+		wantStatus sqlc.ThreadStatus
+		wantOut    int
+	}{
+		{"completed stays completed, reply attached silently", sqlc.ThreadStatusCompleted, sqlc.ThreadStatusCompleted, 1},
+		{"in_progress stays in_progress", sqlc.ThreadStatusInProgress, sqlc.ThreadStatusInProgress, 1},
+		{"spam is ignored", sqlc.ThreadStatusSpam, sqlc.ThreadStatusSpam, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			imapSrv := newFakeIMAPServer()
+			imapSrv.mailboxes["INBOX"][1] = customerMail("c1@client.com", "Help me", "Cust <cust@client.com>", "support@company.com", "")
+			worker, store := syncTestRig(t, imapSrv)
+			ctx := context.Background()
+			if _, err := worker.SyncOnce(ctx); err != nil {
+				t.Fatalf("SyncOnce: %v", err)
+			}
+			th := onlyThread(t, store)
+			th.Status = tc.status
+			store.threads[th.ID] = th
+
+			imapSrv.mailboxes["Sent"][1] = customerMail("out1@company.com", "Re: Help me", "Support <support@company.com>", "cust@client.com", "c1@client.com")
+			if _, err := worker.SyncOnce(ctx); err != nil {
+				t.Fatalf("SyncOnce 2: %v", err)
+			}
+			if got := store.threads[th.ID]; got.Status != tc.wantStatus {
+				t.Fatalf("status = %s, want %s", got.Status, tc.wantStatus)
+			}
+			if _, out := emailsOf(store, th.ID); out != tc.wantOut {
+				t.Fatalf("outbound emails = %d, want %d", out, tc.wantOut)
+			}
+			if got := len(store.threads); got != 1 {
+				t.Fatalf("Sent must never create threads, got %d", got)
+			}
+		})
+	}
+}
+
+func TestSentSyncIgnoresUnrelatedOutboundMail(t *testing.T) {
+	imapSrv := newFakeIMAPServer()
+	imapSrv.mailboxes["Sent"][1] = customerMail("fresh@company.com", "Hello there", "Support <support@company.com>", "new@client.com", "")
+	worker, store := syncTestRig(t, imapSrv)
+	if _, err := worker.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	if len(store.threads) != 0 || len(store.emails) != 0 {
+		t.Fatalf("unrelated outbound mail must be ignored: %d threads, %d emails", len(store.threads), len(store.emails))
+	}
+}
+
+func TestSentSyncFailureOrMissingFolderDoesNotBlockInbox(t *testing.T) {
+	imapSrv := newFakeIMAPServer()
+	delete(imapSrv.mailboxes, "Sent")
+	imapSrv.mailboxes["INBOX"][1] = customerMail("c1@client.com", "Help me", "Cust <cust@client.com>", "support@company.com", "")
+	worker, store := syncTestRig(t, imapSrv)
+	if n, err := worker.SyncOnce(context.Background()); err != nil || n != 1 {
+		t.Fatalf("INBOX must sync without a Sent folder: n=%d err=%v", n, err)
+	}
+	if len(store.threads) != 1 {
+		t.Fatalf("expected the inbox thread, got %d", len(store.threads))
+	}
+}
+
+func TestCustomerReplyToExternallySentMailImportsOriginal(t *testing.T) {
+	imapSrv := newFakeIMAPServer()
+	// Sent mail nobody has replied to yet is ignored ...
+	imapSrv.mailboxes["Sent"][1] = customerMail("out1@company.com", "Offer", "Support <support@company.com>", "Gina <gina@client.com>", "")
+	worker, store := syncTestRig(t, imapSrv)
+	ctx := context.Background()
+	if _, err := worker.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	if len(store.threads) != 0 {
+		t.Fatalf("outbound-only mail must not create a thread, got %d", len(store.threads))
+	}
+
+	// ... until the customer replies: then the original outbound mail is pulled in too.
+	imapSrv.mailboxes["INBOX"][1] = customerMail("g1@client.com", "Re: Offer", "Gina <gina@client.com>", "support@company.com", "out1@company.com")
+	if _, err := worker.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce 2: %v", err)
+	}
+	th := onlyThread(t, store)
+	if in, out := emailsOf(store, th.ID); in != 1 || out != 1 {
+		t.Fatalf("expected the outbound original and the customer reply, got in=%d out=%d", in, out)
+	}
+	if th.Status != sqlc.ThreadStatusNew || th.CustomerEmail != "gina@client.com" {
+		t.Fatalf("unexpected thread: %+v", th)
+	}
+	var parentOfReply *uuid.UUID
+	for _, e := range store.emails {
+		if e.Direction == "inbound" {
+			parentOfReply = e.ParentEmailID
+		}
+	}
+	if parentOfReply == nil {
+		t.Fatal("the customer's reply must reference the imported outbound email as its parent")
+	}
+
+	// A later Sent pass must not import the original a second time.
+	if _, err := worker.SyncOnce(ctx); err != nil {
+		t.Fatalf("SyncOnce 3: %v", err)
+	}
+	if _, out := emailsOf(store, th.ID); out != 1 {
+		t.Fatalf("outbound original duplicated: %d", out)
 	}
 }

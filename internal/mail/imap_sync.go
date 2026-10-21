@@ -16,6 +16,7 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/wichert/minicrm/internal/db/sqlc"
 	"github.com/wichert/minicrm/internal/storage"
@@ -40,6 +41,12 @@ type IMAPClient interface {
 	ListUIDsSince(ctx context.Context, mailbox string, afterUID int64, since time.Time) (uids []int64, err error)
 	// FetchMessagesByUID downloads the full messages for the given UIDs of the currently selected or given mailbox.
 	FetchMessagesByUID(ctx context.Context, mailbox string, uids []int64) ([]RawIMAPMessage, error)
+	// ResolveMailbox maps a configured folder name onto the server's real mailbox name without
+	// creating it, and reports whether the mailbox exists.
+	ResolveMailbox(ctx context.Context, name string) (actual string, exists bool, err error)
+	// SearchByMessageID returns the messages in mailbox whose Message-ID header contains messageID
+	// (normalized, without angle brackets), at most limit of them.
+	SearchByMessageID(ctx context.Context, mailbox, messageID string, limit int) ([]RawIMAPMessage, error)
 	MoveMessage(ctx context.Context, sourceMailbox string, uidValidity, uid int64, targetMailbox string) error
 	AppendMessage(ctx context.Context, targetMailbox string, rawRFC822 []byte) error
 	Close() error
@@ -204,9 +211,28 @@ func (g *GoIMAPClient) FetchMessagesByUID(ctx context.Context, mailbox string, u
 // INBOX (namespace prefix "INBOX." or "INBOX/") reject top-level names such as "Junk", so the
 // personal namespace prefix is applied when needed.
 func (g *GoIMAPClient) ensureMailbox(name string) (string, error) {
+	target, exists, err := g.resolveMailbox(name)
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		return target, nil
+	}
+	if err := g.client.Create(target, nil).Wait(); err != nil {
+		return "", fmt.Errorf("create imap mailbox %q (configured as %q): %w", target, name, err)
+	}
+	return target, nil
+}
+
+// ResolveMailbox maps a configured folder name onto the server's real mailbox name without creating it.
+func (g *GoIMAPClient) ResolveMailbox(_ context.Context, name string) (string, bool, error) {
+	return g.resolveMailbox(name)
+}
+
+func (g *GoIMAPClient) resolveMailbox(name string) (string, bool, error) {
 	listed, err := g.client.List("", "*", nil).Collect()
 	if err != nil {
-		return "", fmt.Errorf("imap list mailboxes: %w", err)
+		return "", false, fmt.Errorf("imap list mailboxes: %w", err)
 	}
 	existing := make([]string, 0, len(listed))
 	var delim rune
@@ -226,13 +252,32 @@ func (g *GoIMAPClient) ensureMailbox(name string) (string, error) {
 		}
 	}
 	target, exists := resolveMailboxName(name, existing, delim, personalPrefix)
-	if exists {
-		return target, nil
+	return target, exists, nil
+}
+
+// SearchByMessageID finds messages by Message-ID header (IMAP SEARCH HEADER) and downloads them.
+func (g *GoIMAPClient) SearchByMessageID(ctx context.Context, mailbox, messageID string, limit int) ([]RawIMAPMessage, error) {
+	if messageID == "" {
+		return nil, nil
 	}
-	if err := g.client.Create(target, nil).Wait(); err != nil {
-		return "", fmt.Errorf("create imap mailbox %q (configured as %q): %w", target, name, err)
+	if _, err := g.SelectMailbox(ctx, mailbox); err != nil {
+		return nil, err
 	}
-	return target, nil
+	data, err := g.client.UIDSearch(&imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{{Key: "Message-ID", Value: messageID}},
+	}, nil).Wait()
+	if err != nil {
+		return nil, fmt.Errorf("imap search message-id in %q: %w", mailbox, err)
+	}
+	var uids []int64
+	for _, u := range data.AllUIDs() {
+		uids = append(uids, int64(u))
+	}
+	sort.Slice(uids, func(i, j int) bool { return uids[i] > uids[j] })
+	if limit > 0 && len(uids) > limit {
+		uids = uids[:limit]
+	}
+	return g.FetchMessagesByUID(ctx, mailbox, uids)
 }
 
 // resolveMailboxName returns the real server-side name for the configured folder name and
@@ -342,6 +387,12 @@ type SyncStore interface {
 	GetEmailByMessageID(ctx context.Context, accountID, msgID string) (sqlc.Email, error)
 	CreateEmail(ctx context.Context, e sqlc.Email) (sqlc.Email, error)
 	CreateAttachment(ctx context.Context, a sqlc.Attachment) (sqlc.Attachment, error)
+	SetEmailIMAPLocation(ctx context.Context, id uuid.UUID, mailbox string, uidValidity, uid int64) (bool, error)
+}
+
+// ThreadTransitioner changes a thread's workflow status (implemented by workflow.Service).
+type ThreadTransitioner interface {
+	Transition(ctx context.Context, threadID uuid.UUID, targetStatus sqlc.ThreadStatus, actorID *uuid.UUID) error
 }
 
 // IMAPSyncWorker pulls incoming emails from the IMAP INBOX and ingests them into PostgreSQL + disk.
@@ -352,6 +403,8 @@ type IMAPSyncWorker struct {
 	// the last N days; 0 downloads the complete mailbox history.
 	initialSyncDays int
 	batchSize       int
+	transitioner    ThreadTransitioner
+	ownAddresses    []string
 	now             func() time.Time
 	store           SyncStore
 	matcher         *threading.Matcher
@@ -397,6 +450,19 @@ const DefaultInitialSyncDays = 60
 
 const defaultSyncBatchSize = 20
 
+// WithTransitioner sets the workflow service used to move a "new" thread to "in_progress" when a
+// reply sent from another mail client is found in the Sent folder.
+func (w *IMAPSyncWorker) WithTransitioner(t ThreadTransitioner) *IMAPSyncWorker {
+	w.transitioner = t
+	return w
+}
+
+// WithOwnAddresses lists the account's own addresses so they are never mistaken for the customer.
+func (w *IMAPSyncWorker) WithOwnAddresses(addrs ...string) *IMAPSyncWorker {
+	w.ownAddresses = addrs
+	return w
+}
+
 // WithInitialSyncDays sets how many days of history the first sync downloads (0 = everything).
 func (w *IMAPSyncWorker) WithInitialSyncDays(days int) *IMAPSyncWorker {
 	if days < 0 {
@@ -439,6 +505,10 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 	if inbox == "" {
 		inbox = "INBOX"
 	}
+	sentName := settings.IMAPSentMailbox
+	if sentName == "" {
+		sentName = "Sent"
+	}
 
 	client, err := w.dialer(ctx)
 	if err != nil {
@@ -446,14 +516,52 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 	}
 	defer func() { _ = client.Close() }()
 
-	syncState, err := w.store.GetIMAPSyncState(ctx, w.accountID, inbox)
+	sess := &syncSession{client: client}
+	// The Sent folder is only read, never created here (MiniCRM creates it on its first append).
+	if actual, exists, err := client.ResolveMailbox(ctx, sentName); err != nil {
+		w.logger.WarnContext(ctx, "imap_sent_folder_unavailable", w.attrs(slog.String("error", err.Error()))...)
+	} else if exists {
+		sess.sentMailbox = actual
+	}
+
+	// The INBOX is always synchronized first: replies found in Sent are linked to threads created
+	// from the customer's incoming mail, which therefore has to be ingested before them.
+	ingested, err := w.syncFolder(ctx, client, inbox, func(ctx context.Context, uidVal int64, raw RawIMAPMessage) error {
+		return w.ingestOne(ctx, sess, inbox, uidVal, raw)
+	})
+	if err != nil {
+		return ingested, err
+	}
+	if sess.sentMailbox == "" {
+		return ingested, nil
+	}
+	if _, err := w.syncFolder(ctx, client, sess.sentMailbox, func(ctx context.Context, uidVal int64, raw RawIMAPMessage) error {
+		sess.sentUIDValidity = uidVal
+		return w.ingestSentOne(ctx, sess.sentMailbox, uidVal, raw)
+	}); err != nil {
+		return ingested, fmt.Errorf("sync sent folder %q: %w", sess.sentMailbox, err)
+	}
+	return ingested, nil
+}
+
+// syncSession carries per-pass state shared by the folder ingestors.
+type syncSession struct {
+	client          IMAPClient
+	sentMailbox     string // resolved Sent folder name; empty when the folder does not exist
+	sentUIDValidity int64
+}
+
+// syncFolder downloads and ingests new messages of one folder in batches, persisting the watermark
+// after every batch. It returns the number of messages ingested.
+func (w *IMAPSyncWorker) syncFolder(ctx context.Context, client IMAPClient, folder string, ingest func(ctx context.Context, uidVal int64, raw RawIMAPMessage) error) (int, error) {
+	syncState, err := w.store.GetIMAPSyncState(ctx, w.accountID, folder)
 	if errors.Is(err, pgx.ErrNoRows) {
-		syncState = sqlc.IMAPSyncState{AccountID: w.accountID, Mailbox: inbox, UIDValidity: 0, LastSyncedUID: 0}
+		syncState = sqlc.IMAPSyncState{AccountID: w.accountID, Mailbox: folder, UIDValidity: 0, LastSyncedUID: 0}
 	} else if err != nil {
 		return 0, fmt.Errorf("get imap_sync_state: %w", err)
 	}
 
-	uidVal, err := client.SelectMailbox(ctx, inbox)
+	uidVal, err := client.SelectMailbox(ctx, folder)
 	if err != nil {
 		return 0, err
 	}
@@ -469,12 +577,13 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 		since = w.now().UTC().AddDate(0, 0, -w.initialSyncDays)
 	}
 
-	uids, err := client.ListUIDsSince(ctx, inbox, afterUID, since)
+	uids, err := client.ListUIDsSince(ctx, folder, afterUID, since)
 	if err != nil {
 		return 0, err
 	}
 	if afterUID == 0 && len(uids) > 0 {
 		w.logger.InfoContext(ctx, "imap_initial_sync_started", w.attrs(
+			slog.String("mailbox", folder),
 			slog.Int("messages", len(uids)),
 			slog.Int("initial_sync_days", w.initialSyncDays),
 		)...)
@@ -487,7 +596,7 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 			return ingested, err
 		}
 		end := min(start+w.batchSize, len(uids))
-		msgs, err := client.FetchMessagesByUID(ctx, inbox, uids[start:end])
+		msgs, err := client.FetchMessagesByUID(ctx, folder, uids[start:end])
 		if err != nil {
 			return ingested, err
 		}
@@ -495,8 +604,9 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 			if len(rawMsg.RawRFC822) == 0 {
 				skipped++
 				w.logger.WarnContext(ctx, "imap_message_skipped", w.attrs(
+					slog.String("mailbox", folder),
 					slog.Int64("uid", rawMsg.UID), slog.String("reason", "empty message body"))...)
-			} else if err := w.ingestOne(ctx, inbox, uidVal, rawMsg); err != nil {
+			} else if err := ingest(ctx, uidVal, rawMsg); err != nil {
 				var parseErr *parseMessageError
 				if !errors.As(err, &parseErr) {
 					return ingested, fmt.Errorf("ingest uid %d: %w", rawMsg.UID, err)
@@ -504,6 +614,7 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 				// A message that cannot be parsed will never succeed; skip it so it cannot block the mailbox.
 				skipped++
 				w.logger.WarnContext(ctx, "imap_message_skipped", w.attrs(
+					slog.String("mailbox", folder),
 					slog.Int64("uid", rawMsg.UID), slog.String("reason", err.Error()))...)
 			} else {
 				ingested++
@@ -515,7 +626,7 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 		// Persist progress after every batch so a failure never re-downloads completed work.
 		if err := w.store.UpsertIMAPSyncState(ctx, sqlc.IMAPSyncState{
 			AccountID:     w.accountID,
-			Mailbox:       inbox,
+			Mailbox:       folder,
 			UIDValidity:   uidVal,
 			LastSyncedUID: highestUID,
 		}); err != nil {
@@ -524,6 +635,7 @@ func (w *IMAPSyncWorker) SyncOnce(ctx context.Context) (int, error) {
 	}
 	if ingested > 0 || skipped > 0 {
 		w.logger.InfoContext(ctx, "imap_sync_completed", w.attrs(
+			slog.String("mailbox", folder),
 			slog.Int("ingested", ingested), slog.Int("skipped", skipped), slog.Int64("last_uid", highestUID))...)
 	}
 	return ingested, nil
@@ -541,7 +653,7 @@ type parseMessageError struct{ err error }
 func (e *parseMessageError) Error() string { return "parse rfc5322: " + e.err.Error() }
 func (e *parseMessageError) Unwrap() error { return e.err }
 
-func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValidity int64, rawMsg RawIMAPMessage) error {
+func (w *IMAPSyncWorker) ingestOne(ctx context.Context, sess *syncSession, mailbox string, uidValidity int64, rawMsg RawIMAPMessage) error {
 	parsed, err := ParseRFC5322(bytes.NewReader(rawMsg.RawRFC822))
 	if err != nil {
 		return &parseMessageError{err: err}
@@ -559,8 +671,7 @@ func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValid
 	for _, a := range parsed.ToAddresses {
 		toList = append(toList, a.Email)
 	}
-
-	resolution, err := w.matcher.ResolveThread(ctx, threading.InboundMessageMetadata{
+	inbound := threading.InboundMessageMetadata{
 		AccountID:     w.accountID,
 		MessageID:     parsed.MessageID,
 		InReplyTo:     parsed.InReplyTo,
@@ -571,21 +682,51 @@ func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValid
 		Subject:       parsed.Subject,
 		BodyText:      parsed.BodyText,
 		SentAt:        parsed.SentAt,
-	})
+	}
+
+	// A customer replying to a message that was first sent from outside MiniCRM: pull the original
+	// outbound mail from the Sent folder so the new thread contains the whole exchange.
+	if sess != nil && sess.sentMailbox != "" {
+		if err := w.importOutboundParent(ctx, sess, inbound); err != nil {
+			// Best effort: the customer's mail must still be ingested.
+			w.logger.WarnContext(ctx, "imap_outbound_parent_lookup_failed", w.attrs(
+				slog.String("message_id", parsed.MessageID), slog.String("error", err.Error()))...)
+		}
+	}
+
+	resolution, err := w.matcher.ResolveThread(ctx, inbound)
 	if err != nil {
 		return fmt.Errorf("resolve thread: %w", err)
 	}
 
+	emailRec, err := w.storeParsedEmail(ctx, parsed, resolution.Thread.ID, resolution.ParentEmailID, "inbound", mailbox, uidValidity, rawMsg.UID)
+	if err != nil {
+		return err
+	}
+
+	w.logger.InfoContext(ctx, "data_change",
+		slog.String("event_category", "data_change"),
+		slog.String("operation", "create"),
+		slog.String("resource_type", "inbound_email"),
+		slog.String("account_id", w.accountID),
+		slog.String("resource_id", emailRec.ID.String()),
+		slog.String("thread_id", resolution.Thread.ID.String()),
+		slog.String("message_id", parsed.MessageID),
+	)
+	return nil
+}
+
+// storeParsedEmail persists a parsed message and its attachments into the given thread.
+func (w *IMAPSyncWorker) storeParsedEmail(ctx context.Context, parsed *ParsedEmail, threadID uuid.UUID, parentID *uuid.UUID, direction, mailbox string, uidValidity, uid int64) (sqlc.Email, error) {
 	var inReplyToPtr *string
 	if parsed.InReplyTo != "" {
 		inReplyToPtr = &parsed.InReplyTo
 	}
-	uid := rawMsg.UID
 	emailRec, err := w.store.CreateEmail(ctx, sqlc.Email{
-		ThreadID:          resolution.Thread.ID,
+		ThreadID:          threadID,
 		AccountID:         w.accountID,
-		ParentEmailID:     resolution.ParentEmailID,
-		Direction:         "inbound",
+		ParentEmailID:     parentID,
+		Direction:         direction,
 		MessageID:         parsed.MessageID,
 		InReplyTo:         inReplyToPtr,
 		ReferencesIDs:     parsed.ReferencesIDs,
@@ -605,13 +746,12 @@ func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValid
 		ReceivedAt:        time.Now().UTC(),
 	})
 	if err != nil {
-		return fmt.Errorf("create email: %w", err)
+		return sqlc.Email{}, fmt.Errorf("create email: %w", err)
 	}
-
 	for _, att := range parsed.Attachments {
 		blob, err := w.attachments.Save(ctx, bytes.NewReader(att.Data))
 		if err != nil {
-			return fmt.Errorf("save attachment %q: %w", att.Filename, err)
+			return sqlc.Email{}, fmt.Errorf("save attachment %q: %w", att.Filename, err)
 		}
 		if _, err := w.store.CreateAttachment(ctx, sqlc.Attachment{
 			EmailID:        emailRec.ID,
@@ -623,18 +763,158 @@ func (w *IMAPSyncWorker) ingestOne(ctx context.Context, mailbox string, uidValid
 			ContentID:      att.ContentID,
 			IsInline:       att.IsInline,
 		}); err != nil {
-			return fmt.Errorf("insert attachment record: %w", err)
+			return sqlc.Email{}, fmt.Errorf("insert attachment record: %w", err)
 		}
 	}
+	return emailRec, nil
+}
 
-	w.logger.InfoContext(ctx, "data_change",
+// outboundMetadata converts a parsed message from the Sent folder into matcher metadata.
+func (w *IMAPSyncWorker) outboundMetadata(parsed *ParsedEmail) threading.OutboundMessageMetadata {
+	recipients := append(append([]sqlc.Address{}, parsed.ToAddresses...), parsed.CCAddresses...)
+	own := append([]string{}, w.ownAddresses...)
+	if w.endpoint.Username != "" {
+		own = append(own, w.endpoint.Username)
+	}
+	return threading.OutboundMessageMetadata{
+		AccountID:     w.accountID,
+		MessageID:     parsed.MessageID,
+		InReplyTo:     parsed.InReplyTo,
+		ReferencesIDs: parsed.ReferencesIDs,
+		FromAddress:   parsed.FromAddress,
+		Recipients:    recipients,
+		Subject:       parsed.Subject,
+		BodyText:      parsed.BodyText,
+		SentAt:        parsed.SentAt,
+		OwnAddresses:  own,
+	}
+}
+
+// maxOutboundParentLookups caps the Sent-folder searches done for one incoming message.
+const maxOutboundParentLookups = 3
+
+// importOutboundParent looks in the Sent folder for the message a customer is replying to when no
+// existing thread matches, and ingests it as the first (outbound) message of a new thread.
+func (w *IMAPSyncWorker) importOutboundParent(ctx context.Context, sess *syncSession, inbound threading.InboundMessageMetadata) error {
+	candidates := threading.CandidateMessageIDs(inbound.InReplyTo, inbound.ReferencesIDs)
+	if len(candidates) == 0 {
+		return nil
+	}
+	known, err := w.matcher.HasExistingThread(ctx, inbound)
+	if err != nil || known {
+		return err
+	}
+	if len(candidates) > maxOutboundParentLookups {
+		candidates = candidates[:maxOutboundParentLookups]
+	}
+	for _, id := range candidates {
+		found, err := sess.client.SearchByMessageID(ctx, sess.sentMailbox, id, 1)
+		if err != nil {
+			return err
+		}
+		for _, raw := range found {
+			parsed, err := ParseRFC5322(bytes.NewReader(raw.RawRFC822))
+			if err != nil || parsed.MessageID != id {
+				continue
+			}
+			if _, err := w.store.GetEmailByMessageID(ctx, w.accountID, parsed.MessageID); err == nil {
+				continue
+			}
+			meta := w.outboundMetadata(parsed)
+			// Only treat it as the parent when the replying customer was one of its recipients.
+			addressed := false
+			for _, r := range meta.Recipients {
+				if strings.EqualFold(r.Email, inbound.FromAddress) {
+					addressed = true
+				}
+			}
+			if !addressed {
+				continue
+			}
+			thread, ok, err := w.matcher.CreateThreadFromOutbound(ctx, meta)
+			if err != nil || !ok {
+				return err
+			}
+			uidVal := sess.sentUIDValidity
+			if raw.UIDValidity != 0 {
+				uidVal = raw.UIDValidity
+			}
+			if _, err := w.storeParsedEmail(ctx, parsed, thread.ID, nil, "outbound", sess.sentMailbox, uidVal, raw.UID); err != nil {
+				return err
+			}
+			w.logger.InfoContext(ctx, "data_change", w.attrs(
+				slog.String("event_category", "data_change"),
+				slog.String("operation", "create"),
+				slog.String("resource_type", "outbound_email"),
+				slog.String("source", "imap_sent_on_demand"),
+				slog.String("thread_id", thread.ID.String()),
+				slog.String("message_id", parsed.MessageID),
+			)...)
+			return nil
+		}
+	}
+	return nil
+}
+
+// ingestSentOne ingests one message from the Sent folder. It only ever attaches to an existing
+// thread: a message nobody replied to (or that matches no thread) is ignored.
+func (w *IMAPSyncWorker) ingestSentOne(ctx context.Context, mailbox string, uidValidity int64, rawMsg RawIMAPMessage) error {
+	parsed, err := ParseRFC5322(bytes.NewReader(rawMsg.RawRFC822))
+	if err != nil {
+		return &parseMessageError{err: err}
+	}
+
+	// MiniCRM's own replies are already stored under the same Message-ID (that is how duplicates are
+	// avoided); just record where the copy lives on the server.
+	if existing, err := w.store.GetEmailByMessageID(ctx, w.accountID, parsed.MessageID); err == nil {
+		if existing.IMAPUID == nil {
+			changed, err := w.store.SetEmailIMAPLocation(ctx, existing.ID, mailbox, uidValidity, rawMsg.UID)
+			if err != nil {
+				return fmt.Errorf("backfill imap location: %w", err)
+			}
+			if changed {
+				w.logger.InfoContext(ctx, "data_change", w.attrs(
+					slog.String("event_category", "data_change"),
+					slog.String("operation", "update"),
+					slog.String("resource_type", "email_imap_location"),
+					slog.String("resource_id", existing.ID.String()),
+					slog.String("mailbox", mailbox),
+				)...)
+			}
+		}
+		return nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("check existing message_id: %w", err)
+	}
+
+	res, err := w.matcher.ResolveOutboundThread(ctx, w.outboundMetadata(parsed))
+	if err != nil {
+		return fmt.Errorf("resolve outbound thread: %w", err)
+	}
+	if !res.Found {
+		w.logger.DebugContext(ctx, "imap_sent_message_ignored", w.attrs(
+			slog.String("message_id", parsed.MessageID), slog.String("reason", "no matching thread"))...)
+		return nil
+	}
+
+	emailRec, err := w.storeParsedEmail(ctx, parsed, res.Thread.ID, res.ParentEmailID, "outbound", mailbox, uidValidity, rawMsg.UID)
+	if err != nil {
+		return err
+	}
+	// Somebody answered: a "new" thread is now being worked on (this also clears the waiting badge).
+	if res.Thread.Status == sqlc.ThreadStatusNew && w.transitioner != nil {
+		if err := w.transitioner.Transition(ctx, res.Thread.ID, sqlc.ThreadStatusInProgress, nil); err != nil {
+			return fmt.Errorf("move thread to in_progress: %w", err)
+		}
+	}
+	w.logger.InfoContext(ctx, "data_change", w.attrs(
 		slog.String("event_category", "data_change"),
 		slog.String("operation", "create"),
-		slog.String("resource_type", "inbound_email"),
-		slog.String("account_id", w.accountID),
+		slog.String("resource_type", "outbound_email"),
+		slog.String("source", "imap_sent"),
 		slog.String("resource_id", emailRec.ID.String()),
-		slog.String("thread_id", resolution.Thread.ID.String()),
+		slog.String("thread_id", res.Thread.ID.String()),
 		slog.String("message_id", parsed.MessageID),
-	)
+	)...)
 	return nil
 }

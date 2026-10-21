@@ -73,6 +73,18 @@ IMAP Server (INBOX)                      IMAPSyncWorker                         
 - **Batched download**: matching UIDs are fetched in batches of 20 (`UID FETCH <uids> BODY.PEEK[]`), ingested, and the `imap_sync_state` watermark is saved after every batch, so memory stays bounded, progress is visible (`imap_initial_sync_started` / `imap_sync_completed` logs), and a failure never re-downloads completed work.
 - **Poison messages**: a message that cannot be parsed (or is empty) is logged as `imap_message_skipped` (with account, server, username, UID and reason) and skipped; the watermark advances past it so it cannot block the mailbox. Truncated IMAP literals fail the fetch instead of being parsed.
 
+### Replies Sent From Other Mail Clients (`Sent` Folder Sync)
+Each sync pass first completes the `INBOX` pass and **then** reads the `Sent` folder (resolved with the same namespace logic as Archive/Junk, but never created while reading; a missing `Sent` folder is skipped). The `Sent` folder has its own `imap_sync_state` row and the same batching, first-sync window (`IMAP_INITIAL_SYNC_DAYS`) and bad-message skipping. This is always on and not configurable.
+
+For every message found in `Sent` (`ingestSentOne`):
+1. **Already known (MiniCRM's own replies)**: deduplicated by `(account_id, Message-ID)`. The existing row gets its missing `imap_mailbox`/`imap_uidvalidity`/`imap_uid` backfilled; nothing else changes.
+2. **Attach-only matching**: `In-Reply-To`/`References` header match, else normalized subject + a recipient that is a thread's customer. If no thread matches (or the thread is `spam`) the message is ignored. `Sent` never creates a thread.
+3. **Attach**: stored as an `outbound` email ("Team reply"), `last_message_at` advances (never beyond *now*), a `reply_sent_external` thread event is recorded. A `new` thread moves to `in_progress` through the normal workflow transition (so the waiting badge clears); `in_progress` and `completed` threads keep their status (a `completed` thread is never reopened). The thread is **not** assigned: all team members typically send from the same address.
+
+**Customer replies to mail first sent outside MiniCRM**: when an incoming message references a Message-ID that no thread knows, the worker searches the `Sent` folder for it (`SEARCH HEADER Message-ID`, up to 3 candidates, not limited by the initial-sync window). If found and addressed to the replying customer, it is ingested as the first (`outbound`) message of a new `new` thread (`created` event with `origin: outbound`), and the customer's reply then threads under it.
+
+> **Requirement: Message-ID must be preserved.** De-duplication of MiniCRM's own replies relies solely on `Message-ID`. The SMTP server must send MiniCRM replies with the `Message-ID` MiniCRM generated, and every copy in `Sent` (MiniCRM's own `APPEND` or a server-side copy) must carry the same `Message-ID`. Servers or relays that rewrite `Message-ID` cause MiniCRM's own replies to be imported a second time from `Sent`.
+
 ### UID Watermark & `UIDVALIDITY` Handling
 - MiniCRM stores `(mailbox, uid_validity, last_synced_uid)` in the `imap_sync_state` table for `INBOX`.
 - On each sync pass (`SyncOnce`):

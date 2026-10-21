@@ -1370,3 +1370,42 @@ func TestExtractSnippetAndWaitDuration(t *testing.T) {
 		t.Fatalf("empty estimate = %d", got)
 	}
 }
+
+func TestExternalReplyEventSummaries(t *testing.T) {
+	if got := views.FormatThreadEventSummary(sqlc.ThreadEvent{EventType: "reply_sent_external"}, "", nil); got != "A reply was sent from another mail client." {
+		t.Fatalf("reply_sent_external summary = %q", got)
+	}
+	created := sqlc.ThreadEvent{EventType: "created", NewValue: []byte(`{"origin":"outbound"}`)}
+	if got := views.FormatThreadEventSummary(created, "", nil); got != "A message sent from another mail client opened this thread." {
+		t.Fatalf("outbound-origin created summary = %q", got)
+	}
+	plain := sqlc.ThreadEvent{EventType: "created", NewValue: []byte(`{}`)}
+	if got := views.FormatThreadEventSummary(plain, "", nil); got != "The customer opened this thread." {
+		t.Fatalf("created summary = %q", got)
+	}
+}
+
+// After a reply sent from another mail client the thread is in progress (no waiting badge),
+// shows the "You:" snippet, and its age reflects the reply.
+func TestInboxReflectsExternalReply(t *testing.T) {
+	_, store, router, multiUser, _ := buildAccountTestServer(t)
+	id := uuid.New()
+	now := time.Now().UTC()
+	store.threads[id] = sqlc.Thread{
+		ID: id, AccountID: "support", SubjectDisplay: "Answered elsewhere", Status: sqlc.ThreadStatusInProgress,
+		AssigneeID: &multiUser.ID, CustomerEmail: "a@client.com",
+		LastMessageAt: now.Add(-5 * time.Minute), OpenedAt: now.Add(-72 * time.Hour),
+		MessageCount: 2, LatestDirection: "outbound", LatestBodyText: "Sent from Thunderbird",
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads", nil))
+	body := rec.Body.String()
+	for _, want := range []string{"Answered elsewhere", "You:", "Sent from Thunderbird", "5m ago"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %q in inbox: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "Waiting") {
+		t.Fatalf("an answered thread must not show a waiting badge: %s", body)
+	}
+}

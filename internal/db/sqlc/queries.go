@@ -518,6 +518,20 @@ func (q *Queries) FindThreadBySubjectAndParticipant(ctx context.Context, account
 	return scanThread(q.db.QueryRow(ctx, query, accountID, normSubject, customerEmail, since))
 }
 
+// SetEmailIMAPLocation records where an email lives on the IMAP server. It only fills in a missing
+// location (imap_uid IS NULL) so existing locations are never overwritten; it reports whether a row changed.
+func (q *Queries) SetEmailIMAPLocation(ctx context.Context, id uuid.UUID, mailbox string, uidValidity, uid int64) (bool, error) {
+	const query = `
+		UPDATE emails
+		   SET imap_mailbox = $2, imap_uidvalidity = $3, imap_uid = $4
+		 WHERE id = $1 AND imap_uid IS NULL`
+	tag, err := q.db.Exec(ctx, query, id, mailbox, uidValidity, uid)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // ListEmailsByThread returns all emails in a thread ordered by sent_at ASC.
 func (q *Queries) ListEmailsByThread(ctx context.Context, threadID uuid.UUID) ([]Email, error) {
 	const query = `

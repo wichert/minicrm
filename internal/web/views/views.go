@@ -353,6 +353,9 @@ func FormatThreadEventSummary(ev sqlc.ThreadEvent, actorName string, userNames m
 
 	switch ev.EventType {
 	case "created":
+		if origin, _ := newValues["origin"].(string); origin == "outbound" {
+			return "A message sent from another mail client opened this thread."
+		}
 		if actorName == "System" {
 			return "The customer opened this thread."
 		}
@@ -381,6 +384,8 @@ func FormatThreadEventSummary(ev sqlc.ThreadEvent, actorName string, userNames m
 		}
 	case "reply_sent":
 		return fmt.Sprintf("%s sent a reply.", actorName)
+	case "reply_sent_external":
+		return "A reply was sent from another mail client."
 	case "reply_received":
 		return "The customer replied."
 	case "reopen_merged":

@@ -7,7 +7,7 @@ Read these documents before making architectural or functional changes:
 - **[`README.md`](./README.md)** — Overview, environment variable reference, build/run instructions, and basic usage.
 - **[`docs/architecture.md`](./docs/architecture.md)** — System overview, component diagram, technology stack, and package layout.
 - **[`docs/authentication.md`](./docs/authentication.md)** — Production OAuth2/OIDC setup, PKCE authentication flow, OIDC group-based mail-account access, Kanidm setup guide, pre-created user resolution, and dummy OIDC server (`cmd/dev-oidc` / `internal/auth/devidm`).
-- **[`docs/imap.md`](./docs/imap.md)** — IMAP & SMTP requirements, `INBOX` UID synchronization, `Archive`/`Junk`/`Sent` folder lifecycle, and safe external deletion from `Archive`.
+- **[`docs/imap.md`](./docs/imap.md)** — IMAP & SMTP requirements, `INBOX`/`Sent` UID synchronization (incl. replies sent from other mail clients), `Archive`/`Junk`/`Sent` folder lifecycle, and safe external deletion from `Archive`.
 - **[`docs/storage.md`](./docs/storage.md)** — PostgreSQL schema, UTC `TIMESTAMPTZ` + `display_timezone`, immutable `audit_logs`/`thread_events`, `pgx.QueryTracer` structured logging, and content-addressed local disk attachment store.
 - **[`docs/workflow-and-threading.md`](./docs/workflow-and-threading.md)** — Reply linking, completed-thread **Reopen & Merge**, workflow state machine, and pluggable assignment engine.
 - **[`docs/security.md`](./docs/security.md)** — Defense-in-depth HTML sanitization, sandboxed `<iframe>` isolation, HTTP security headers, attachment download hardening, and CSRF protection.
@@ -27,6 +27,7 @@ When modifying MiniCRM, preserve the following invariants (documented in full in
    - `new -> spam` enqueues `move_to_junk` (`INBOX -> Junk`).
    - `in_progress -> completed` enqueues `move_to_archive` (`INBOX -> Archive`). Deleting messages from `Archive` on the IMAP server must never break MiniCRM.
    - Outbound replies sent via SMTP must be stored in PostgreSQL and queued via `append_to_sent` (`APPEND` to `Sent`).
+   - The `Sent` folder is synchronized after `INBOX` (attach-only; never creates threads, never reopens `completed` threads); MiniCRM's own replies are de-duplicated by `Message-ID`, which SMTP servers must preserve.
    - Every `imap_jobs` row carries the `account_id` whose IMAP server must execute it; never route a job to a different account's connection.
 3. **No `updated_at` Columns — Immutable Audit Trail & Structured Logging**:
    - Do not add `updated_at` columns to tables. Record all user/login/settings changes in `audit_logs` and all thread changes in `thread_events` via `internal/audit/logger.go`.

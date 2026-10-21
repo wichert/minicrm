@@ -28,6 +28,17 @@ for user in $MAIL_USERS; do
             seq=$((seq + 1))
             cp "$src" "$home/Maildir/new/1700000000.M${seq}P1.minicrm"
         done
+        # Messages in /seed/<user>/Sent land in the Sent folder (Maildir++ ".Sent"), as if sent from another mail client.
+        if [ -d "/seed/$user/Sent" ]; then
+            mkdir -p "$home/Maildir/.Sent/cur" "$home/Maildir/.Sent/new" "$home/Maildir/.Sent/tmp"
+            touch "$home/Maildir/.Sent/maildirfolder"
+            sseq=0
+            for src in "/seed/$user/Sent"/*.eml; do
+                [ -f "$src" ] || continue
+                sseq=$((sseq + 1))
+                cp "$src" "$home/Maildir/.Sent/new/1700000100.M${sseq}P1.minicrm"
+            done
+        fi
         touch "$home/.minicrm-seeded"
     fi
 

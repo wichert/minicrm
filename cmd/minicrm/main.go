@@ -127,7 +127,8 @@ func run(logger *slog.Logger) error {
 		endpoint := mail.IMAPEndpoint{Host: acct.IMAPHost, Port: acct.IMAPPort, Username: acct.IMAPUsername}
 		accountEndpoints[acct.ID] = endpoint
 		syncWorkers = append(syncWorkers,
-			mail.NewIMAPSyncWorker(acct.ID, queries, matcher, attStore, dialer, acct.IMAPPollInterval, logger).WithEndpoint(endpoint).WithInitialSyncDays(acct.IMAPInitialSyncDays))
+			mail.NewIMAPSyncWorker(acct.ID, queries, matcher, attStore, dialer, acct.IMAPPollInterval, logger).WithEndpoint(endpoint).WithInitialSyncDays(acct.IMAPInitialSyncDays).
+				WithTransitioner(wfSvc).WithOwnAddresses(acct.SMTPFromAddress, acct.IMAPUsername, acct.SMTPUsername))
 		accountSenders = append(accountSenders, mail.AccountSenderConfig{
 			AccountID:    acct.ID,
 			FromAddress:  acct.SMTPFromAddress,

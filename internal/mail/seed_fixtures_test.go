@@ -21,6 +21,8 @@ func TestSeedFixturesParseWithAttachments(t *testing.T) {
 		"sales@example.com/04-brand-assets.eml":        {"application/pdf:1", "image/png:1"},
 	}
 	files, err := filepath.Glob("../../docker/mail/seed/*/*.eml")
+	sent, _ := filepath.Glob("../../docker/mail/seed/*/Sent/*.eml")
+	files = append(files, sent...)
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no seed fixtures found: %v", err)
 	}

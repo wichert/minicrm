@@ -1,0 +1,18 @@
+From: Customer Support <support@example.com>
+To: Alice Example <alice@customer.example>
+Subject: Re: Cannot log in to my account
+Date: Mon, 05 Oct 2026 11:40:00 +0000
+Message-ID: <external-login-reply-1@mail-client.example>
+In-Reply-To: <login-issue-1@customer.example>
+References: <login-issue-1@customer.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hi Alice,
+
+Sorry to hear that. Could you check whether Caps Lock is on?
+
+(Sent from a regular mail client, not from MiniCRM.)
+
+Kind regards,
+Support
