@@ -12,6 +12,7 @@ For detailed technical and security design documentation, see:
 - [`docs/workflow-and-threading.md`](./docs/workflow-and-threading.md) — Reply linking, completed-thread **Reopen & Merge**, workflow state machine, and pluggable assignment engine.
 - [`docs/security.md`](./docs/security.md) — Defense-in-depth HTML sanitization, sandboxed `<iframe>` isolation, HTTP security headers, and CSRF protection.
 - [`docs/testing.md`](./docs/testing.md) — Unit, integration, and end-to-end (`e2e/`) test setup, `prek` + `golangci-lint`, and GitHub Actions CI.
+- [`docs/release.md`](./docs/release.md) — Commit message convention (Conventional Commits), release process via release-please, and Docker image publishing to GitHub Packages.
 
 ---
 

@@ -13,3 +13,10 @@ repos:
         language: system
         types: [go]
         pass_filenames: false
+  - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook.git
+    rev: v9.22.0
+    hooks:
+      - id: commitlint
+        name: commitlint (Conventional Commits)
+        stages: [commit-msg]
+        additional_dependencies: ["@commitlint/config-conventional"]

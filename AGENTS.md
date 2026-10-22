@@ -12,7 +12,19 @@ Read these documents before making architectural or functional changes:
 - **[`docs/workflow-and-threading.md`](./docs/workflow-and-threading.md)** — Reply linking, completed-thread **Reopen & Merge**, workflow state machine, and pluggable assignment engine.
 - **[`docs/security.md`](./docs/security.md)** — Defense-in-depth HTML sanitization, sandboxed `<iframe>` isolation, HTTP security headers, attachment download hardening, and CSRF protection.
 - **[`docs/testing.md`](./docs/testing.md)** — Unit, integration, and end-to-end (`e2e/`) test setup, `prek` + `golangci-lint`, and GitHub Actions CI.
+- **[`docs/release.md`](./docs/release.md)** — Commit message convention (Conventional Commits), release process via release-please, and Docker image publishing to GitHub Packages.
 - **[`plans/multi-account.md`](./plans/multi-account.md)** — Design record for multi-account IMAP/SMTP support: `MINICRM_ACCOUNT_<N>_*` configuration, OIDC group → account mapping, per-account threading/attachments/UI, and unassigned-thread handling.
+
+---
+
+## Commit Message Convention
+
+All commits must follow [Conventional Commits](https://www.conventionalcommits.org/):
+`<type>(<scope>)!: <description>` with types such as `feat`, `fix`, `docs`,
+`refactor`, `test`, `chore`, `ci`. `feat` bumps the minor version, `fix` the
+patch, and `!`/`BREAKING CHANGE:` the major. Messages are enforced locally by
+the commitlint hook in `.pre-commit-config.yaml` (via `prek`) and in CI on pull
+requests. Releases are automated: see [`docs/release.md`](./docs/release.md).
 
 ---
 
