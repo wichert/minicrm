@@ -227,6 +227,56 @@ While MiniCRM already uses clean semantic HTML, embedded assets, and responsive 
 
 ---
 
+### Phase 6: PR #1 Review Feedback Resolution (`internal/auth/`)
+
+**Files**: `internal/auth/oidc.go`, `internal/auth/middleware.go`, `internal/auth/auth_test.go`
+
+1. **Prevent Stale Session Saves from Overwriting Rotated Refresh Tokens ([Review Comment #1](https://github.com/wichert/minicrm/pull/1#discussion_r4353415302))**:
+   - **Problem**: A request (`Request A`) can start just before `IDTokenExpiry` (skipping refresh), modify another session key during the handler (e.g. `HandleListThreads` writing `lastInboxURLSessionKey` or `popFlash`), and commit its session snapshot **after** a concurrent request (`Request B`) has rotated and saved the refresh token (`rt1 -> rt2`). `scs.LoadAndSave` then overwrites `rt2` in the session store with `Request A`'s stale `rt1`.
+   - **Fix**:
+     - Assign a unique `SessionKeySessionID` (`uuid.NewString()`) and monotonic `SessionKeyRefreshGen` (`int64(1)`) on login in `HandleCallback`.
+     - Track the latest versioned credential state per `sessionID` in `auth.Service` (`sessionCreds map[string]versionedSessionCreds`, guarded by `sync.Mutex`, holding `{gen, encRefreshToken, idTokenExpiry, refreshDeadline}`).
+     - In `RequireAuth`:
+       1. On entry (before checking `IDTokenExpiry`), if `s.latestSessionCreds(sessionID)` has a higher generation `gen > ctxGen`, immediately upgrade `ctx`'s `SessionKeyRefreshToken`, `SessionKeyIDTokenExpiry`, `SessionKeyRefreshExpiry`, `SessionKeyRefreshGen`, and `s.sessions.SetDeadline` to the newer credentials.
+       2. Wrap `w` in a `sessionCredSyncResponseWriter` whose `WriteHeader` and `Write` methods (and post-`next.ServeHTTP` hook) check `s.latestSessionCreds(sessionID)` **immediately before** `scs`'s `sessionResponseWriter` commits the session to the store. If another request rotated the token while `next.ServeHTTP` was running (`latest.gen > ctxGen`), apply `latest` into `ctx` right before `scs` commits so `Request A` commits **both** its handler changes (e.g. `lastInboxURLSessionKey`) and the newest rotated refresh token (`rt2`).
+   - **Regression Test**: Add a test where `Request A` enters `RequireAuth` before `IDTokenExpiry` and pauses inside the handler (modifying a session key), `Request B` enters after `IDTokenExpiry` and rotates `rt1 -> rt2`, `Request A` completes and commits its session, and a subsequent `Request C` after cache expiry refreshes using `rt2` without error.
+
+2. **Verify Refreshed Identity `sub` Matches `user.OIDCSub` ([Review Comment #2](https://github.com/wichert/minicrm/pull/1#discussion_r4353415362))**:
+   - **Problem**: `syncRefreshedIdentity` did not verify that `id.Subject` is non-empty and matches `user.OIDCSub`.
+   - **Fix**:
+     - In `syncRefreshedIdentity`, require `strings.TrimSpace(id.Subject) != ""` and `user.OIDCSub != nil && strings.TrimSpace(*user.OIDCSub) != "" && *user.OIDCSub == id.Subject`. If empty or mismatched, return a permanent auth error (`ErrOIDCSubjectMismatch`) before evaluating groups or updating the user.
+   - **Regression Test**: Add a test verifying that a refreshed identity with an empty or mismatched `Subject` is rejected as a permanent auth failure, destroys the session, and leaves the user record untouched.
+
+3. **Persist Empty `allowed_accounts` After Final Group Revocation ([Review Comment #3](https://github.com/wichert/minicrm/pull/1#discussion_r4353415395))**:
+   - **Problem**: When authoritative refreshed group claims remove the user's last mail-account group (`len(allowedAccounts) == 0`), returning `ErrNoAccountAccess` immediately left `users.allowed_accounts` unchanged in PostgreSQL, allowing other sessions with unexpired ID tokens to keep access and leaving the user eligible for thread assignment.
+   - **Fix**:
+     - In `syncRefreshedIdentity` (and in `ResolveAndLoginUser` when an existing user matching `oidc_sub` or `email` has all account groups removed), if `id.GroupsPresent` is true and `len(allowedAccounts) == 0` while `len(user.AllowedAccounts) > 0`, persist `UpdateUserOIDC(ctx, user.ID, *user.OIDCSub, displayName, []string{})` and record the `user_updated` audit log **before** returning `ErrNoAccountAccess`.
+     - In `RequireAuth`, also verify `len(user.AllowedAccounts) > 0` after loading `user` from `GetUserByID` so any other active session for that user is immediately rejected on its next request.
+   - **Regression Test**: Add a test where a user's refreshed token has an explicit empty group list (`Groups: []string{}, GroupsPresent: true`), confirming `users.allowed_accounts` is persisted as `[]` in the store, a `user_updated` audit event is recorded, and the session is destroyed.
+
+4. **Preserve Sessions on Transient Refresh & Synchronization Failures ([Review Comment #4](https://github.com/wichert/minicrm/pull/1#discussion_r4353415442))**:
+   - **Problem**: `RequireAuth` treated every refresh error as a permanent credential failure and destroyed the session, even on transient IdP 5xx/network timeouts or local DB/audit errors. Furthermore, if the IdP rotated the token (`rt1 -> rt2`) before a local DB/audit sync error occurred, discarding `rt2` would cause the next request to reuse consumed `rt1`.
+   - **Fix**:
+     - Introduce a typed `PermanentAuthError` (wrapping `ErrNoAccountAccess`, `ErrUserInactive`, `ErrOIDCSubjectMismatch`, token decryption errors, ID token verification errors, and OAuth2 `*oauth2.RetrieveError` responses with `400 Bad Request` / `401 Unauthorized`).
+     - Treat all other errors (network timeouts, context deadline exceeded, IdP `5xx` / `429` responses, and local DB/audit failures) as **transient**.
+     - If `refresher.RefreshAndVerify` succeeded at the IdP (rotating `rt1 -> rt2`) but `syncRefreshedIdentity` failed with a transient DB/audit error, still encrypt and persist the rotated `rt2` in the session (and `sessionCreds` map) while setting `IDTokenExpiry` to `now` so the next request retries synchronization using the valid rotated `rt2`.
+     - In `RequireAuth`, only call `s.sessions.Destroy(ctx)` and `s.handleUnauthenticated(ctx, w, r)` on permanent auth failures. On transient refresh failures, preserve the session and return `503 Service Unavailable` (`Retry-After: 5`).
+   - **Regression Test**: Add tests for (a) a transient IdP timeout/5xx error returning `503` without destroying the session, followed by a successful request once the IdP recovers, and (b) a transient DB error during `syncRefreshedIdentity` after token rotation (`rt1 -> rt2`), verifying `rt2` is saved and the next request succeeds without reusing `rt1`.
+
+5. **Handle Omitted Optional Claims During Identity Refresh ([Review Comment #5](https://github.com/wichert/minicrm/pull/1#discussion_r4353415505))**:
+   - **Problem**: Per OIDC Core §12.2, a refreshed `id_token` may omit optional claims (`email`, `name`, or the `groups` claim) that were present at login. Reusing `parseVerifiedIdentity` failed when `email` was omitted, and `syncRefreshedIdentity` treated an omitted `groups` claim identically to an explicit empty group list (`[]`).
+   - **Fix**:
+     - Add `GroupsPresent bool` to `VerifiedIdentity` (set to `true` on initial login and whenever the `groups` claim key is present in the refreshed `id_token` or `UserInfo` response).
+     - Add `parseRefreshedIdentity(ctx, idToken, token)` in `internal/auth/oidc.go`:
+       - Requires non-empty `idToken.Subject`, does **not** require `email` or `name` to be present.
+       - Checks `rawGroups, groupsPresent := claims[p.groupsClaim]`.
+       - If `!groupsPresent` and `p.provider != nil`, attempts `p.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))` to fetch authoritative claims; if `UserInfo` includes `p.groupsClaim`, sets `GroupsPresent = true` and extracts groups from `UserInfo`.
+     - In `syncRefreshedIdentity`:
+       - Only recompute and update `allowedAccounts` when `id.GroupsPresent` is `true`. When `id.GroupsPresent` is `false` (groups claim omitted by provider on refresh), retain `user.AllowedAccounts` (still requiring `len(user.AllowedAccounts) > 0`).
+   - **Regression Test**: Add tests verifying that a refreshed `VerifiedIdentity` omitting `Email`, `Name`, and `Groups` (`GroupsPresent: false`) succeeds and retains the user's existing `DisplayName` and `AllowedAccounts`, whereas `GroupsPresent: true` with `Groups: nil` revokes access.
+
+---
+
 ## Verification & Testing Plan
 
 1. **Unit & Integration Tests**:

@@ -29,6 +29,7 @@ type memUserStore struct {
 	accountSettings map[string]sqlc.AccountSettings
 	auditLogs       []sqlc.AuditLog
 	threadLogs      []sqlc.ThreadEvent
+	failNextUpdate  error
 }
 
 func newMemUserStore() *memUserStore {
@@ -86,6 +87,11 @@ func (m *memUserStore) CreateUser(_ context.Context, arg sqlc.CreateUserParams) 
 func (m *memUserStore) UpdateUserOIDC(_ context.Context, id uuid.UUID, oidcSub, displayName string, allowedAccounts []string) (sqlc.User, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failNextUpdate != nil {
+		err := m.failNextUpdate
+		m.failNextUpdate = nil
+		return sqlc.User{}, err
+	}
 	u, ok := m.users[id]
 	if !ok {
 		return sqlc.User{}, pgx.ErrNoRows
@@ -720,4 +726,451 @@ func TestRefreshTokenSessionAlignmentEncryptionAndSingleflight(t *testing.T) {
 
 type scsIterableStore interface {
 	All() (map[string][]byte, error)
+}
+
+func doLoginAndGetCookies(t *testing.T, handler http.Handler) []*http.Cookie {
+	t.Helper()
+	recLogin := httptest.NewRecorder()
+	handler.ServeHTTP(recLogin, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	loc := recLogin.Header().Get("Location")
+	stateVal := loc[strings.Index(loc, "state=")+len("state="):]
+	reqCb := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state="+stateVal, nil)
+	for _, c := range recLogin.Result().Cookies() {
+		reqCb.AddCookie(c)
+	}
+	recCb := httptest.NewRecorder()
+	handler.ServeHTTP(recCb, reqCb)
+	if recCb.Code != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, want 303", recCb.Code)
+	}
+	return recCb.Result().Cookies()
+}
+
+type chainedRotatingVerifier struct {
+	mu          sync.Mutex
+	identity    *auth.VerifiedIdentity
+	validToken  string
+	rotations   map[string]string
+	idExp       time.Time
+	refreshedID *auth.VerifiedIdentity
+	customErr   error
+	calls       int
+}
+
+func (c *chainedRotatingVerifier) AuthCodeURL(state, _, _ string) string {
+	return "https://idp.example.com/authorize?state=" + state
+}
+
+func (c *chainedRotatingVerifier) ExchangeAndVerify(_ context.Context, _, _, _ string) (*auth.VerifiedIdentity, error) {
+	return c.identity, nil
+}
+
+func (c *chainedRotatingVerifier) RefreshAndVerify(_ context.Context, refreshToken string) (*auth.RefreshResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if c.customErr != nil {
+		return nil, c.customErr
+	}
+	if refreshToken != c.validToken {
+		return nil, auth.NewPermanentAuthError(errors.New("invalid_grant: consumed or unknown refresh token " + refreshToken))
+	}
+	next := c.rotations[refreshToken]
+	if next == "" {
+		next = refreshToken
+	}
+	c.validToken = next
+	exp := c.idExp
+	if exp.IsZero() {
+		exp = time.Now().UTC().Add(30 * time.Minute)
+	}
+	return &auth.RefreshResult{
+		Identity:           c.refreshedID,
+		RefreshToken:       next,
+		IDTokenExpiry:      exp,
+		RefreshTokenExpiry: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}, nil
+}
+
+// Regression test for PR #1 Comment 1: a request that starts before IDTokenExpiry (skipping
+// refresh) and modifies a session key must not overwrite a rotated refresh token committed by
+// a concurrent request that ran after IDTokenExpiry.
+func TestStaleSessionSaveDoesNotOverwriteRotatedRefreshToken(t *testing.T) {
+	store := newMemUserStore()
+	auditLogger := audit.NewLogger(store, nil)
+	sm := auth.NewSessionManager(false)
+	cipher, err := auth.NewTokenCipher("shared-session-encryption-secret")
+	if err != nil {
+		t.Fatalf("NewTokenCipher: %v", err)
+	}
+
+	verifier := &chainedRotatingVerifier{
+		identity: &auth.VerifiedIdentity{
+			Subject:            "sub-race",
+			Email:              "race@example.com",
+			Name:               "Race User",
+			Groups:             []string{"crm-support"},
+			GroupsPresent:      true,
+			RefreshToken:       "rt_gen_1",
+			IDTokenExpiry:      time.Now().UTC().Add(1 * time.Second), // initially valid for 1s
+			RefreshTokenExpiry: time.Now().UTC().Add(7 * 24 * time.Hour),
+		},
+		validToken: "rt_gen_1",
+		rotations: map[string]string{
+			"rt_gen_1": "rt_gen_2",
+			"rt_gen_2": "rt_gen_3",
+		},
+		idExp: time.Now().UTC().Add(2 * time.Second),
+	}
+
+	svc := auth.NewService(store, auditLogger, sm, verifier, "admin@example.com", testAccountRules()...).WithTokenCipher(cipher)
+
+	reqAEnteredHandler := make(chan struct{})
+	allowReqAFinish := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/login", svc.HandleLogin)
+	mux.HandleFunc("/auth/callback", svc.HandleCallback)
+	mux.Handle("/slow-inbox", svc.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sm.Put(r.Context(), "minicrm_last_inbox_url", "/threads?status=new")
+		close(reqAEnteredHandler)
+		<-allowReqAFinish
+		w.WriteHeader(http.StatusOK)
+	})))
+	mux.Handle("/fast", svc.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(sm.GetString(r.Context(), "minicrm_last_inbox_url")))
+	})))
+	handler := sm.LoadAndSave(mux)
+
+	cookies := doLoginAndGetCookies(t, handler)
+
+	// Start Request A before IDTokenExpiry: it skips refreshSessionIfNeeded and blocks in /slow-inbox.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var recA *httptest.ResponseRecorder
+	go func() {
+		defer wg.Done()
+		reqA := httptest.NewRequest(http.MethodGet, "/slow-inbox", nil)
+		for _, c := range cookies {
+			reqA.AddCookie(c)
+		}
+		recA = httptest.NewRecorder()
+		handler.ServeHTTP(recA, reqA)
+	}()
+
+	<-reqAEnteredHandler
+
+	// Wait for initial 1s IDTokenExpiry to pass, then run Request B which rotates rt_gen_1 -> rt_gen_2.
+	time.Sleep(1100 * time.Millisecond)
+	reqB := httptest.NewRequest(http.MethodGet, "/fast", nil)
+	for _, c := range cookies {
+		reqB.AddCookie(c)
+	}
+	recB := httptest.NewRecorder()
+	handler.ServeHTTP(recB, reqB)
+	if recB.Code != http.StatusOK {
+		t.Fatalf("Request B status = %d, want 200", recB.Code)
+	}
+
+	// Now let Request A finish and commit its session (which originally loaded rt_gen_1).
+	close(allowReqAFinish)
+	wg.Wait()
+	if recA.Code != http.StatusOK {
+		t.Fatalf("Request A status = %d, want 200", recA.Code)
+	}
+
+	// Wait for rt_gen_2's 2s IDTokenExpiry to pass and construct a second Service/SessionManager
+	// backed by the exact same session store (simulating after all in-memory caches expire).
+	time.Sleep(1100 * time.Millisecond)
+	verifier.mu.Lock()
+	verifier.idExp = time.Now().UTC().Add(30 * time.Minute)
+	verifier.mu.Unlock()
+
+	smAfter := auth.NewSessionManager(false)
+	smAfter.Store = sm.Store
+	svcAfter := auth.NewService(store, auditLogger, smAfter, verifier, "admin@example.com", testAccountRules()...).WithTokenCipher(cipher)
+	muxAfter := http.NewServeMux()
+	muxAfter.Handle("/fast", svcAfter.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(smAfter.GetString(r.Context(), "minicrm_last_inbox_url")))
+	})))
+	handlerAfter := smAfter.LoadAndSave(muxAfter)
+
+	reqC := httptest.NewRequest(http.MethodGet, "/fast", nil)
+	for _, c := range cookies {
+		reqC.AddCookie(c)
+	}
+	recC := httptest.NewRecorder()
+	handlerAfter.ServeHTTP(recC, reqC)
+	if recC.Code != http.StatusOK {
+		t.Fatalf("Request C status = %d, want 200 (stale session overwrite detected)", recC.Code)
+	}
+	if got := recC.Body.String(); got != "/threads?status=new" {
+		t.Fatalf("expected Request A's session key to be preserved, got %q", got)
+	}
+	verifier.mu.Lock()
+	validNow := verifier.validToken
+	callsNow := verifier.calls
+	verifier.mu.Unlock()
+	if validNow != "rt_gen_3" || callsNow != 2 {
+		t.Fatalf("expected rotation to reach rt_gen_3 in 2 calls, got validToken=%q calls=%d", validNow, callsNow)
+	}
+}
+
+// Regression test for PR #1 Comment 2: refreshed identity with empty or mismatched subject is rejected.
+func TestRefreshRejectsMismatchedOrEmptySubject(t *testing.T) {
+	store := newMemUserStore()
+	auditLogger := audit.NewLogger(store, nil)
+	sm := auth.NewSessionManager(false)
+
+	verifier := &chainedRotatingVerifier{
+		identity: &auth.VerifiedIdentity{
+			Subject:       "sub-legit",
+			Email:         "legit@example.com",
+			Name:          "Legit User",
+			Groups:        []string{"crm-support"},
+			GroupsPresent: true,
+			RefreshToken:  "rt_1",
+			IDTokenExpiry: time.Now().UTC().Add(-1 * time.Minute),
+		},
+		validToken: "rt_1",
+		refreshedID: &auth.VerifiedIdentity{
+			Subject:       "sub-attacker",
+			Email:         "attacker@example.com",
+			Name:          "Attacker",
+			Groups:        []string{"crm-support", "crm-sales"},
+			GroupsPresent: true,
+		},
+	}
+
+	svc := auth.NewService(store, auditLogger, sm, verifier, "admin@example.com", testAccountRules()...)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/login", svc.HandleLogin)
+	mux.HandleFunc("/auth/callback", svc.HandleCallback)
+	mux.Handle("/threads", svc.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	handler := sm.LoadAndSave(mux)
+
+	cookies := doLoginAndGetCookies(t, handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/threads", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/auth/login" {
+		t.Fatalf("expected subject mismatch to destroy session and redirect to /auth/login, got %d %s", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// Verify user record in store was not modified with attacker's claims.
+	u, err := store.GetUserByOIDCSub(context.Background(), "sub-legit")
+	if err != nil {
+		t.Fatalf("GetUserByOIDCSub: %v", err)
+	}
+	if u.DisplayName != "Legit User" || u.HasAccountAccess("sales") {
+		t.Fatalf("user record must not be modified on subject mismatch: %+v", u)
+	}
+}
+
+// Regression test for PR #1 Comment 3: when refreshed claims remove the user's final group,
+// empty allowed_accounts is persisted in the store and audited before rejecting the session.
+func TestRefreshPersistsEmptyAllowedAccountsOnFinalGroupRevocation(t *testing.T) {
+	store := newMemUserStore()
+	auditLogger := audit.NewLogger(store, nil)
+	sm := auth.NewSessionManager(false)
+
+	verifier := &chainedRotatingVerifier{
+		identity: &auth.VerifiedIdentity{
+			Subject:       "sub-revoked-groups",
+			Email:         "user@example.com",
+			Name:          "User",
+			Groups:        []string{"crm-support", "crm-sales"},
+			GroupsPresent: true,
+			RefreshToken:  "rt_revoke_1",
+			IDTokenExpiry: time.Now().UTC().Add(-1 * time.Minute),
+		},
+		validToken: "rt_revoke_1",
+		refreshedID: &auth.VerifiedIdentity{
+			Subject:       "sub-revoked-groups",
+			Name:          "User",
+			Groups:        []string{},
+			GroupsPresent: true, // authoritative empty group list
+		},
+	}
+
+	svc := auth.NewService(store, auditLogger, sm, verifier, "admin@example.com", testAccountRules()...)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/login", svc.HandleLogin)
+	mux.HandleFunc("/auth/callback", svc.HandleCallback)
+	mux.Handle("/threads", svc.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	handler := sm.LoadAndSave(mux)
+
+	cookies := doLoginAndGetCookies(t, handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/threads", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/auth/login" {
+		t.Fatalf("expected revoked groups to redirect to /auth/login, got %d", rec.Code)
+	}
+
+	u, err := store.GetUserByOIDCSub(context.Background(), "sub-revoked-groups")
+	if err != nil {
+		t.Fatalf("GetUserByOIDCSub: %v", err)
+	}
+	if len(u.AllowedAccounts) != 0 {
+		t.Fatalf("expected AllowedAccounts to be persisted as empty, got %v", u.AllowedAccounts)
+	}
+}
+
+// Regression test for PR #1 Comment 4: transient IdP or DB failures return 503 without
+// destroying the session, and a rotated token is retained across a transient DB failure.
+func TestRefreshPreservesSessionOnTransientIdPAndDBFailures(t *testing.T) {
+	store := newMemUserStore()
+	auditLogger := audit.NewLogger(store, nil)
+	sm := auth.NewSessionManager(false)
+
+	verifier := &chainedRotatingVerifier{
+		identity: &auth.VerifiedIdentity{
+			Subject:       "sub-transient",
+			Email:         "transient@example.com",
+			Name:          "Transient User",
+			Groups:        []string{"crm-support"},
+			GroupsPresent: true,
+			RefreshToken:  "rt_t1",
+			IDTokenExpiry: time.Now().UTC().Add(-1 * time.Minute),
+		},
+		validToken: "rt_t1",
+		rotations: map[string]string{
+			"rt_t1": "rt_t2",
+		},
+		refreshedID: &auth.VerifiedIdentity{
+			Subject:       "sub-transient",
+			Name:          "Transient User",
+			Groups:        []string{"crm-support", "crm-sales"},
+			GroupsPresent: true,
+		},
+		customErr: errors.New("idp 503 service temporarily unavailable"),
+	}
+
+	svc := auth.NewService(store, auditLogger, sm, verifier, "admin@example.com", testAccountRules()...)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/login", svc.HandleLogin)
+	mux.HandleFunc("/auth/callback", svc.HandleCallback)
+	mux.Handle("/threads", svc.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	handler := sm.LoadAndSave(mux)
+
+	cookies := doLoginAndGetCookies(t, handler)
+
+	// 1. Transient IdP outage returns 503 and preserves session.
+	req1 := httptest.NewRequest(http.MethodGet, "/threads", nil)
+	for _, c := range cookies {
+		req1.AddCookie(c)
+	}
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 on transient IdP error, got %d", rec1.Code)
+	}
+
+	// 2. IdP recovers and rotates rt_t1 -> rt_t2, but local DB UpdateUserOIDC fails transiently.
+	verifier.mu.Lock()
+	verifier.customErr = nil
+	verifier.mu.Unlock()
+	store.mu.Lock()
+	store.failNextUpdate = errors.New("temporary database connection error")
+	store.mu.Unlock()
+
+	req2 := httptest.NewRequest(http.MethodGet, "/threads", nil)
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 on transient DB sync error, got %d", rec2.Code)
+	}
+	if freshCookies := rec2.Result().Cookies(); len(freshCookies) > 0 {
+		cookies = freshCookies
+	}
+
+	// 3. Next request retries synchronization using the retained rotated token rt_t2 and succeeds!
+	req3 := httptest.NewRequest(http.MethodGet, "/threads", nil)
+	for _, c := range cookies {
+		req3.AddCookie(c)
+	}
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("expected 200 after transient DB recovery, got %d", rec3.Code)
+	}
+	u, err := store.GetUserByOIDCSub(context.Background(), "sub-transient")
+	if err != nil || !u.HasAccountAccess("sales") {
+		t.Fatalf("expected user permissions to be synced on retry, got %+v (err=%v)", u, err)
+	}
+}
+
+// Regression test for PR #1 Comment 5: refreshed ID token omitting email, name, and groups
+// succeeds and retains the user's existing display name and account permissions.
+func TestRefreshHandlesOmittedOptionalClaims(t *testing.T) {
+	store := newMemUserStore()
+	auditLogger := audit.NewLogger(store, nil)
+	sm := auth.NewSessionManager(false)
+
+	verifier := &chainedRotatingVerifier{
+		identity: &auth.VerifiedIdentity{
+			Subject:       "sub-omitted",
+			Email:         "omitted@example.com",
+			Name:          "Original Name",
+			Groups:        []string{"crm-support"},
+			GroupsPresent: true,
+			RefreshToken:  "rt_o1",
+			IDTokenExpiry: time.Now().UTC().Add(-1 * time.Minute),
+		},
+		validToken: "rt_o1",
+		refreshedID: &auth.VerifiedIdentity{
+			Subject:       "sub-omitted",
+			Email:         "",    // omitted in refresh token
+			Name:          "",    // omitted in refresh token
+			Groups:        nil,   // omitted in refresh token
+			GroupsPresent: false, // groups key absent from refreshed ID token
+		},
+	}
+
+	svc := auth.NewService(store, auditLogger, sm, verifier, "admin@example.com", testAccountRules()...)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/login", svc.HandleLogin)
+	mux.HandleFunc("/auth/callback", svc.HandleCallback)
+	mux.Handle("/threads", svc.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	handler := sm.LoadAndSave(mux)
+
+	cookies := doLoginAndGetCookies(t, handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/threads", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 when optional claims are omitted on refresh, got %d", rec.Code)
+	}
+
+	u, err := store.GetUserByOIDCSub(context.Background(), "sub-omitted")
+	if err != nil {
+		t.Fatalf("GetUserByOIDCSub: %v", err)
+	}
+	if u.DisplayName != "Original Name" || !u.HasAccountAccess("support") {
+		t.Fatalf("expected user to retain Original Name and support access, got %+v", u)
+	}
 }
