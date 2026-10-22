@@ -49,7 +49,7 @@ Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. I
 
 | HTTP Header | Main Application Routes (`/threads`, `/settings`) | Isolated Email Body Route (`/emails/{id}/body`) |
 |---|---|---|
-| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'` plus `upgrade-insecure-requests` when served over HTTPS | `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'; sandbox allow-same-origin allow-popups allow-popups-to-escape-sandbox; form-action 'none'; base-uri 'none'; object-src 'none'` |
+| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'` plus `upgrade-insecure-requests` when served over HTTPS | `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'; sandbox allow-same-origin allow-popups allow-popups-to-escape-sandbox; form-action 'none'; base-uri 'none'; object-src 'none'` |
 | `X-Content-Type-Options` | `nosniff` | `nosniff` |
 | `X-Frame-Options` | `DENY` | `SAMEORIGIN` |
 | `Referrer-Policy` | `no-referrer` | `no-referrer` |
@@ -60,9 +60,9 @@ Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. I
 
 `upgrade-insecure-requests` is only emitted for requests that reached MiniCRM over HTTPS (either a direct TLS connection or `X-Forwarded-Proto: https` from a TLS-terminating reverse proxy). Sending it over plain HTTP would make browsers upgrade same-origin asset URLs such as `/static/app.css` to `https://<host>:8080/...`, which breaks local development stacks that serve HTTP only.
 | `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | `max-age=63072000; includeSubDomains; preload` |
-| `Cache-Control` | `no-store, max-age=0` | `private, no-store, max-age=0` |
+| `Cache-Control` | `no-store, max-age=0` (dynamic/authenticated routes); `public, max-age=3600, must-revalidate` (`/static/*`); `no-cache` (`/manifest.webmanifest`, `/sw.js`) | `private, no-store, max-age=0` |
 
-In addition, `/emails/{id}/body` embeds a `<meta http-equiv="Content-Security-Policy" ...>` tag inside the HTML `<head>` as a secondary enforcement layer.
+In addition, `/emails/{id}/body` embeds a `<meta http-equiv="Content-Security-Policy" ...>` tag inside the HTML `<head>` as a secondary enforcement layer. The root-scoped PWA Service Worker (`/sw.js`) precaches only public static shell assets (`/static/*`) and never intercepts or caches `/auth/*`, `/emails/*`, `/attachments/*`, or authenticated HTML responses.
 
 ---
 

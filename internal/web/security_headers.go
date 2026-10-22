@@ -11,8 +11,8 @@ import (
 // Strict HTTP security header constants.
 const (
 	mainCSPBase = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
-		"font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; " +
-		"form-action 'self'; base-uri 'none'; object-src 'none'"
+		"font-src 'self'; connect-src 'self'; frame-src 'self'; manifest-src 'self'; worker-src 'self'; " +
+		"frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'"
 
 	// MainCSP is used for pages served over HTTPS. upgrade-insecure-requests must not be
 	// sent over plain HTTP: browsers would then try to fetch /static/* over HTTPS, which
@@ -62,6 +62,19 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		h.Set("Strict-Transport-Security", HSTSValue)
 		h.Set("Cache-Control", "no-store, max-age=0")
 
+		next.ServeHTTP(w, r)
+	})
+}
+
+// StaticAssetCacheMiddleware overrides the default no-store Cache-Control header for
+// immutable/versioned static assets under /static/* while keeping sw.js revalidated.
+func StaticAssetCacheMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sw.js") {
+			w.Header().Set("Cache-Control", "no-cache")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

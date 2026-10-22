@@ -32,6 +32,21 @@ type AccountConfig struct {
 	FromAddress string
 }
 
+// AppBranding holds per-instance PWA / application branding strings.
+type AppBranding struct {
+	Name        string
+	ShortName   string
+	Description string
+}
+
+func defaultAppBranding() AppBranding {
+	return AppBranding{
+		Name:        "MiniCRM",
+		ShortName:   "MiniCRM",
+		Description: "Lightweight multi-account email CRM",
+	}
+}
+
 // HandlerStore defines the persistence operations required by the web Server handlers.
 type HandlerStore interface {
 	ListThreads(ctx context.Context, f sqlc.ListThreadsFilter) ([]sqlc.Thread, error)
@@ -55,10 +70,11 @@ type HandlerStore interface {
 var ErrThreadNotFound = errors.New("thread not found")
 
 const (
-	flashSessionKey  = "minicrm_flash"
-	threadListLimit  = 100
-	flashKindSuccess = "success"
-	flashKindError   = "error"
+	flashSessionKey        = "minicrm_flash"
+	lastInboxURLSessionKey = "minicrm_last_inbox_url"
+	threadListLimit        = 100
+	flashKindSuccess       = "success"
+	flashKindError         = "error"
 )
 
 // Server holds dependencies for MiniCRM HTTP handlers.
@@ -71,6 +87,7 @@ type Server struct {
 	audit       *audit.Logger
 	sessions    *scs.SessionManager
 	accounts    []AccountConfig
+	branding    AppBranding
 }
 
 // NewServer constructs a web Server.
@@ -93,7 +110,93 @@ func NewServer(
 		audit:       auditLogger,
 		sessions:    sessions,
 		accounts:    accounts,
+		branding:    defaultAppBranding(),
 	}
+}
+
+// WithBranding sets per-instance PWA branding on the Server.
+func (s *Server) WithBranding(b AppBranding) *Server {
+	def := defaultAppBranding()
+	if strings.TrimSpace(b.Name) == "" {
+		b.Name = def.Name
+	}
+	if strings.TrimSpace(b.ShortName) == "" {
+		b.ShortName = b.Name
+	}
+	if strings.TrimSpace(b.Description) == "" {
+		b.Description = def.Description
+	}
+	s.branding = AppBranding{
+		Name:        strings.TrimSpace(b.Name),
+		ShortName:   strings.TrimSpace(b.ShortName),
+		Description: strings.TrimSpace(b.Description),
+	}
+	return s
+}
+
+type manifestIcon struct {
+	Src     string `json:"src"`
+	Sizes   string `json:"sizes"`
+	Type    string `json:"type"`
+	Purpose string `json:"purpose"`
+}
+
+type webAppManifest struct {
+	ID              string         `json:"id"`
+	Name            string         `json:"name"`
+	ShortName       string         `json:"short_name"`
+	Description     string         `json:"description"`
+	StartURL        string         `json:"start_url"`
+	Scope           string         `json:"scope"`
+	Display         string         `json:"display"`
+	BackgroundColor string         `json:"background_color"`
+	ThemeColor      string         `json:"theme_color"`
+	Icons           []manifestIcon `json:"icons"`
+}
+
+// HandleManifest serves the per-instance Web App Manifest at /manifest.webmanifest.
+func (s *Server) HandleManifest(w http.ResponseWriter, _ *http.Request) {
+	branding := defaultAppBranding()
+	if s != nil && s.branding.Name != "" {
+		branding = s.branding
+	}
+	manifest := webAppManifest{
+		ID:              "/threads",
+		Name:            branding.Name,
+		ShortName:       branding.ShortName,
+		Description:     branding.Description,
+		StartURL:        "/threads",
+		Scope:           "/",
+		Display:         "standalone",
+		BackgroundColor: "#f5f6fa",
+		ThemeColor:      "#14142b",
+		Icons: []manifestIcon{
+			{
+				Src:     "/static/icon-192.png",
+				Sizes:   "192x192",
+				Type:    "image/png",
+				Purpose: "any",
+			},
+			{
+				Src:     "/static/icon-512.png",
+				Sizes:   "512x512",
+				Type:    "image/png",
+				Purpose: "any",
+			},
+			{
+				Src:     "/static/icon-maskable-512.png",
+				Sizes:   "512x512",
+				Type:    "image/png",
+				Purpose: "maskable",
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(manifest)
 }
 
 // setFlash stores a one-shot notice in the SCS session for the next rendered page.
@@ -123,18 +226,66 @@ func (s *Server) popFlash(r *http.Request) views.Flash {
 	return views.Flash{Kind: kind, Message: message}
 }
 
+// appBranding returns the configured branding or the default MiniCRM branding.
+func (s *Server) appBranding() AppBranding {
+	if s == nil || s.branding.Name == "" {
+		return defaultAppBranding()
+	}
+	return s.branding
+}
+
+// resolveInboxBackURL returns the most recent /threads filter URL from Referer or session,
+// falling back to "/threads".
+func (s *Server) resolveInboxBackURL(r *http.Request) string {
+	if ref := sanitizeInboxBackURL(r.Header.Get("Referer"), r.Host); ref != "" {
+		return ref
+	}
+	if s.sessions != nil {
+		if saved := sanitizeInboxBackURL(s.sessions.GetString(r.Context(), lastInboxURLSessionKey), r.Host); saved != "" {
+			return saved
+		}
+	}
+	return "/threads"
+}
+
+func sanitizeInboxBackURL(raw, requestHost string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if u.Scheme != "" || u.Host != "" {
+		if requestHost == "" || !strings.EqualFold(u.Host, requestHost) {
+			return ""
+		}
+	}
+	if u.Path != "/threads" {
+		return ""
+	}
+	if u.RawQuery == "" {
+		return "/threads"
+	}
+	return "/threads?" + u.RawQuery
+}
+
 // renderError renders the styled application error page with the given status code.
 func (s *Server) renderError(w http.ResponseWriter, r *http.Request, status int, heading, message string) {
 	user, _ := auth.UserFromContext(r.Context())
+	b := s.appBranding()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = views.RenderError(w, views.ErrorViewData{
-		Title:       heading,
-		ActiveNav:   "",
-		CurrentUser: user,
-		StatusCode:  status,
-		Heading:     heading,
-		Message:     message,
+		Title:        heading,
+		AppName:      b.Name,
+		AppShortName: b.ShortName,
+		ActiveNav:    "",
+		CurrentUser:  user,
+		StatusCode:   status,
+		Heading:      heading,
+		Message:      message,
 	})
 }
 
@@ -317,10 +468,19 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 
 	s.audit.LogDataAccess(ctx, "thread_list", "inbox")
 
+	if s.sessions != nil {
+		if currentInbox := sanitizeInboxBackURL(r.URL.RequestURI(), r.Host); currentInbox != "" {
+			s.sessions.Put(ctx, lastInboxURLSessionKey, currentInbox)
+		}
+	}
+
+	b := s.appBranding()
 	partial := r.Header.Get("HX-Request") == "true"
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := views.RenderInbox(w, views.InboxViewData{
 		Title:          "Threads",
+		AppName:        b.Name,
+		AppShortName:   b.ShortName,
 		Flash:          s.popFlash(r),
 		ActiveNav:      "threads",
 		CurrentUser:    user,
@@ -456,6 +616,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 	}
 
 	replyAllowed := thread.Status != sqlc.ThreadStatusSpam && thread.Status != sqlc.ThreadStatusCompleted
+	b := s.appBranding()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if status != http.StatusOK {
@@ -463,9 +624,12 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 	}
 	if err := views.RenderThreadDetail(w, views.ThreadDetailViewData{
 		Title:              thread.SubjectDisplay,
+		AppName:            b.Name,
+		AppShortName:       b.ShortName,
 		Flash:              s.popFlash(r),
 		ActiveNav:          "threads",
 		CurrentUser:        user,
+		BackURL:            s.resolveInboxBackURL(r),
 		Thread:             thread,
 		AssigneeName:       assigneeName,
 		WaitLabel:          waitLabel,

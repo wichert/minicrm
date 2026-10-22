@@ -4,12 +4,16 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/alexedwards/scs/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -18,6 +22,7 @@ import (
 	"github.com/wichert/minicrm/internal/audit"
 	"github.com/wichert/minicrm/internal/db/sqlc"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 )
 
 // ErrUserInactive is returned when a deactivated user attempts to log in.
@@ -25,6 +30,38 @@ var ErrUserInactive = errors.New("user account is inactive")
 
 // ErrNoAccountAccess is returned when a user's OIDC groups grant access to no mail account.
 var ErrNoAccountAccess = errors.New("user has no access to any mail account")
+
+// ErrOIDCSubjectMismatch is returned when a refreshed ID token's sub claim is empty or
+// does not match the signed-in user's bound oidc_sub.
+var ErrOIDCSubjectMismatch = errors.New("oidc id_token subject mismatch")
+
+// PermanentAuthError marks an authentication or authorization failure that definitively
+// invalidates the current session, as opposed to a transient network or database error.
+type PermanentAuthError struct {
+	Err error
+}
+
+func (e *PermanentAuthError) Error() string {
+	if e == nil || e.Err == nil {
+		return "permanent authentication failure"
+	}
+	return e.Err.Error()
+}
+
+func (e *PermanentAuthError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// NewPermanentAuthError wraps err in a PermanentAuthError.
+func NewPermanentAuthError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &PermanentAuthError{Err: err}
+}
 
 // AccountAccessRule links an OIDC group/role claim value to a mail account ID.
 type AccountAccessRule struct {
@@ -36,17 +73,43 @@ type AccountAccessRule struct {
 // Session keys used by SCS.
 const (
 	SessionKeyUserID       = "auth_user_id"
+	SessionKeySessionID    = "auth_session_id"
 	SessionKeyOIDCState    = "oidc_state"
 	SessionKeyOIDCNonce    = "oidc_nonce"
 	SessionKeyPKCEVerifier = "oidc_pkce_verifier"
+	SessionKeyReturnTo     = "auth_return_to"
+	// #nosec G101 -- SCS session map key names, not credentials
+	SessionKeyRefreshToken = "auth_refresh_token_enc"
+	// #nosec G101 -- SCS session map key names, not credentials
+	SessionKeyIDTokenExpiry     = "auth_id_token_expiry"
+	SessionKeyRefreshExpiry     = "auth_refresh_expiry"
+	SessionKeyRefreshGen        = "auth_refresh_gen"
+	defaultIDTokenRefreshWindow = 15 * time.Minute
+	recentRefreshCacheTTL       = 30 * time.Second
 )
 
-// VerifiedIdentity represents the claims verified from the OIDC ID Token.
+// VerifiedIdentity represents the claims verified from the OIDC ID Token,
+// along with optional OAuth2 token lifecycle metadata for session alignment.
 type VerifiedIdentity struct {
 	Subject string
 	Email   string
 	Name    string
 	Groups  []string
+	// GroupsPresent reports whether the groups claim was explicitly present in the
+	// verified ID token or UserInfo response. On login this is always true; on token
+	// refresh, false indicates the provider omitted the groups claim.
+	GroupsPresent      bool
+	RefreshToken       string
+	IDTokenExpiry      time.Time
+	RefreshTokenExpiry time.Time
+}
+
+// RefreshResult holds the outcome of a server-side OAuth2 refresh_token exchange.
+type RefreshResult struct {
+	Identity           *VerifiedIdentity
+	RefreshToken       string
+	IDTokenExpiry      time.Time
+	RefreshTokenExpiry time.Time
 }
 
 // IdentityVerifier exchanges an OAuth2 authorization code + PKCE verifier for a VerifiedIdentity.
@@ -55,8 +118,15 @@ type IdentityVerifier interface {
 	ExchangeAndVerify(ctx context.Context, code, codeVerifier, expectedNonce string) (*VerifiedIdentity, error)
 }
 
+// TokenRefresher is an optional extension of IdentityVerifier that refreshes an OAuth2
+// refresh_token server-to-server and verifies any updated OIDC ID token.
+type TokenRefresher interface {
+	RefreshAndVerify(ctx context.Context, refreshToken string) (*RefreshResult, error)
+}
+
 // OIDCProvider implements IdentityVerifier using github.com/coreos/go-oidc/v3 and golang.org/x/oauth2.
 type OIDCProvider struct {
+	provider     *oidc.Provider
 	oauth2Config oauth2.Config
 	verifier     *oidc.IDTokenVerifier
 	groupsClaim  string
@@ -84,6 +154,7 @@ func NewOIDCProvider(ctx context.Context, issuerURL, clientID, clientSecret, red
 		groupsClaim = "groups"
 	}
 	return &OIDCProvider{
+		provider:     provider,
 		oauth2Config: oauthCfg,
 		verifier:     verifier,
 		groupsClaim:  groupsClaim,
@@ -145,6 +216,68 @@ func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier
 	if idToken.Nonce != expectedNonce {
 		return nil, errors.New("oidc id_token nonce mismatch")
 	}
+	identity, err := p.parseVerifiedIdentity(idToken)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	identity.RefreshToken = token.RefreshToken
+	identity.IDTokenExpiry = idToken.Expiry.UTC()
+	if identity.IDTokenExpiry.IsZero() && !token.Expiry.IsZero() {
+		identity.IDTokenExpiry = token.Expiry.UTC()
+	}
+	if token.RefreshToken != "" {
+		if refreshExp, ok := ExtractRefreshTokenExpiry(token, token.RefreshToken, now); ok {
+			identity.RefreshTokenExpiry = refreshExp
+		}
+	}
+	return identity, nil
+}
+
+// RefreshAndVerify exchanges a refresh_token at the OIDC provider's token endpoint and
+// verifies the refreshed ID token when present.
+func (p *OIDCProvider) RefreshAndVerify(ctx context.Context, refreshToken string) (*RefreshResult, error) {
+	if strings.TrimSpace(refreshToken) == "" {
+		return nil, NewPermanentAuthError(errors.New("empty refresh token"))
+	}
+	ts := p.oauth2Config.TokenSource(ctx, &oauth2.Token{
+		RefreshToken: refreshToken,
+		Expiry:       time.Unix(1, 0),
+	})
+	token, err := ts.Token()
+	if err != nil {
+		return nil, fmt.Errorf("oauth2 token refresh: %w", err)
+	}
+	now := time.Now().UTC()
+	newRefresh := token.RefreshToken
+	if newRefresh == "" {
+		newRefresh = refreshToken
+	}
+	res := &RefreshResult{
+		RefreshToken:  newRefresh,
+		IDTokenExpiry: token.Expiry.UTC(),
+	}
+	if refreshExp, ok := ExtractRefreshTokenExpiry(token, newRefresh, now); ok {
+		res.RefreshTokenExpiry = refreshExp
+	}
+	if rawIDToken, ok := token.Extra("id_token").(string); ok && rawIDToken != "" {
+		idToken, err := p.verifier.Verify(ctx, rawIDToken)
+		if err != nil {
+			return nil, NewPermanentAuthError(fmt.Errorf("verify refreshed oidc id_token: %w", err))
+		}
+		identity, err := p.parseRefreshedIdentity(ctx, idToken, token)
+		if err != nil {
+			return nil, err
+		}
+		res.Identity = identity
+		if !idToken.Expiry.IsZero() {
+			res.IDTokenExpiry = idToken.Expiry.UTC()
+		}
+	}
+	return res, nil
+}
+
+func (p *OIDCProvider) parseVerifiedIdentity(idToken *oidc.IDToken) (*VerifiedIdentity, error) {
 	var claims map[string]any
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("parse oidc claims: %w", err)
@@ -159,10 +292,66 @@ func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier
 		displayName = email
 	}
 	return &VerifiedIdentity{
-		Subject: idToken.Subject,
-		Email:   strings.TrimSpace(email),
-		Name:    displayName,
-		Groups:  extractGroups(claims[p.groupsClaim]),
+		Subject:       idToken.Subject,
+		Email:         strings.TrimSpace(email),
+		Name:          displayName,
+		Groups:        extractGroups(claims[p.groupsClaim]),
+		GroupsPresent: true,
+	}, nil
+}
+
+// parseRefreshedIdentity extracts claims from a refreshed ID token (where optional claims
+// such as email, name, or groups may be omitted per OIDC Core §12.2) and consults UserInfo
+// when the groups claim is omitted and the provider exposes a UserInfo endpoint.
+func (p *OIDCProvider) parseRefreshedIdentity(ctx context.Context, idToken *oidc.IDToken, token *oauth2.Token) (*VerifiedIdentity, error) {
+	sub := strings.TrimSpace(idToken.Subject)
+	if sub == "" {
+		return nil, NewPermanentAuthError(errors.New("refreshed oidc id_token missing sub claim"))
+	}
+	var claims map[string]any
+	if err := idToken.Claims(&claims); err != nil {
+		return nil, NewPermanentAuthError(fmt.Errorf("parse refreshed oidc claims: %w", err))
+	}
+	email, _ := claims["email"].(string)
+	name, _ := claims["name"].(string)
+	rawGroups, groupsPresent := claims[p.groupsClaim]
+	groups := extractGroups(rawGroups)
+
+	if !groupsPresent && p.provider != nil && token != nil && token.AccessToken != "" {
+		ui, err := p.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
+		if err != nil {
+			var retrieveErr *oauth2.RetrieveError
+			if errors.As(err, &retrieveErr) && retrieveErr.Response != nil &&
+				(retrieveErr.Response.StatusCode == http.StatusBadRequest || retrieveErr.Response.StatusCode == http.StatusUnauthorized) {
+				return nil, NewPermanentAuthError(fmt.Errorf("oidc userinfo rejected token: %w", err))
+			}
+			return nil, fmt.Errorf("fetch oidc userinfo on refresh: %w", err)
+		}
+		if ui.Subject != "" && ui.Subject != sub {
+			return nil, NewPermanentAuthError(ErrOIDCSubjectMismatch)
+		}
+		var uiClaims map[string]any
+		if err := ui.Claims(&uiClaims); err != nil {
+			return nil, NewPermanentAuthError(fmt.Errorf("parse oidc userinfo claims: %w", err))
+		}
+		if rawUIGroups, ok := uiClaims[p.groupsClaim]; ok {
+			groups = extractGroups(rawUIGroups)
+			groupsPresent = true
+		}
+		if strings.TrimSpace(name) == "" {
+			name, _ = uiClaims["name"].(string)
+		}
+		if strings.TrimSpace(email) == "" {
+			email, _ = uiClaims["email"].(string)
+		}
+	}
+
+	return &VerifiedIdentity{
+		Subject:       sub,
+		Email:         strings.TrimSpace(email),
+		Name:          strings.TrimSpace(name),
+		Groups:        groups,
+		GroupsPresent: groupsPresent,
 	}, nil
 }
 
@@ -202,28 +391,82 @@ type UserStore interface {
 	UpsertAccountSettings(ctx context.Context, s sqlc.AccountSettings) (sqlc.AccountSettings, error)
 }
 
+type cachedRefreshOutcome struct {
+	result          *RefreshResult
+	updatedUser     *sqlc.User
+	idTokenExpiry   time.Time
+	refreshDeadline time.Time
+	cachedAt        time.Time
+}
+
+type versionedSessionCreds struct {
+	userID          uuid.UUID
+	gen             int64
+	encRefreshToken []byte
+	idTokenExpiry   int64
+	refreshExpiry   int64
+	refreshDeadline time.Time
+	updatedAt       time.Time
+}
+
+type pendingSyncState struct {
+	result          *RefreshResult
+	refreshDeadline time.Time
+	cachedAt        time.Time
+}
+
 // Service manages OIDC login, pre-created user resolution, bootstrap seeding, and audit logging.
 type Service struct {
-	store          UserStore
-	audit          *audit.Logger
-	sessions       *scs.SessionManager
-	verifier       IdentityVerifier
-	bootstrapEmail string
-	accountRules   []AccountAccessRule
+	store           UserStore
+	audit           *audit.Logger
+	sessions        *scs.SessionManager
+	verifier        IdentityVerifier
+	bootstrapEmail  string
+	accountRules    []AccountAccessRule
+	tokenCipher     *TokenCipher
+	refreshGroup    singleflight.Group
+	recentRefreshMu sync.Mutex
+	recentRefreshes map[string]cachedRefreshOutcome
+	pendingSyncs    map[string]pendingSyncState
+	sessionCredsMu  sync.Mutex
+	sessionCreds    map[string]versionedSessionCreds
 }
 
 // NewService constructs an authentication Service.
 //
 // accountRules map OIDC group/role claim values to the mail account IDs they grant access to.
 func NewService(store UserStore, auditLogger *audit.Logger, sessions *scs.SessionManager, verifier IdentityVerifier, bootstrapEmail string, accountRules ...AccountAccessRule) *Service {
-	return &Service{
-		store:          store,
-		audit:          auditLogger,
-		sessions:       sessions,
-		verifier:       verifier,
-		bootstrapEmail: strings.TrimSpace(bootstrapEmail),
-		accountRules:   accountRules,
+	cipher, _ := NewTokenCipher()
+	svc := &Service{
+		store:           store,
+		audit:           auditLogger,
+		sessions:        sessions,
+		verifier:        verifier,
+		bootstrapEmail:  strings.TrimSpace(bootstrapEmail),
+		accountRules:    accountRules,
+		tokenCipher:     cipher,
+		recentRefreshes: make(map[string]cachedRefreshOutcome),
+		pendingSyncs:    make(map[string]pendingSyncState),
+		sessionCreds:    make(map[string]versionedSessionCreds),
 	}
+	if sessions != nil {
+		if _, alreadyWrapped := sessions.Codec.(*sessionCredsCodec); !alreadyWrapped {
+			baseCodec := sessions.Codec
+			if baseCodec == nil {
+				baseCodec = scs.GobCodec{}
+			}
+			sessions.Codec = &sessionCredsCodec{base: baseCodec, svc: svc}
+		}
+	}
+	return svc
+}
+
+// WithTokenCipher configures the AES-256-GCM TokenCipher used to encrypt refresh tokens at rest.
+func (s *Service) WithTokenCipher(cipher *TokenCipher) *Service {
+	if cipher != nil {
+		s.tokenCipher = cipher
+	}
+	return s
 }
 
 // AccountRules returns the configured OIDC-group-to-account mappings.
@@ -367,6 +610,7 @@ func (s *Service) PrecreateUser(ctx context.Context, actorID uuid.UUID, email, d
 func (s *Service) ResolveAndLoginUser(ctx context.Context, id *VerifiedIdentity, ipAddr, userAgent string) (sqlc.User, error) {
 	allowedAccounts := s.ResolveAccounts(id.Groups)
 	if len(allowedAccounts) == 0 {
+		s.revokeExistingUserAccountsOnLogin(ctx, id, ipAddr, userAgent)
 		_ = s.audit.LogSystemEvent(ctx, audit.SystemEventParams{
 			EventType: "user_login_failed",
 			IPAddress: ipAddr,
@@ -546,12 +790,84 @@ func (s *Service) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	returnTo := s.sessions.PopString(ctx, SessionKeyReturnTo)
 	if err := s.sessions.RenewToken(ctx); err != nil {
 		http.Error(w, "session renewal failed", http.StatusInternalServerError)
 		return
 	}
+	sessionID := uuid.NewString()
 	s.sessions.Put(ctx, SessionKeyUserID, user.ID.String())
-	http.Redirect(w, r, "/threads", http.StatusSeeOther)
+	s.sessions.Put(ctx, SessionKeySessionID, sessionID)
+
+	now := time.Now().UTC()
+	if identity.RefreshToken != "" {
+		enc, err := s.tokenCipher.Encrypt(identity.RefreshToken, user.ID)
+		if err != nil {
+			http.Error(w, "session token encryption failed", http.StatusInternalServerError)
+			return
+		}
+		refreshDeadline := identity.RefreshTokenExpiry
+		if refreshDeadline.IsZero() || !refreshDeadline.After(now) {
+			refreshDeadline = now.Add(s.sessions.Lifetime)
+		}
+		idExpiry := identity.IDTokenExpiry
+		if idExpiry.IsZero() {
+			idExpiry = now.Add(defaultIDTokenRefreshWindow)
+		}
+		s.recordAndApplySessionCreds(ctx, sessionID, user.ID, enc, idExpiry.Unix(), refreshDeadline.Unix(), refreshDeadline)
+	} else {
+		s.clearSessionCreds(ctx, sessionID)
+		if !identity.IDTokenExpiry.IsZero() && identity.IDTokenExpiry.After(now.Add(s.sessions.Lifetime)) {
+			s.sessions.SetDeadline(ctx, identity.IDTokenExpiry)
+		}
+	}
+
+	target := sanitizeReturnTo(returnTo)
+	if target == "" {
+		target = "/threads"
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+func (s *Service) revokeExistingUserAccountsOnLogin(ctx context.Context, id *VerifiedIdentity, ipAddr, userAgent string) {
+	if id == nil {
+		return
+	}
+	var existing sqlc.User
+	var err error
+	if strings.TrimSpace(id.Subject) != "" {
+		existing, err = s.store.GetUserByOIDCSub(ctx, id.Subject)
+	}
+	if (err != nil || existing.ID == uuid.Nil) && strings.TrimSpace(id.Email) != "" {
+		existing, err = s.store.GetUserByEmail(ctx, id.Email)
+	}
+	if err != nil || len(existing.AllowedAccounts) == 0 {
+		return
+	}
+	oldSnap := existing
+	sub := derefOr(existing.OIDCSub, id.Subject)
+	displayName := existing.DisplayName
+	if strings.TrimSpace(id.Name) != "" {
+		displayName = strings.TrimSpace(id.Name)
+	}
+	updated, err := s.store.UpdateUserOIDC(ctx, existing.ID, sub, displayName, []string{})
+	if err != nil {
+		return
+	}
+	_ = s.audit.LogSystemEvent(ctx, audit.SystemEventParams{
+		ActorUserID:  &updated.ID,
+		TargetUserID: &updated.ID,
+		EventType:    "user_updated",
+		IPAddress:    ipAddr,
+		UserAgent:    userAgent,
+		OldValue:     oldSnap,
+		NewValue:     updated,
+	})
+}
+
+func tokenSingleflightKey(userID uuid.UUID, refreshToken string) string {
+	sum := sha256.Sum256([]byte(userID.String() + ":" + refreshToken))
+	return hex.EncodeToString(sum[:])
 }
 
 // HandleLogout destroys the current session and logs a user_logout audit event.

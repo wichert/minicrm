@@ -48,6 +48,8 @@ type ThreadSummaryItem struct {
 // InboxViewData holds data for rendering the threads inbox view.
 type InboxViewData struct {
 	Title          string
+	AppName        string
+	AppShortName   string
 	Flash          Flash
 	ActiveNav      string
 	CurrentUser    sqlc.User
@@ -88,9 +90,12 @@ type EventItemView struct {
 // ThreadDetailViewData holds data for rendering a single conversation thread.
 type ThreadDetailViewData struct {
 	Title         string
+	AppName       string
+	AppShortName  string
 	Flash         Flash
 	ActiveNav     string
 	CurrentUser   sqlc.User
+	BackURL       string
 	Thread        sqlc.Thread
 	AssigneeName  string
 	WaitLabel     string
@@ -142,6 +147,8 @@ type AuditEntryView struct {
 // SettingsViewData holds data for the admin settings and user management page.
 type SettingsViewData struct {
 	Title           string
+	AppName         string
+	AppShortName    string
 	Flash           Flash
 	ActiveNav       string
 	CurrentUser     sqlc.User
@@ -157,13 +164,15 @@ type SettingsViewData struct {
 
 // ErrorViewData holds data for the styled error page.
 type ErrorViewData struct {
-	Title       string
-	Flash       Flash
-	ActiveNav   string
-	CurrentUser sqlc.User
-	StatusCode  int
-	Heading     string
-	Message     string
+	Title        string
+	AppName      string
+	AppShortName string
+	Flash        Flash
+	ActiveNav    string
+	CurrentUser  sqlc.User
+	StatusCode   int
+	Heading      string
+	Message      string
 }
 
 // FormatTimestamp converts t into the configured IANA displayTimezone without repeating
@@ -697,11 +706,17 @@ const layoutHeader = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#14142b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="{{if .AppShortName}}{{.AppShortName}}{{else if .AppName}}{{.AppName}}{{else}}MiniCRM{{end}}">
   <meta name="referrer" content="no-referrer">
-  <title>{{if .Title}}{{.Title}} — MiniCRM{{else}}MiniCRM{{end}}</title>
+  <title>{{if .Title}}{{.Title}} — {{end}}{{if .AppName}}{{.AppName}}{{else}}MiniCRM{{end}}</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/app.js" defer></script>
 </head>
@@ -709,7 +724,7 @@ const layoutHeader = `<!DOCTYPE html>
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header>
     <nav class="navbar" aria-label="Main">
-      <a class="navbar-brand" href="/threads"><svg class="brand-mark" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" fill="#6366f1"/><path d="M7 11.5h18v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="m7.5 12 8.5 6.5L24.5 12" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>MiniCRM</span></a>
+      <a class="navbar-brand" href="/threads"><svg class="brand-mark" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" fill="#6366f1"/><path d="M7 11.5h18v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="m7.5 12 8.5 6.5L24.5 12" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>{{if .AppShortName}}{{.AppShortName}}{{else if .AppName}}{{.AppName}}{{else}}MiniCRM{{end}}</span></a>
       <ul class="nav-links">
         <li><a href="/threads"{{if eq .ActiveNav "threads"}} aria-current="page"{{end}}>Threads</a></li>
         {{if eq .CurrentUser.Role "admin"}}<li><a href="/settings"{{if eq .ActiveNav "settings"}} aria-current="page"{{end}}>Settings</a></li>{{end}}
@@ -763,7 +778,7 @@ const inboxTablePartial = `
     <tbody>
       {{range .Threads}}
       <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}" data-row-href="/threads/{{.Thread.ID}}">
-        {{if $.ShowAccountUI}}<td><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
+        {{if $.ShowAccountUI}}<td class="account-cell"><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
         <td class="thread-cell">
           <a class="thread-link" href="/threads/{{.Thread.ID}}">{{.Thread.SubjectDisplay}}</a>{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
           <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
@@ -772,8 +787,8 @@ const inboxTablePartial = `
           <span class="customer-name">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else}}Unknown customer{{end}}</span>
           <span class="customer-email" title="{{.Thread.CustomerEmail}}">{{.Thread.CustomerEmail}}</span>
         </td>
-        <td><span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span></td>
-        <td>{{if .AssigneeName}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}</td>
+        <td class="status-cell"><span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span></td>
+        <td class="assignee-cell">{{if .AssigneeName}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}</td>
         <td class="nowrap age-cell">
           {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="First message received {{.FullTime}}">{{.WaitLabel}}</span>
           {{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}
@@ -790,8 +805,9 @@ const inboxTablePartial = `
 `
 
 const inboxBody = `
-<div class="page-heading">
+<div class="page-heading page-heading-row">
   <h1>Threads</h1>
+  <a class="btn btn-secondary btn-small" href="/threads?status={{.StatusFilter}}&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}">Refresh</a>
 </div>
 <div class="toolbar">
   <nav class="tabs" aria-label="Thread status">
@@ -833,7 +849,10 @@ const inboxBody = `
 ` + inboxTablePartial
 
 const threadDetailBody = `
-<a class="back-link" href="/threads">&larr; Back to threads</a>
+<div class="thread-top-bar">
+  <a class="back-link" href="{{if .BackURL}}{{.BackURL}}{{else}}/threads{{end}}">&larr; Back to threads</a>
+  <a class="btn btn-secondary btn-small" href="/threads/{{.Thread.ID}}">Refresh</a>
+</div>
 <div class="card thread-header-card">
   <div class="thread-header">
     <div>

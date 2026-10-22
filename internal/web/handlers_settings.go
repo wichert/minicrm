@@ -98,6 +98,7 @@ func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user sql
 	}
 
 	s.audit.LogDataAccess(ctx, "system_settings", "1")
+	b := s.appBranding()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if status != http.StatusOK {
@@ -105,6 +106,8 @@ func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user sql
 	}
 	if err := views.RenderSettings(w, views.SettingsViewData{
 		Title:           "Settings",
+		AppName:         b.Name,
+		AppShortName:    b.ShortName,
 		Flash:           s.popFlash(r),
 		ActiveNav:       "settings",
 		CurrentUser:     user,

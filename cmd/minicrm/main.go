@@ -89,8 +89,13 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	sessions := auth.NewSessionManager(cfg.CookieSecure)
+	sessions := auth.NewSessionManagerWithTimeouts(cfg.CookieSecure, cfg.SessionLifetime, cfg.SessionIdleTimeout)
 	sessions.Store = pgxstore.New(pool)
+
+	tokenCipher, err := auth.NewTokenCipher(cfg.SessionEncryptionKey, cfg.OIDCClientSecret)
+	if err != nil {
+		return err
+	}
 
 	accountRules := make([]auth.AccountAccessRule, 0, len(cfg.Accounts))
 	webAccounts := make([]web.AccountConfig, 0, len(cfg.Accounts))
@@ -102,7 +107,7 @@ func run(logger *slog.Logger) error {
 		})
 		webAccounts = append(webAccounts, web.AccountConfig{ID: acct.ID, Name: acct.Name, FromAddress: acct.SMTPFromAddress})
 	}
-	authSvc := auth.NewService(queries, auditLogger, sessions, oidcProvider, cfg.BootstrapAdminMail, accountRules...)
+	authSvc := auth.NewService(queries, auditLogger, sessions, oidcProvider, cfg.BootstrapAdminMail, accountRules...).WithTokenCipher(tokenCipher)
 	if _, _, err := authSvc.SeedBootstrapAdminAndSettings(ctx, cfg.BootstrapAdminMail, cfg.BootstrapAdminName, cfg.DisplayTimezone); err != nil {
 		return err
 	}
@@ -164,7 +169,12 @@ func run(logger *slog.Logger) error {
 	go actionWorker.Run(ctx)
 	go outboxWorker.Run(ctx)
 
-	webSrv := web.NewServer(queries, authSvc, wfSvc, outboxWorker, attStore, auditLogger, sessions, webAccounts)
+	webSrv := web.NewServer(queries, authSvc, wfSvc, outboxWorker, attStore, auditLogger, sessions, webAccounts).
+		WithBranding(web.AppBranding{
+			Name:        cfg.AppName,
+			ShortName:   cfg.AppShortName,
+			Description: cfg.AppDescription,
+		})
 	router := web.NewRouter(webSrv, authSvc, sessions)
 
 	httpServer := &http.Server{

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -1540,5 +1541,141 @@ func TestInboxReflectsExternalReply(t *testing.T) {
 	}
 	if strings.Contains(body, "Waiting") {
 		t.Fatalf("an answered thread must not show a waiting badge: %s", body)
+	}
+}
+
+func TestPWAManifestServiceWorkerAndCacheHeaders(t *testing.T) {
+	srv, store, _, _, _ := buildAccountTestServer(t)
+	srv.WithBranding(web.AppBranding{
+		Name:        "Acme Support CRM",
+		ShortName:   "AcmeCRM",
+		Description: "Acme customer support workspace",
+	})
+	auditLogger := audit.NewLogger(store, nil)
+	sm := auth.NewSessionManager(false)
+	authSvc := auth.NewService(store, auditLogger, sm, nil, "admin@example.com")
+	router := web.NewRouter(srv, authSvc, sm)
+
+	// 1. CSP includes manifest-src 'self' and worker-src 'self'
+	if !strings.Contains(web.MainCSP, "manifest-src 'self'; worker-src 'self'") {
+		t.Fatalf("MainCSP missing manifest-src/worker-src: %s", web.MainCSP)
+	}
+	if !strings.Contains(web.MainCSPInsecure, "manifest-src 'self'; worker-src 'self'") {
+		t.Fatalf("MainCSPInsecure missing manifest-src/worker-src: %s", web.MainCSPInsecure)
+	}
+
+	// 2. Unauthenticated GET /manifest.webmanifest succeeds and reflects custom branding
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/manifest.webmanifest", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /manifest.webmanifest status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/manifest+json") {
+		t.Fatalf("unexpected manifest Content-Type: %q", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("unexpected manifest Cache-Control: %q, want no-cache", got)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatalf("unmarshal manifest JSON: %v", err)
+	}
+	if manifest["name"] != "Acme Support CRM" || manifest["short_name"] != "AcmeCRM" || manifest["description"] != "Acme customer support workspace" {
+		t.Fatalf("unexpected manifest branding fields: %+v", manifest)
+	}
+	if manifest["display"] != "standalone" || manifest["start_url"] != "/threads" {
+		t.Fatalf("unexpected manifest display/start_url: %+v", manifest)
+	}
+
+	// 3. Unauthenticated GET /sw.js succeeds with Service-Worker-Allowed: / and Cache-Control: no-cache
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /sw.js status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/javascript") {
+		t.Fatalf("unexpected sw.js Content-Type: %q", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("unexpected sw.js Cache-Control: %q, want no-cache", got)
+	}
+	if got := rec.Header().Get("Service-Worker-Allowed"); got != "/" {
+		t.Fatalf("unexpected Service-Worker-Allowed: %q, want /", got)
+	}
+
+	// 4. Static assets and icons under /static/* receive public cache headers
+	for _, asset := range []string{
+		"/static/app.css",
+		"/static/app.js",
+		"/static/icon-192.png",
+		"/static/icon-512.png",
+		"/static/icon-maskable-512.png",
+		"/static/apple-touch-icon.png",
+		"/static/offline.html",
+	} {
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, asset, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", asset, rec.Code)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "public, max-age=3600, must-revalidate" {
+			t.Fatalf("GET %s Cache-Control = %q, want public, max-age=3600, must-revalidate", asset, got)
+		}
+	}
+}
+
+func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
+	_, store, router, multiUser, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Filter preservation test",
+		Status: sqlc.ThreadStatusNew, AssigneeID: &multiUser.ID, CustomerEmail: "c@example.com",
+		LastMessageAt: now, OpenedAt: now,
+	}
+
+	// 1. Inbox renders Refresh button with active filter params and head PWA metadata
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new&assignee=me", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads status = %d", rec.Code)
+	}
+	inboxHTML := rec.Body.String()
+	for _, want := range []string{
+		`<link rel="manifest" href="/manifest.webmanifest">`,
+		`<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">`,
+		`<meta name="theme-color" content="#14142b">`,
+		`href="/threads?status=new&amp;assignee=me&amp;account=">Refresh</a>`,
+	} {
+		if !strings.Contains(inboxHTML, want) {
+			t.Fatalf("expected %q in inbox HTML", want)
+		}
+	}
+
+	// 2. Thread detail preserves BackURL from same-origin /threads?... Referer and rejects cross-origin Referer
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String(), nil)
+	req.Host = "crm.example.com"
+	req.Header.Set("Referer", "https://crm.example.com/threads?status=new&assignee=me")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads/{id} status = %d", rec.Code)
+	}
+	detailHTML := rec.Body.String()
+	if !strings.Contains(detailHTML, `href="/threads?status=new&amp;assignee=me"`) {
+		t.Fatalf("expected Back to threads link to preserve filter query params, got: %s", detailHTML)
+	}
+	if !strings.Contains(detailHTML, `href="/threads/`+threadID.String()+`">Refresh</a>`) {
+		t.Fatalf("expected Refresh button on thread detail page")
+	}
+
+	// Cross-origin Referer must be ignored and fall back to /threads
+	reqEvil := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String(), nil)
+	reqEvil.Host = "crm.example.com"
+	reqEvil.Header.Set("Referer", "https://evil.example.com/threads?status=new")
+	recEvil := httptest.NewRecorder()
+	router.ServeHTTP(recEvil, reqEvil)
+	if !strings.Contains(recEvil.Body.String(), `<a class="back-link" href="/threads">`) {
+		t.Fatalf("expected cross-origin Referer to fall back to /threads, got: %s", recEvil.Body.String())
 	}
 }

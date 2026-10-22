@@ -66,6 +66,12 @@ MiniCRM is configured via environment variables:
 | `MINICRM_DISPLAY_TIMEZONE` | No | `UTC` | Initial IANA display timezone (e.g. `Europe/Amsterdam`) |
 | `MINICRM_MAIL_DOMAIN` | No | `minicrm.local` | Domain used when generating outbound `Message-ID` headers |
 | `MINICRM_COOKIE_SECURE` | No | `true` | Set `Secure` attribute and `__Host-` prefix on session cookies |
+| `MINICRM_APP_NAME` | No | `MiniCRM` | Per-instance application name used in page titles and `/manifest.webmanifest` |
+| `MINICRM_APP_SHORT_NAME` | No | `MINICRM_APP_NAME` | Per-instance short name used on home screens, navbar brand, and PWA manifest |
+| `MINICRM_APP_DESCRIPTION` | No | `Lightweight multi-account email CRM` | Per-instance description advertised in `/manifest.webmanifest` |
+| `MINICRM_SESSION_LIFETIME` | No | `168h` | Default session lifetime when the OIDC provider does not issue a refresh token with an explicit expiry |
+| `MINICRM_SESSION_IDLE_TIMEOUT` | No | `0s` | Optional session inactivity timeout (`0s` disables idle expiry so session lifetime aligns with the OAuth2 refresh token) |
+| `MINICRM_SESSION_ENCRYPTION_KEY` | No | — | Secret key material used (via HKDF-SHA256) to encrypt OAuth2 refresh tokens at rest with AES-256-GCM; falls back to `MINICRM_OIDC_CLIENT_SECRET` when unset |
 | `MINICRM_OIDC_GROUPS_CLAIM` | No | `groups` | ID token claim carrying the user's group/role memberships |
 | `MINICRM_OIDC_SCOPES` | No | `openid,profile,email` | Comma-separated scopes requested from the IdP; must include `openid`. Add `groups`/`groups_name` when the IdP (e.g. Kanidm) only emits groups on request |
 | `MINICRM_ACCOUNT_<N>_ID` | **Yes** | — | Unique account identifier for account `N` (e.g. `support`). Accounts are numbered from `1` upwards until an `_ID` is absent |
