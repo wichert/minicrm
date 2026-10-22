@@ -63,6 +63,16 @@ type Config struct {
 	MailDomain         string `env:"MINICRM_MAIL_DOMAIN" envDefault:"minicrm.local"`
 	CookieSecure       bool   `env:"MINICRM_COOKIE_SECURE" envDefault:"true"`
 
+	// Per-instance PWA / application branding
+	AppName        string `env:"MINICRM_APP_NAME" envDefault:"MiniCRM"`
+	AppShortName   string `env:"MINICRM_APP_SHORT_NAME"`
+	AppDescription string `env:"MINICRM_APP_DESCRIPTION" envDefault:"Lightweight multi-account email CRM"`
+
+	// Session management & refresh token encryption
+	SessionLifetime      time.Duration `env:"MINICRM_SESSION_LIFETIME" envDefault:"168h"`
+	SessionIdleTimeout   time.Duration `env:"MINICRM_SESSION_IDLE_TIMEOUT" envDefault:"0s"`
+	SessionEncryptionKey string        `env:"MINICRM_SESSION_ENCRYPTION_KEY"`
+
 	// Mail accounts (loaded from MINICRM_ACCOUNT_<N>_* env prefixes).
 	Accounts []MailAccountConfig `env:"-"`
 
@@ -85,6 +95,12 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse config from env: %w", err)
 	}
+	cfg.AppName = strings.TrimSpace(cfg.AppName)
+	cfg.AppShortName = strings.TrimSpace(cfg.AppShortName)
+	if cfg.AppShortName == "" {
+		cfg.AppShortName = cfg.AppName
+	}
+	cfg.AppDescription = strings.TrimSpace(cfg.AppDescription)
 	accounts, err := loadAccounts()
 	if err != nil {
 		return nil, err
@@ -119,6 +135,18 @@ func loadAccounts() ([]MailAccountConfig, error) {
 
 // Validate checks semantic constraints on Config values.
 func (c *Config) Validate() error {
+	if strings.TrimSpace(c.AppName) == "" {
+		return errors.New("MINICRM_APP_NAME must not be empty")
+	}
+	if c.SessionLifetime <= 0 {
+		return errors.New("MINICRM_SESSION_LIFETIME must be positive")
+	}
+	if c.SessionIdleTimeout < 0 {
+		return errors.New("MINICRM_SESSION_IDLE_TIMEOUT must not be negative")
+	}
+	if c.SessionIdleTimeout > c.SessionLifetime {
+		return errors.New("MINICRM_SESSION_IDLE_TIMEOUT must not exceed MINICRM_SESSION_LIFETIME")
+	}
 	if c.DisplayTimezone == "" {
 		return errors.New("display timezone must not be empty")
 	}

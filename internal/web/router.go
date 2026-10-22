@@ -28,10 +28,18 @@ func NewRouter(srv *Server, authSvc *auth.Service, sessions *scs.SessionManager)
 
 	// Static embedded assets
 	fileServer := http.FileServer(http.FS(static.FS))
-	r.Handle("/static/*", http.StripPrefix("/static/", fileServer))
+	r.Handle("/static/*", StaticAssetCacheMiddleware(http.StripPrefix("/static/", fileServer)))
 	// Browsers still probe /favicon.ico; point it at the embedded SVG icon.
 	r.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/static/favicon.svg", http.StatusMovedPermanently)
+	})
+	// Public PWA manifest and root-scoped Service Worker
+	r.Get("/manifest.webmanifest", srv.HandleManifest)
+	r.Get("/sw.js", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Service-Worker-Allowed", "/")
+		_, _ = w.Write(static.ServiceWorkerJS)
 	})
 
 	// Public OAuth2 / OIDC routes

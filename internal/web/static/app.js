@@ -96,10 +96,36 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
+  var sessionExpiredReloadTriggered = false;
+
+  function handleExpiredEmailFrame(frame) {
+    var notice = document.createElement("div");
+    notice.className = "session-expired-notice";
+    var text = document.createElement("span");
+    text.textContent = "Your session has expired.";
+    var link = document.createElement("a");
+    link.className = "btn btn-primary btn-small";
+    link.href = "/auth/login";
+    link.textContent = "Sign in again";
+    notice.appendChild(text);
+    notice.appendChild(link);
+    if (frame.parentNode) {
+      frame.parentNode.replaceChild(notice, frame);
+    }
+    if (!sessionExpiredReloadTriggered) {
+      sessionExpiredReloadTriggered = true;
+      window.location.reload();
+    }
+  }
+
   function observeEmailFrame(frame) {
-    syncEmailFrameHeight(frame);
     try {
       var doc = frame.contentDocument;
+      if (doc && doc.body && doc.body.dataset.sessionExpired === "true") {
+        handleExpiredEmailFrame(frame);
+        return;
+      }
+      syncEmailFrameHeight(frame);
       if (!doc || !doc.body || doc.body.dataset.resizeObserved === "true") {
         return;
       }
@@ -186,4 +212,12 @@ document.addEventListener("DOMContentLoaded", function () {
       window.location.href = row.getAttribute("data-row-href");
     });
   });
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("/sw.js").catch(function () {
+        // Ignore registration errors in restricted or non-HTTPS dev contexts.
+      });
+    });
+  }
 });

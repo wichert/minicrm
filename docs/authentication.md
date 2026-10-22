@@ -49,6 +49,9 @@ In your identity server, create a confidential OAuth2/OIDC client with:
 | `MINICRM_BOOTSTRAP_ADMIN_EMAIL` | **Yes** | — | Email address of the initial admin user seeded on startup (granted access to all configured accounts). |
 | `MINICRM_BOOTSTRAP_ADMIN_NAME` | No | `Admin` | Display name for the seeded bootstrap admin user. |
 | `MINICRM_COOKIE_SECURE` | No | `true` | When `true` (default), session cookies use the `__Host-minicrm_session` name, `Secure`, `HttpOnly`, and `SameSite=Lax`. Set to `false` only for plain `http://localhost` development. |
+| `MINICRM_SESSION_LIFETIME` | No | `168h` | Default session lifetime when the OIDC provider does not issue a refresh token with an explicit expiry. |
+| `MINICRM_SESSION_IDLE_TIMEOUT` | No | `0s` | Optional session inactivity timeout (`0s` disables idle expiry so session lifetime aligns with the OAuth2 refresh token). |
+| `MINICRM_SESSION_ENCRYPTION_KEY` | No | — | Key material used (via HKDF-SHA256) to encrypt OAuth2 refresh tokens at rest with AES-256-GCM; falls back to `MINICRM_OIDC_CLIENT_SECRET` when unset. |
 
 ---
 
@@ -101,7 +104,8 @@ When a valid ID Token is verified at `/auth/callback`, MiniCRM resolves the user
 
 Finally:
 - If `user.is_active == false`, MiniCRM logs `user_login_failed` in `audit_logs` and rejects the login with `403 Forbidden`.
-- Otherwise, MiniCRM logs `user_login` (with client IP and User-Agent) in `audit_logs`, rotates the SCS session token (`sessions.RenewToken`) to prevent session fixation, and redirects to `/threads`.
+- Otherwise, MiniCRM logs `user_login` (with client IP and User-Agent) in `audit_logs`, rotates the SCS session token (`sessions.RenewToken`) to prevent session fixation, aligns the session deadline (`sessions.SetDeadline`) to the OAuth2 `refresh_token` expiry when one is returned (storing the `refresh_token` encrypted with AES-256-GCM and bound to the user's UUID as AAD), and redirects to the preserved `return_to` path (or `/threads`).
+- When an ID token's expiry elapses during an active session, `RequireAuth` transparently refreshes the token server-to-server (deduplicated per session via `singleflight.Group`), updating `users.allowed_accounts` and `display_name` when refreshed claims change or destroying the session if the refresh token has expired or been revoked at the IdP.
 
 ---
 

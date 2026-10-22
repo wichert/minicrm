@@ -229,3 +229,87 @@ func TestIMAPInitialSyncDays(t *testing.T) {
 		t.Fatal("negative initial sync days must be rejected")
 	}
 }
+
+func TestAppBrandingAndSessionConfig(t *testing.T) {
+	setRequiredEnv(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load default: %v", err)
+	}
+	if cfg.AppName != "MiniCRM" || cfg.AppShortName != "MiniCRM" {
+		t.Fatalf("unexpected default app name/short name: %q / %q", cfg.AppName, cfg.AppShortName)
+	}
+	if cfg.AppDescription != "Lightweight multi-account email CRM" {
+		t.Fatalf("unexpected default description: %q", cfg.AppDescription)
+	}
+	if cfg.SessionLifetime.Hours() != 168 {
+		t.Fatalf("got default session lifetime %v, want 168h", cfg.SessionLifetime)
+	}
+	if cfg.SessionIdleTimeout != 0 {
+		t.Fatalf("got default session idle timeout %v, want 0", cfg.SessionIdleTimeout)
+	}
+
+	// Custom branding with short_name defaulting to AppName when unset.
+	t.Setenv("MINICRM_APP_NAME", "Acme Support Desk")
+	t.Setenv("MINICRM_APP_DESCRIPTION", "Acme customer inbox")
+	t.Setenv("MINICRM_SESSION_LIFETIME", "48h")
+	t.Setenv("MINICRM_SESSION_IDLE_TIMEOUT", "12h")
+	t.Setenv("MINICRM_SESSION_ENCRYPTION_KEY", "super-secret-session-encryption-key")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("Load custom: %v", err)
+	}
+	if cfg.AppName != "Acme Support Desk" || cfg.AppShortName != "Acme Support Desk" {
+		t.Fatalf("expected short name to default to AppName, got %q / %q", cfg.AppName, cfg.AppShortName)
+	}
+	if cfg.AppDescription != "Acme customer inbox" {
+		t.Fatalf("got description %q", cfg.AppDescription)
+	}
+	if cfg.SessionLifetime.Hours() != 48 || cfg.SessionIdleTimeout.Hours() != 12 {
+		t.Fatalf("unexpected session timeouts: %v / %v", cfg.SessionLifetime, cfg.SessionIdleTimeout)
+	}
+	if cfg.SessionEncryptionKey != "super-secret-session-encryption-key" {
+		t.Fatalf("unexpected encryption key: %q", cfg.SessionEncryptionKey)
+	}
+
+	// Explicit short name
+	t.Setenv("MINICRM_APP_SHORT_NAME", "AcmeCRM")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("Load explicit short name: %v", err)
+	}
+	if cfg.AppShortName != "AcmeCRM" {
+		t.Fatalf("got short name %q, want AcmeCRM", cfg.AppShortName)
+	}
+
+	// Validation failures
+	t.Run("empty_app_name", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("MINICRM_APP_NAME", "   ")
+		if _, err := config.Load(); err == nil {
+			t.Fatal("expected error for empty MINICRM_APP_NAME")
+		}
+	})
+	t.Run("non_positive_session_lifetime", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("MINICRM_SESSION_LIFETIME", "0s")
+		if _, err := config.Load(); err == nil {
+			t.Fatal("expected error for 0s session lifetime")
+		}
+	})
+	t.Run("negative_idle_timeout", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("MINICRM_SESSION_IDLE_TIMEOUT", "-1m")
+		if _, err := config.Load(); err == nil {
+			t.Fatal("expected error for negative idle timeout")
+		}
+	})
+	t.Run("idle_exceeds_lifetime", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("MINICRM_SESSION_LIFETIME", "2h")
+		t.Setenv("MINICRM_SESSION_IDLE_TIMEOUT", "4h")
+		if _, err := config.Load(); err == nil {
+			t.Fatal("expected error when idle timeout exceeds lifetime")
+		}
+	})
+}
