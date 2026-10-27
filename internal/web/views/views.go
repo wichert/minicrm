@@ -868,7 +868,14 @@ const inboxBody = `
   <input type="hidden" name="return_to" value="{{.RefreshURL}}">
   <label class="mobile-select-all"><input type="checkbox" data-select-all-mobile> Select all on page</label>
   <span data-selected-count aria-live="polite">0 selected</span>
-  <button type="submit" class="btn btn-danger btn-small">Mark selected as spam</button>
+  <label class="inline-field">Assign selected to
+    <select name="assignee_id" aria-label="Assignee for selected conversations">
+      <option value="">Choose assignee</option>
+      {{range .Users}}<option value="{{.ID}}">{{.DisplayName}}</option>{{end}}
+    </select>
+  </label>
+  <button type="submit" formaction="/threads/bulk-assign" class="btn btn-secondary btn-small">Assign selected</button>
+  <button type="submit" class="btn btn-danger btn-small" data-confirm-submit>Mark selected as spam</button>
 </form>
 {{end}}
 <p class="results-count">

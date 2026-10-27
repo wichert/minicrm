@@ -121,9 +121,12 @@ document.addEventListener("DOMContentLoaded", function () {
         if (form.dataset.confirmed === "true") {
           return;
         }
+        if (form === bulkForm && event.submitter && !event.submitter.hasAttribute("data-confirm-submit")) {
+          return;
+        }
         event.preventDefault();
         pendingForm = form;
-        pendingTrigger = form.querySelector("button[type=submit]") || document.activeElement;
+        pendingTrigger = event.submitter || form.querySelector("button[type=submit]") || document.activeElement;
         message.textContent = form.getAttribute("data-confirm");
         accept.textContent = form.getAttribute("data-confirm-action") || "Confirm";
         dialog.showModal();
