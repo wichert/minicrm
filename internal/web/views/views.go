@@ -772,6 +772,7 @@ const inboxTablePartial = `
   <table class="threads-table">
     <thead>
       <tr>
+        <th scope="col"><label><input type="checkbox" data-select-all> Select all on page</label></th>
         {{if .ShowAccountUI}}<th scope="col">Account</th>{{end}}
         <th scope="col">Thread</th>
         <th scope="col">Customer</th>
@@ -783,6 +784,7 @@ const inboxTablePartial = `
     <tbody>
       {{range .Threads}}
       <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}" data-row-href="/threads/{{.Thread.ID}}">
+        <td class="select-cell"><label><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>
         {{if $.ShowAccountUI}}<td class="account-cell"><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
         <td class="thread-cell">
           <a class="thread-link" href="/threads/{{.Thread.ID}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
@@ -854,6 +856,14 @@ const inboxBody = `
     <noscript><button type="submit" class="btn btn-secondary">Filter</button></noscript>
   </form>
 </div>
+{{if .Threads}}
+<form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
+  <input type="hidden" name="return_to" value="{{.RefreshURL}}">
+  <label class="mobile-select-all"><input type="checkbox" data-select-all-mobile> Select all on page</label>
+  <span data-selected-count aria-live="polite">0 selected</span>
+  <button type="submit" class="btn btn-danger btn-small">Mark selected as spam</button>
+</form>
+{{end}}
 <p class="results-count">
   Showing {{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}{{if .NextURL}}; more results available{{end}}
 </p>
@@ -942,6 +952,10 @@ const threadDetailBody = `
       </form>
       {{end}}
       {{if eq .Thread.Status "spam"}}
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Return this conversation to In progress and queue restoration from Junk?" data-confirm-action="Restore">
+        <input type="hidden" name="status" value="in_progress"><input type="hidden" name="recover_spam" value="1">
+        <button type="submit" class="btn btn-secondary">Not spam</button>
+      </form>
       <p class="helper">This thread is marked as spam. Replies and assignment are disabled.</p>
       {{end}}
       {{if eq .Thread.Status "completed"}}

@@ -6,6 +6,8 @@ This document describes how MiniCRM links incoming and outgoing replies into con
 
 ## Completing new conversations
 
+Bulk spam validates each selected thread and reports individual failures while preserving the inbox filter. Jobs are queued, not reported as already moved. Spam recovery waits for earlier jobs on each message and searches Junk for exactly one matching Message-ID before moving; ambiguous or unavailable messages fail safely and remain visible to operators via job diagnostics.
+
 An operator may mark a new conversation complete in one action. `CompleteFromNew` locks the thread and atomically applies the existing `new → in_progress → completed` transitions, records both events and queues the Archive moves. A failed write rolls back the whole operation; this does not add a direct state-machine transition.
 
 ## Customer history
@@ -71,6 +73,8 @@ Messages found in the `Sent` folder are linked with `Matcher.ResolveOutboundThre
 |---|---|---|---|
 | `new` | `in_progress` | UI **Start Progress** button (`POST /threads/{id}/transition`) **or** sending the first outbound reply on a `new` thread | Updates `threads.status = 'in_progress'`; records `status_changed` in `thread_events`. |
 | `new` | `spam` | UI **Mark as Spam** button (`POST /threads/{id}/transition`) | Updates `threads.status = 'spam'`; records `status_changed`; enqueues `move_to_junk` jobs in `imap_jobs` for all inbound emails in `INBOX`. |
+| `in_progress` | `spam` | Bulk **Mark as spam** | Records a status event and queues account-scoped Junk moves. |
+| `spam` | `in_progress` | Explicit **Not spam** recovery (`RecoverSpam`) | Atomically records the status event and queues account-scoped `restore_from_junk` jobs. It is not a normal direct transition. |
 | `in_progress` | `completed` | UI **Complete Thread** button (`POST /threads/{id}/transition`) | Updates `threads.status = 'completed'`; records `status_changed`; enqueues `move_to_archive` jobs in `imap_jobs` for all inbound emails in `INBOX`. |
 | `completed` | `in_progress` | UI **Reopen & Merge** button (`POST /threads/{id}/reopen-merge`) | Moves all emails & events from the follow-up thread into the `completed` thread, transitions it to `in_progress`, logs `reopen_merged`, and deletes the temporary follow-up thread. |
 | Any other | Any other | — | Rejected with `workflow.ErrInvalidTransition` (`HTTP 422`). |

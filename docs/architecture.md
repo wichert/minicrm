@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-**MiniCRM** is a single-binary Go 1.27 application that turns one or more shared IMAP/SMTP mailboxes (accounts) into a collaborative, stateful ticket/thread workflow. Every incoming email is linked to a conversation thread, assigned to an operator, and tracked through a strict lifecycle (`new -> in_progress -> completed` or `new -> spam`).
+**MiniCRM** is a single-binary Go 1.27 application that turns one or more shared IMAP/SMTP mailboxes (accounts) into a collaborative, stateful ticket/thread workflow. Every incoming email is linked to a conversation thread, assigned to an operator, and tracked through a strict lifecycle (`new -> in_progress -> completed`, or `new`/`in_progress -> spam` with explicit spam recovery).
 
 Mail accounts are configured with numbered `MINICRM_ACCOUNT_<N>_*` environment variables. Each account is ingested, threaded, and replied from independently: an email delivered to several accounts produces one thread per account. Access is constrained by OIDC group claims (`MINICRM_ACCOUNT_<N>_OIDC_GROUP`), so users only see threads, email bodies, and attachments for accounts they may access.
 

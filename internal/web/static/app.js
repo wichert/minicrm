@@ -82,6 +82,23 @@ document.addEventListener("DOMContentLoaded", function () {
     window.addEventListener("beforeunload", function (event) { if (!sending && (snapshot() !== saved || saving)) { event.preventDefault(); event.returnValue = ""; } });
   });
 
+  var bulkForm = document.getElementById("bulk-spam-form");
+  if (bulkForm) {
+    var checks = Array.from(document.querySelectorAll("[data-select-thread]"));
+    var selectAll = Array.from(document.querySelectorAll("[data-select-all], [data-select-all-mobile]"));
+    var count = bulkForm.querySelector("[data-selected-count]");
+    function refreshSelection() {
+      var selected = checks.filter(function (check) { return check.checked; });
+      var accounts = Array.from(new Set(selected.map(function (check) { return check.dataset.account; }))).filter(Boolean);
+      count.textContent = selected.length + " selected on this page";
+      selectAll.forEach(function (control) { control.checked = selected.length === checks.length && checks.length > 0; control.indeterminate = selected.length > 0 && selected.length < checks.length; });
+      bulkForm.dataset.confirm = "Mark " + selected.length + " selected conversation(s) on this page as spam" + (accounts.length ? " (accounts: " + accounts.join(", ") + ")" : "") + "? Moves to Junk will be queued.";
+    }
+    checks.forEach(function (check) { check.addEventListener("change", refreshSelection); });
+    selectAll.forEach(function (control) { control.addEventListener("change", function () { checks.forEach(function (check) { check.checked = control.checked; }); refreshSelection(); }); });
+    refreshSelection();
+  }
+
   // Confirm consequential actions in an accessible in-page dialog. When <dialog> is
   // unavailable the form keeps its native submit path and submits directly.
   var dialog = document.getElementById("confirm-dialog");
@@ -303,7 +320,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   document.querySelectorAll("tr[data-row-href]").forEach(function (row) {
     row.addEventListener("click", function (event) {
-      if (event.target.closest("a, button, input, select")) {
+      if (event.target.closest("a, button, input, select, label")) {
         return;
       }
       if (window.getSelection && String(window.getSelection())) {

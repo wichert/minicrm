@@ -321,6 +321,14 @@ func (m *memCRMStore) ClaimNextIMAPJob(_ context.Context) (sqlc.IMAPJob, error) 
 	return sqlc.IMAPJob{}, pgx.ErrNoRows
 }
 
+func (m *memCRMStore) RestoreIMAPEmail(_ context.Context, accountID string, id uuid.UUID) (sqlc.Email, error) {
+	em, ok := m.emails[id]
+	if !ok || em.AccountID != accountID {
+		return sqlc.Email{}, pgx.ErrNoRows
+	}
+	return em, nil
+}
+
 func (m *memCRMStore) CompleteIMAPJob(_ context.Context, jobID, emailID uuid.UUID, newMailbox string) error {
 	for i := range m.jobs {
 		if m.jobs[i].ID == jobID {
@@ -376,6 +384,52 @@ type wfStoreAdapter struct {
 
 func (a wfStoreAdapter) TouchThreadLastMessageAt(ctx context.Context, id uuid.UUID, src sqlc.Thread) error {
 	return a.memCRMStore.TouchThreadLastMessageAt(ctx, id, src.LastMessageAt)
+}
+
+func TestRestoreFromJunkUsesUniqueMessageID(t *testing.T) {
+	for _, ambiguous := range []bool{false, true} {
+		srv := newFakeIMAPServer()
+		store := newMemCRMStore()
+		id := uuid.New()
+		junk := "Junk"
+		store.emails[id] = sqlc.Email{ID: id, AccountID: "sales", MessageID: "recover@example.com", IMAPMailbox: &junk}
+		raw := []byte("Message-ID: <recover@example.com>\r\nFrom: a@example.com\r\n\r\nbody")
+		srv.mailboxes["Junk"][91] = raw
+		if ambiguous {
+			srv.mailboxes["Junk"][92] = raw
+		}
+		_, _ = store.EnqueueIMAPJob(context.Background(), sqlc.IMAPJob{AccountID: "sales", JobType: "restore_from_junk", EmailID: id, SourceMailbox: &junk, TargetMailbox: "INBOX", MaxAttempts: 1})
+		worker := mail.NewIMAPActionWorker(store, nil, func(_ context.Context, account string) (mail.IMAPClient, error) {
+			if account != "sales" {
+				t.Fatalf("wrong account %s", account)
+			}
+			return srv, nil
+		}, nil, nil)
+		processed, err := worker.ProcessPending(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ambiguous && (processed != 0 || store.jobs[0].Status != "failed" || len(srv.mailboxes["Junk"]) != 2) {
+			t.Fatalf("ambiguous recovery moved message: %+v", store.jobs)
+		}
+		if !ambiguous && (processed != 1 || store.jobs[0].Status != "completed" || len(srv.mailboxes["INBOX"]) != 1) {
+			t.Fatalf("recovery failed: %+v", store.jobs)
+		}
+	}
+}
+
+func TestRecoveryFollowedBySpamMovesUsingCurrentUID(t *testing.T) {
+	srv, store := newFakeIMAPServer(), newMemCRMStore()
+	id, junk := uuid.New(), "Junk"
+	store.emails[id] = sqlc.Email{ID: id, AccountID: "support", MessageID: "sequence@example.com", IMAPMailbox: &junk}
+	srv.mailboxes["Junk"][91] = []byte("Message-ID: <sequence@example.com>\r\n\r\nbody")
+	_, _ = store.EnqueueIMAPJob(context.Background(), sqlc.IMAPJob{AccountID: "support", JobType: "restore_from_junk", EmailID: id, SourceMailbox: &junk, TargetMailbox: "INBOX"})
+	_, _ = store.EnqueueIMAPJob(context.Background(), sqlc.IMAPJob{AccountID: "support", JobType: "move_to_junk", EmailID: id, SourceMailbox: &junk, TargetMailbox: "Junk"})
+	worker := mail.NewIMAPActionWorker(store, nil, func(context.Context, string) (mail.IMAPClient, error) { return srv, nil }, nil, nil)
+	processed, err := worker.ProcessPending(context.Background())
+	if err != nil || processed != 2 || len(srv.mailboxes["Junk"]) != 1 || len(srv.mailboxes["INBOX"]) != 0 {
+		t.Fatalf("ordered moves failed: %d %v %+v", processed, err, store.jobs)
+	}
 }
 
 func TestIMAPSyncArchiveDeleteSafetyAndReopen(t *testing.T) {

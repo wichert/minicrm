@@ -820,9 +820,16 @@ func (s *Server) HandleTransitionThread(w http.ResponseWriter, r *http.Request) 
 		s.renderError(w, r, http.StatusBadRequest, "Invalid request", "The completion request is invalid.")
 		return
 	}
-	if r.FormValue("complete_from_new") == "1" {
+	if r.FormValue("recover_spam") == "1" && targetStatus != sqlc.ThreadStatusInProgress {
+		s.renderError(w, r, http.StatusBadRequest, "Invalid request", "The recovery request is invalid.")
+		return
+	}
+	switch {
+	case r.FormValue("recover_spam") == "1":
+		err = s.workflow.RecoverSpam(ctx, threadID, &user.ID)
+	case r.FormValue("complete_from_new") == "1":
 		err = s.workflow.CompleteFromNew(ctx, threadID, &user.ID)
-	} else {
+	default:
 		err = s.workflow.Transition(ctx, threadID, targetStatus, &user.ID)
 	}
 	if err != nil {
@@ -834,7 +841,14 @@ func (s *Server) HandleTransitionThread(w http.ResponseWriter, r *http.Request) 
 		s.renderError(w, r, http.StatusInternalServerError, "Update failed", "The status change could not be saved. Please try again.")
 		return
 	}
-	s.setFlash(r, flashKindSuccess, fmt.Sprintf("Thread marked as %s.", views.FormatStatus(targetStatus)))
+	switch {
+	case r.FormValue("recover_spam") == "1":
+		s.setFlash(r, flashKindSuccess, "Thread restored to In progress; recovery from Junk has been queued.")
+	case targetStatus == sqlc.ThreadStatusSpam:
+		s.setFlash(r, flashKindSuccess, "Thread marked as spam; moves to Junk have been queued.")
+	default:
+		s.setFlash(r, flashKindSuccess, fmt.Sprintf("Thread marked as %s.", views.FormatStatus(targetStatus)))
+	}
 	redirectToThread(w, r, threadID)
 }
 

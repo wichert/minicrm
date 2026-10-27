@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/wichert/minicrm/internal/db/sqlc"
 	"github.com/wichert/minicrm/internal/storage"
+	"github.com/wichert/minicrm/internal/threading"
 )
 
 // ActionJobStore defines the persistence operations required by IMAPActionWorker.
@@ -120,15 +123,58 @@ func (w *IMAPActionWorker) executeJob(ctx context.Context, job sqlc.IMAPJob) err
 
 	switch job.JobType {
 	case "move_to_archive", "move_to_junk":
-		if job.SourceMailbox == nil || job.IMAPUID == nil {
-			// Already moved or missing UID; complete as benign no-op.
+		if job.SourceMailbox == nil {
 			return w.store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
 		}
-		var uidVal int64
-		if job.IMAPUIDValidity != nil {
-			uidVal = *job.IMAPUIDValidity
+		source, uid := *job.SourceMailbox, job.IMAPUID
+		uidValidity := job.IMAPUIDValidity
+		if store, ok := w.store.(interface {
+			RestoreIMAPEmail(context.Context, string, uuid.UUID) (sqlc.Email, error)
+		}); ok {
+			// A preceding recovery/move changes the UID. Resolve the current location
+			// only after that job has completed, rather than using a stale snapshot.
+			em, err := store.RestoreIMAPEmail(ctx, job.AccountID, job.EmailID)
+			if err != nil {
+				return err
+			}
+			if em.IMAPMailbox == nil || strings.EqualFold(*em.IMAPMailbox, job.TargetMailbox) {
+				return w.store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
+			}
+			source = *em.IMAPMailbox
+			if em.IMAPUID != nil {
+				uid, uidValidity = em.IMAPUID, em.IMAPUIDValidity
+			} else {
+				actual, exists, err := client.ResolveMailbox(ctx, source)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					return errors.New("source folder unavailable")
+				}
+				matches, err := client.SearchByMessageID(ctx, actual, em.MessageID, 0)
+				if err != nil {
+					return err
+				}
+				var exact []RawIMAPMessage
+				for _, candidate := range matches {
+					parsed, err := mail.ReadMessage(strings.NewReader(string(candidate.RawRFC822)))
+					if err == nil && threading.NormalizeMessageID(parsed.Header.Get("Message-ID")) == em.MessageID {
+						exact = append(exact, candidate)
+					}
+				}
+				if len(exact) != 1 {
+					return fmt.Errorf("cannot safely move message: found %d exact matches in source", len(exact))
+				}
+				source, uid, uidValidity = actual, &exact[0].UID, &exact[0].UIDValidity
+			}
+		} else if uid == nil {
+			return errors.New("IMAP store does not support locating moved messages")
 		}
-		err := client.MoveMessage(ctx, *job.SourceMailbox, uidVal, *job.IMAPUID, job.TargetMailbox)
+		var uidVal int64
+		if uidValidity != nil {
+			uidVal = *uidValidity
+		}
+		err := client.MoveMessage(ctx, source, uidVal, *uid, job.TargetMailbox)
 		if err != nil && !errors.Is(err, ErrMessageNotFound) {
 			return err
 		}
@@ -145,6 +191,49 @@ func (w *IMAPActionWorker) executeJob(ctx context.Context, job sqlc.IMAPJob) err
 			slog.String("target_mailbox", job.TargetMailbox),
 		)
 		return nil
+
+	case "restore_from_junk":
+		store, ok := w.store.(interface {
+			RestoreIMAPEmail(context.Context, string, uuid.UUID) (sqlc.Email, error)
+		})
+		if !ok {
+			return errors.New("IMAP store does not support recovery")
+		}
+		em, err := store.RestoreIMAPEmail(ctx, job.AccountID, job.EmailID)
+		if err != nil {
+			return err
+		}
+		if job.SourceMailbox == nil || em.MessageID == "" {
+			return errors.New("recovery requires a source folder and message ID")
+		}
+		actual, exists, err := client.ResolveMailbox(ctx, *job.SourceMailbox)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return errors.New("junk folder unavailable")
+		}
+		matches, err := client.SearchByMessageID(ctx, actual, em.MessageID, 0)
+		if err != nil {
+			return err
+		}
+		var exact []RawIMAPMessage
+		for _, candidate := range matches {
+			parsed, err := mail.ReadMessage(strings.NewReader(string(candidate.RawRFC822)))
+			if err == nil && threading.NormalizeMessageID(parsed.Header.Get("Message-ID")) == em.MessageID {
+				exact = append(exact, candidate)
+			}
+		}
+		if len(exact) == 0 && em.IMAPMailbox != nil && strings.EqualFold(*em.IMAPMailbox, job.TargetMailbox) {
+			return w.store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
+		}
+		if len(exact) != 1 {
+			return fmt.Errorf("cannot safely restore message: found %d exact matches in junk", len(exact))
+		}
+		if err := client.MoveMessage(ctx, actual, exact[0].UIDValidity, exact[0].UID, job.TargetMailbox); err != nil {
+			return err
+		}
+		return w.store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
 
 	case "append_to_sent":
 		if job.RawRFC822Path == nil || *job.RawRFC822Path == "" {

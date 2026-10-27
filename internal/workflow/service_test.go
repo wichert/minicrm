@@ -172,6 +172,41 @@ func TestCompleteFromNewIsAtomic(t *testing.T) {
 	}
 }
 
+func TestSpamRecoveryIsAtomicAndExplicit(t *testing.T) {
+	store := newFakeWorkflowStore()
+	id := uuid.New()
+	store.threads[id] = sqlc.Thread{ID: id, AccountID: "sales", Status: sqlc.ThreadStatusInProgress}
+	inbox, uid := "INBOX", int64(42)
+	store.emails[id] = []sqlc.Email{{ID: uuid.New(), ThreadID: id, AccountID: "sales", Direction: "inbound", IMAPMailbox: &inbox, IMAPUID: &uid}}
+	svc := workflow.NewService(store, audit.NewLogger(store, nil), nil)
+	if err := svc.Transition(context.Background(), id, sqlc.ThreadStatusSpam, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.jobs) != 1 || store.jobs[0].AccountID != "sales" || store.jobs[0].JobType != "move_to_junk" {
+		t.Fatalf("junk job: %+v", store.jobs)
+	}
+	if err := svc.Transition(context.Background(), id, sqlc.ThreadStatusInProgress, nil); !errors.Is(err, workflow.ErrInvalidTransition) {
+		t.Fatalf("direct recovery accepted: %v", err)
+	}
+	store.failEnqueue = true
+	if err := svc.RecoverSpam(context.Background(), id, nil); err == nil {
+		t.Fatal("recovery should roll back")
+	}
+	if store.threads[id].Status != sqlc.ThreadStatusSpam || len(store.jobs) != 1 || len(store.threadEvents) != 1 {
+		t.Fatal("failed recovery changed state")
+	}
+	store.failEnqueue = false
+	if err := svc.RecoverSpam(context.Background(), id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if store.threads[id].Status != sqlc.ThreadStatusInProgress || len(store.threadEvents) != 2 || len(store.jobs) != 2 || store.jobs[1].JobType != "restore_from_junk" || store.jobs[1].AccountID != "sales" {
+		t.Fatalf("recovery failed: %+v %+v", store.threadEvents, store.jobs)
+	}
+	if err := svc.RecoverSpam(context.Background(), id, nil); !errors.Is(err, workflow.ErrInvalidTransition) {
+		t.Fatalf("duplicate recovery accepted: %v", err)
+	}
+}
+
 func TestWorkflowTransitionsAndIMAPJobQueueing(t *testing.T) {
 	store := newFakeWorkflowStore()
 	auditLogger := audit.NewLogger(store, nil)

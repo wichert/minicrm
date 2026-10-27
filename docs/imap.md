@@ -104,7 +104,8 @@ All IMAP folder mutations triggered by user actions are decoupled from HTTP requ
 
 | Job Type | Trigger | IMAP Operation | Database Update |
 |---|---|---|---|
-| `move_to_junk` | Thread transitions `new -> spam` | `SELECT "INBOX"` -> `UID MOVE <uid> "Junk"` | Sets `emails.imap_mailbox = 'Junk'`, `emails.imap_uid = NULL`, `imap_jobs.status = 'completed'`. |
+| `move_to_junk` | Thread transitions `new -> spam` or `in_progress -> spam` | `SELECT "INBOX"` -> `UID MOVE <uid> "Junk"` | Sets `emails.imap_mailbox = 'Junk'`, `emails.imap_uid = NULL`, `imap_jobs.status = 'completed'`. |
+| `restore_from_junk` | Explicit Not spam recovery | Wait for earlier per-message jobs, find exactly one matching Message-ID in Junk, then move to INBOX | Queue retry/failure when no unique safe match exists. |
 | `move_to_archive` | Thread transitions `in_progress -> completed` | `SELECT "INBOX"` -> `UID MOVE <uid> "Archive"` | Sets `emails.imap_mailbox = 'Archive'`, `emails.imap_uid = NULL`, `imap_jobs.status = 'completed'`. |
 | `append_to_sent` | Outbound reply delivered via SMTP | `APPEND "Sent" (\Seen) {<size>}` | Sets `emails.imap_mailbox = 'Sent'`, `imap_jobs.status = 'completed'`. |
 
