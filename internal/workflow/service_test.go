@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 
 	"github.com/google/uuid"
@@ -19,6 +20,7 @@ type fakeWorkflowStore struct {
 	jobs         []sqlc.IMAPJob
 	threadEvents []sqlc.ThreadEvent
 	auditLogs    []sqlc.AuditLog
+	failEnqueue  bool
 }
 
 func newFakeWorkflowStore() *fakeWorkflowStore {
@@ -92,6 +94,9 @@ func (f *fakeWorkflowStore) GetSystemSettings(_ context.Context) (sqlc.SystemSet
 }
 
 func (f *fakeWorkflowStore) EnqueueIMAPJob(_ context.Context, job sqlc.IMAPJob) (sqlc.IMAPJob, error) {
+	if f.failEnqueue {
+		return sqlc.IMAPJob{}, errors.New("enqueue failed")
+	}
 	job.ID = uuid.New()
 	f.jobs = append(f.jobs, job)
 	return job, nil
@@ -124,6 +129,47 @@ func (f *fakeWorkflowStore) InsertAuditLog(_ context.Context, entry sqlc.AuditLo
 func (f *fakeWorkflowStore) InsertThreadEvent(_ context.Context, ev sqlc.ThreadEvent) error {
 	f.threadEvents = append(f.threadEvents, ev)
 	return nil
+}
+
+func (f *fakeWorkflowStore) InTransaction(_ context.Context, fn func(workflow.Store, audit.Store) error) error {
+	copyStore := *f
+	copyStore.threads = maps.Clone(f.threads)
+	copyStore.jobs = append([]sqlc.IMAPJob(nil), f.jobs...)
+	copyStore.threadEvents = append([]sqlc.ThreadEvent(nil), f.threadEvents...)
+	if err := fn(&copyStore, &copyStore); err != nil {
+		return err
+	}
+	*f = copyStore
+	return nil
+}
+
+func TestCompleteFromNewIsAtomic(t *testing.T) {
+	store := newFakeWorkflowStore()
+	id := uuid.New()
+	store.threads[id] = sqlc.Thread{ID: id, AccountID: "support", Status: sqlc.ThreadStatusNew}
+	mailbox, uid := "INBOX", int64(42)
+	store.emails[id] = []sqlc.Email{{ID: uuid.New(), ThreadID: id, AccountID: "support", Direction: "inbound", IMAPMailbox: &mailbox, IMAPUID: &uid}}
+	svc := workflow.NewService(store, audit.NewLogger(store, nil), nil)
+	store.failEnqueue = true
+	if err := svc.CompleteFromNew(context.Background(), id, nil); err == nil {
+		t.Fatal("expected enqueue failure")
+	}
+	if store.threads[id].Status != sqlc.ThreadStatusNew || len(store.threadEvents) != 0 || len(store.jobs) != 0 {
+		t.Fatal("failed operation did not roll back")
+	}
+	store.failEnqueue = false
+	if err := svc.CompleteFromNew(context.Background(), id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if store.threads[id].Status != sqlc.ThreadStatusCompleted || len(store.threadEvents) != 2 || len(store.jobs) != 1 || store.jobs[0].JobType != "move_to_archive" || store.jobs[0].AccountID != "support" {
+		t.Fatalf("unexpected result: thread=%+v events=%+v jobs=%+v", store.threads[id], store.threadEvents, store.jobs)
+	}
+	if err := svc.CompleteFromNew(context.Background(), id, nil); !errors.Is(err, workflow.ErrInvalidTransition) {
+		t.Fatalf("expected invalid transition, got %v", err)
+	}
+	if len(store.threadEvents) != 2 || len(store.jobs) != 1 {
+		t.Fatal("invalid transition changed state")
+	}
 }
 
 func TestWorkflowTransitionsAndIMAPJobQueueing(t *testing.T) {

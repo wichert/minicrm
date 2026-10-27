@@ -34,6 +34,11 @@ func NewLogger(store Store, slogLogger *slog.Logger) *Logger {
 	}
 }
 
+// WithStore creates a logger using the same structured logger and a different persistence store.
+func (l *Logger) WithStore(store Store) *Logger {
+	return NewLogger(store, l.slog)
+}
+
 // SystemEventParams describes a system, user, authentication, or settings audit event.
 type SystemEventParams struct {
 	ActorUserID  *uuid.UUID

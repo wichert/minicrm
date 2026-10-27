@@ -921,6 +921,11 @@ const threadDetailBody = `
         <input type="hidden" name="status" value="in_progress">
         <button type="submit" class="btn btn-primary">Start working</button>
       </form>
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Mark this thread complete and move its messages to the Archive folder?" data-confirm-action="Move to Archive">
+        <input type="hidden" name="status" value="completed">
+        <input type="hidden" name="complete_from_new" value="1">
+        <button type="submit" class="btn btn-primary">Mark complete</button>
+      </form>
       <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Mark this thread as spam and move its messages to the Junk folder?" data-confirm-action="Move to Junk">
         <input type="hidden" name="status" value="spam">
         <button type="submit" class="btn btn-danger">Mark as spam</button>

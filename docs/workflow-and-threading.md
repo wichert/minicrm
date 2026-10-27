@@ -4,6 +4,10 @@ This document describes how MiniCRM links incoming and outgoing replies into con
 
 ---
 
+## Completing new conversations
+
+An operator may mark a new conversation complete in one action. `CompleteFromNew` locks the thread and atomically applies the existing `new → in_progress → completed` transitions, records both events and queues the Archive moves. A failed write rolls back the whole operation; this does not add a direct state-machine transition.
+
 ## Customer history
 
 Thread details list other conversations matching the same customer email address, across only the mail accounts accessible to the operator. This is an email-address match, not a resolved customer identity: aliases and changed addresses are not linked. History links open separately to avoid replacing the current composer. The panel shows up to 100 most recent matches; use inbox search for additional results.

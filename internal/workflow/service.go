@@ -45,6 +45,31 @@ func (a QueriesAdapter) TouchThreadLastMessageAt(ctx context.Context, id uuid.UU
 	return a.Queries.TouchThreadLastMessageAt(ctx, id, src.LastMessageAt)
 }
 
+// AtomicStore runs a workflow operation and its audit writes in one transaction.
+type AtomicStore interface {
+	InTransaction(context.Context, func(Store, audit.Store) error) error
+}
+
+// InTransaction binds workflow and audit operations to a single database transaction.
+func (a QueriesAdapter) InTransaction(ctx context.Context, fn func(Store, audit.Store) error) error {
+	tx, err := a.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin workflow transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := a.WithTx(tx)
+	if err := fn(lockedQueriesAdapter{QueriesAdapter{Queries: q}}, q); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+type lockedQueriesAdapter struct{ QueriesAdapter }
+
+func (a lockedQueriesAdapter) GetThreadByID(ctx context.Context, id uuid.UUID) (sqlc.Thread, error) {
+	return a.LockThreadByID(ctx, id)
+}
+
 // Service manages thread state transitions, reassignments, and Reopen & Merge operations.
 type Service struct {
 	store     Store
@@ -104,6 +129,28 @@ func (s *Service) Transition(ctx context.Context, threadID uuid.UUID, targetStat
 		}
 	}
 	return nil
+}
+
+// CompleteFromNew atomically records both legal transitions and queues the archive move.
+func (s *Service) CompleteFromNew(ctx context.Context, threadID uuid.UUID, actorID *uuid.UUID) error {
+	atomicStore, ok := s.store.(AtomicStore)
+	if !ok {
+		return errors.New("workflow store does not support transactions")
+	}
+	err := atomicStore.InTransaction(ctx, func(store Store, auditStore audit.Store) error {
+		txService := NewService(store, s.audit.WithStore(auditStore), nil)
+		if err := txService.Transition(ctx, threadID, sqlc.ThreadStatusInProgress, actorID); err != nil {
+			return err
+		}
+		return txService.Transition(ctx, threadID, sqlc.ThreadStatusCompleted, actorID)
+	})
+	if err == nil && s.jobWakeCh != nil {
+		select {
+		case s.jobWakeCh <- struct{}{}:
+		default:
+		}
+	}
+	return err
 }
 
 func (s *Service) enqueueFolderMoveJobs(ctx context.Context, threadID uuid.UUID, targetStatus sqlc.ThreadStatus) error {
