@@ -8,6 +8,28 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
+  document.querySelectorAll("[data-tab-strip]").forEach(function (strip) {
+    var tabs = strip.querySelector(".tabs");
+    if (!tabs) {
+      return;
+    }
+    function updateOverflow() {
+      strip.dataset.overflowStart = tabs.scrollLeft > 1 ? "true" : "false";
+      strip.dataset.overflowEnd = tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1 ? "true" : "false";
+    }
+    tabs.addEventListener("scroll", updateOverflow, { passive: true });
+    tabs.querySelectorAll(".tab").forEach(function (tab) {
+      tab.addEventListener("focus", function () {
+        tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+      });
+    });
+    window.addEventListener("resize", updateOverflow);
+    if (typeof ResizeObserver === "function") {
+      new ResizeObserver(updateOverflow).observe(tabs);
+    }
+    updateOverflow();
+  });
+
   // Confirm consequential actions in an accessible in-page dialog. When <dialog> is
   // unavailable the form keeps its native submit path and submits directly.
   var dialog = document.getElementById("confirm-dialog");

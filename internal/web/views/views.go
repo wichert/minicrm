@@ -810,6 +810,7 @@ const inboxBody = `
   <a class="btn btn-secondary btn-small" href="/threads?status={{.StatusFilter}}&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}">Refresh</a>
 </div>
 <div class="toolbar">
+  <div class="tab-strip" data-tab-strip>
   <nav class="tabs" aria-label="Thread status">
     <a class="tab" href="/threads?status=open&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "open"}} aria-current="true"{{end}}>Open</a>
     <a class="tab" href="/threads?status=new&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "new"}} aria-current="true"{{end}}>New</a>
@@ -818,6 +819,7 @@ const inboxBody = `
     <a class="tab" href="/threads?status=spam&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "spam"}} aria-current="true"{{end}}>Spam</a>
     <a class="tab" href="/threads?status=all&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "all"}} aria-current="true"{{end}}>All</a>
   </nav>
+  </div>
   <form method="get" action="/threads" class="filter-inline">
     <input type="hidden" name="status" value="{{.StatusFilter}}">
     <label class="inline-field">Assignee

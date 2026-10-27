@@ -1086,6 +1086,36 @@ func newMultipartRequest(t *testing.T, method, target string, fields url.Values)
 	return req
 }
 
+func TestInboxStatusTabsKeepOverflowAndKeyboardAffordances(t *testing.T) {
+	_, _, router, _, _ := buildAccountTestServer(t)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=spam", nil))
+	body := rec.Body.String()
+	for _, want := range []string{`data-tab-strip`, `aria-label="Thread status"`, `aria-current="true">Spam</a>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("inbox is missing %q", want)
+		}
+	}
+	js, err := static.FS.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`addEventListener("focus"`, `scrollIntoView`, `overflowStart`, `overflowEnd`} {
+		if !strings.Contains(string(js), want) {
+			t.Errorf("tab behavior is missing %q", want)
+		}
+	}
+	css, err := static.FS.ReadFile("app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`@media (max-width: 768px)`, `.tab-strip[data-overflow-end="true"]`, `:focus-visible`} {
+		if !strings.Contains(string(css), want) {
+			t.Errorf("tab styles are missing %q", want)
+		}
+	}
+}
+
 func TestInboxUnknownStatusFilterFallsBackToOpenQueue(t *testing.T) {
 	_, store, router, _, _ := buildAccountTestServer(t)
 	threadID := uuid.New()
