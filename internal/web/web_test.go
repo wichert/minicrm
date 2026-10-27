@@ -5,11 +5,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
+	"html"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -204,10 +207,25 @@ func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) 
 		if len(f.AllowedAccounts) > 0 && !allowed {
 			continue
 		}
-		out = append(out, t)
-		if f.Limit > 0 && len(out) >= f.Limit {
-			break
+		if f.Search != "" && !strings.Contains(strings.ToLower(t.SubjectDisplay), strings.ToLower(f.Search)) &&
+			!strings.Contains(strings.ToLower(t.CustomerEmail), strings.ToLower(f.Search)) &&
+			!strings.Contains(strings.ToLower(t.CustomerName), strings.ToLower(f.Search)) {
+			continue
 		}
+		if f.BeforeTime != nil && f.BeforeID != nil &&
+			(t.LastMessageAt.After(*f.BeforeTime) || (t.LastMessageAt.Equal(*f.BeforeTime) && strings.Compare(t.ID.String(), f.BeforeID.String()) >= 0)) {
+			continue
+		}
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LastMessageAt.Equal(out[j].LastMessageAt) {
+			return strings.Compare(out[i].ID.String(), out[j].ID.String()) > 0
+		}
+		return out[i].LastMessageAt.After(out[j].LastMessageAt)
+	})
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
 	}
 	return out, nil
 }
@@ -1116,6 +1134,55 @@ func TestInboxStatusTabsKeepOverflowAndKeyboardAffordances(t *testing.T) {
 	}
 }
 
+func TestInboxKeysetPaginationAndSearch(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	for i := 0; i < 105; i++ {
+		id := uuid.New()
+		store.threads[id] = sqlc.Thread{ID: id, AccountID: "support", SubjectDisplay: fmt.Sprintf("Match %03d", i),
+			CustomerEmail: "client@example.com", Status: sqlc.ThreadStatusNew, LastMessageAt: now}
+	}
+	secretID := uuid.New()
+	store.threads[secretID] = sqlc.Thread{ID: secretID, AccountID: "secret", SubjectDisplay: "Match private", Status: sqlc.ThreadStatusNew, LastMessageAt: now}
+	path := "/threads?status=new&account=support&q=Match"
+	first := httptest.NewRecorder()
+	router.ServeHTTP(first, httptest.NewRequest(http.MethodGet, path, nil))
+	body := first.Body.String()
+	if first.Code != http.StatusOK || strings.Contains(body, "Match private") || strings.Count(body, `class="thread-link"`) != 100 {
+		t.Fatalf("unexpected first page: status %d, links %d", first.Code, strings.Count(body, `class="thread-link"`))
+	}
+	const marker = `href="`
+	end := strings.Index(body, `">Older threads</a>`)
+	if end < 0 {
+		t.Fatal("missing next page")
+	}
+	start := strings.LastIndex(body[:end], marker)
+	next := html.UnescapeString(body[start+len(marker) : end])
+	parsed, err := url.Parse(next)
+	if err != nil || parsed.Query().Get("q") != "Match" || parsed.Query().Get("account") != "support" {
+		t.Fatalf("invalid next link %q: %v", next, err)
+	}
+	newID := uuid.New()
+	store.threads[newID] = sqlc.Thread{ID: newID, AccountID: "support", SubjectDisplay: "Match inserted", Status: sqlc.ThreadStatusNew, LastMessageAt: now.Add(time.Second)}
+	second := httptest.NewRecorder()
+	router.ServeHTTP(second, httptest.NewRequest(http.MethodGet, next, nil))
+	secondBody := second.Body.String()
+	if second.Code != http.StatusOK || strings.Count(secondBody, `class="thread-link"`) != 5 || strings.Contains(secondBody, "Match inserted") || strings.Contains(secondBody, `>Older threads</a>`) {
+		t.Fatalf("unexpected second page: status %d, links %d", second.Code, strings.Count(secondBody, `class="thread-link"`))
+	}
+	for i := 0; i < 105; i++ {
+		subject := fmt.Sprintf("Match %03d", i)
+		if strings.Contains(body, subject) == strings.Contains(secondBody, subject) {
+			t.Fatalf("%s should appear on exactly one page", subject)
+		}
+	}
+	bad := httptest.NewRecorder()
+	router.ServeHTTP(bad, httptest.NewRequest(http.MethodGet, "/threads?before=invalid&id=invalid", nil))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("invalid cursor returned %d", bad.Code)
+	}
+}
+
 func TestInboxUnknownStatusFilterFallsBackToOpenQueue(t *testing.T) {
 	_, store, router, _, _ := buildAccountTestServer(t)
 	threadID := uuid.New()
@@ -1675,7 +1742,7 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 		`<link rel="manifest" href="/manifest.webmanifest">`,
 		`<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">`,
 		`<meta name="theme-color" content="#14142b">`,
-		`href="/threads?status=new&amp;assignee=me&amp;account=">Refresh</a>`,
+		`href="/threads?status=new&amp;assignee=me">Refresh</a>`,
 	} {
 		if !strings.Contains(inboxHTML, want) {
 			t.Fatalf("expected %q in inbox HTML", want)

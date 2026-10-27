@@ -64,6 +64,7 @@ MiniCRM is configured via environment variables:
 | `MINICRM_BOOTSTRAP_ADMIN_EMAIL` | **Yes** | — | Email of the initial admin user (granted access to all configured accounts) |
 | `MINICRM_BOOTSTRAP_ADMIN_NAME` | No | `Admin` | Display name of the initial bootstrap admin |
 | `MINICRM_DISPLAY_TIMEZONE` | No | `UTC` | Initial IANA display timezone (e.g. `Europe/Amsterdam`) |
+| `MINICRM_INBOX_PAGE_SIZE` | No | `100` | Inbox page size, from 1 to 500 |
 | `MINICRM_MAIL_DOMAIN` | No | `minicrm.local` | Domain used when generating outbound `Message-ID` headers |
 | `MINICRM_COOKIE_SECURE` | No | `true` | Set `Secure` attribute and `__Host-` prefix on session cookies |
 | `MINICRM_APP_NAME` | No | `MiniCRM` | Per-instance application name used in page titles and `/manifest.webmanifest` |

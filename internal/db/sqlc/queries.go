@@ -345,6 +345,9 @@ type ListThreadsFilter struct {
 	Unassigned      bool
 	AccountID       *string
 	AllowedAccounts []string
+	Search          string
+	BeforeTime      *time.Time
+	BeforeID        *uuid.UUID
 	Limit           int
 }
 
@@ -353,6 +356,9 @@ type ListThreadsFilter struct {
 func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Thread, error) {
 	if f.Limit <= 0 {
 		f.Limit = 100
+	}
+	if (f.BeforeTime == nil) != (f.BeforeID == nil) {
+		return nil, fmt.Errorf("inbox cursor must include both time and ID")
 	}
 	const query = `
 		SELECT t.id, t.account_id, t.subject_normalized, t.subject_display, t.status, t.assignee_id,
@@ -382,9 +388,13 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		  AND ($4::text IS NULL OR t.account_id = $4)
 		  AND ($5::text[] IS NULL OR t.account_id = ANY($5))
 		  AND (NOT $6::boolean OR t.status IN ('new', 'in_progress'))
-		ORDER BY t.last_message_at DESC
-		LIMIT $7`
-	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Limit)
+		  AND ($7::text = '' OR strpos(lower(t.subject_display), lower($7)) > 0
+		       OR strpos(lower(t.customer_email::text), lower($7)) > 0
+		       OR strpos(lower(COALESCE(t.customer_name, '')), lower($7)) > 0)
+		  AND ($8::timestamptz IS NULL OR (t.last_message_at, t.id) < ($8, $9::uuid))
+		ORDER BY t.last_message_at DESC, t.id DESC
+		LIMIT $10`
+	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.Limit)
 	if err != nil {
 		return nil, err
 	}

@@ -88,6 +88,7 @@ type Server struct {
 	sessions    *scs.SessionManager
 	accounts    []AccountConfig
 	branding    AppBranding
+	pageSize    int
 }
 
 // NewServer constructs a web Server.
@@ -111,7 +112,16 @@ func NewServer(
 		sessions:    sessions,
 		accounts:    accounts,
 		branding:    defaultAppBranding(),
+		pageSize:    threadListLimit,
 	}
+}
+
+// WithInboxPageSize sets the maximum number of inbox rows shown per page.
+func (s *Server) WithInboxPageSize(size int) *Server {
+	if size > 0 && size <= 500 {
+		s.pageSize = size
+	}
+	return s
 }
 
 // WithBranding sets per-instance PWA branding on the Server.
@@ -412,6 +422,24 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	search := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(search) > 200 {
+		s.renderError(w, r, http.StatusBadRequest, "Invalid search", "Search terms must be at most 200 bytes.")
+		return
+	}
+	var beforeTime *time.Time
+	var beforeID *uuid.UUID
+	before, id := r.URL.Query().Get("before"), r.URL.Query().Get("id")
+	if before != "" || id != "" {
+		parsedTime, timeErr := time.Parse(time.RFC3339Nano, before)
+		parsedID, idErr := uuid.Parse(id)
+		if timeErr != nil || idErr != nil {
+			s.renderError(w, r, http.StatusBadRequest, "Invalid page", "That inbox page link is not valid.")
+			return
+		}
+		beforeTime, beforeID = &parsedTime, &parsedID
+	}
+
 	var threads []sqlc.Thread
 	if len(user.AllowedAccounts) > 0 {
 		var err error
@@ -422,13 +450,25 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 			Unassigned:      unassigned,
 			AccountID:       accountIDFilter,
 			AllowedAccounts: user.AllowedAccounts,
-			Limit:           threadListLimit,
+			Search:          search,
+			BeforeTime:      beforeTime,
+			BeforeID:        beforeID,
+			Limit:           s.pageSize + 1,
 		})
 		if err != nil {
 			s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not load the conversation threads. Please try again.")
 			return
 		}
 	}
+	nextURL := ""
+	if len(threads) > s.pageSize {
+		threads = threads[:s.pageSize]
+		last := threads[len(threads)-1]
+		query := url.Values{"status": {statusStr}, "assignee": {assigneeFilter}, "account": {accountFilter}, "q": {search},
+			"before": {last.LastMessageAt.UTC().Format(time.RFC3339Nano)}, "id": {last.ID.String()}}
+		nextURL = "/threads?" + query.Encode()
+	}
+	refreshURL := r.URL.RequestURI()
 	users, _ := s.store.ListUsers(ctx)
 	userNames := make(map[uuid.UUID]string, len(users))
 	for _, u := range users {
@@ -492,8 +532,9 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		ShowAccountUI:  user.HasMultipleAccounts(),
 		AccountFilter:  accountFilter,
 		Accounts:       s.accessibleAccounts(user),
-		Truncated:      len(threads) >= threadListLimit,
-		Limit:          threadListLimit,
+		Search:         search,
+		NextURL:        nextURL,
+		RefreshURL:     refreshURL,
 	}, partial); err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not render the conversation threads.")
 	}
