@@ -28,10 +28,11 @@ type OutgoingAttachmentInput struct {
 
 // ComposeReplyParams describes an operator's outbound reply to a thread.
 type ComposeReplyParams struct {
-	ThreadID     uuid.UUID
-	SenderUserID uuid.UUID
-	BodyText     string
-	Attachments  []OutgoingAttachmentInput
+	ThreadID      uuid.UUID
+	SenderUserID  uuid.UUID
+	BodyText      string
+	Attachments   []OutgoingAttachmentInput
+	DraftRevision *uuid.UUID
 }
 
 // SMTPTransport abstracts SMTP message delivery using username + password authentication.
@@ -235,6 +236,21 @@ func (w *OutboxWorker) composeAndQueueReply(ctx context.Context, p ComposeReplyP
 	}
 	if thread.Status == sqlc.ThreadStatusCompleted {
 		return sqlc.Email{}, errors.New("replies are disabled on completed threads")
+	}
+	if drafts, ok := w.store.(interface {
+		CurrentReplyDraft(context.Context, uuid.UUID) (sqlc.ReplyDraft, error)
+		ClearReplyDraft(context.Context, sqlc.Thread, *uuid.UUID, string) error
+	}); ok {
+		current, err := drafts.CurrentReplyDraft(ctx, thread.ID)
+		if err != nil {
+			return sqlc.Email{}, err
+		}
+		if p.DraftRevision == nil || *p.DraftRevision != current.Revision {
+			return sqlc.Email{}, sqlc.ErrDraftConflict
+		}
+		if err := drafts.ClearReplyDraft(ctx, thread, &p.SenderUserID, "reply_sent"); err != nil {
+			return sqlc.Email{}, err
+		}
 	}
 	sender, err := w.senderFor(thread.AccountID)
 	if err != nil {

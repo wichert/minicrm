@@ -122,6 +122,15 @@ func (s *Service) transition(ctx context.Context, threadID uuid.UUID, targetStat
 		return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, thread.Status, targetStatus)
 	}
 
+	if targetStatus == sqlc.ThreadStatusSpam || targetStatus == sqlc.ThreadStatusCompleted {
+		if draftStore, ok := s.store.(interface {
+			ClearReplyDraft(context.Context, sqlc.Thread, *uuid.UUID, string) error
+		}); ok {
+			if err := draftStore.ClearReplyDraft(ctx, thread, actorID, "terminal_transition"); err != nil {
+				return err
+			}
+		}
+	}
 	if err := s.store.UpdateThreadStatus(ctx, threadID, targetStatus); err != nil {
 		return fmt.Errorf("update thread status: %w", err)
 	}

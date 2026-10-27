@@ -115,6 +115,7 @@ type ThreadDetailViewData struct {
 	AccountFromAddress string
 	ReplyAllowed       bool
 	ReplyDraft         string
+	DraftRevision      string
 	PreviousThreads    []ThreadSummaryItem
 	// Errors are transition, assignment, or merge errors rendered in the thread header card.
 	Errors []string
@@ -782,7 +783,7 @@ const inboxTablePartial = `
       <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}" data-row-href="/threads/{{.Thread.ID}}">
         {{if $.ShowAccountUI}}<td class="account-cell"><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
         <td class="thread-cell">
-          <a class="thread-link" href="/threads/{{.Thread.ID}}">{{.Thread.SubjectDisplay}}</a>{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
+          <a class="thread-link" href="/threads/{{.Thread.ID}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
           <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
         </td>
         <td class="customer-cell">
@@ -1074,12 +1075,16 @@ const threadDetailBody = `
     <ul>{{range .ReplyErrors}}<li>{{.}}</li>{{end}}</ul>
   </div>
   {{end}}
-  <form method="post" action="/threads/{{.Thread.ID}}/reply" enctype="multipart/form-data" class="reply-form">
+  <form method="post" action="/threads/{{.Thread.ID}}/reply" enctype="multipart/form-data" class="reply-form" data-draft-url="/threads/{{.Thread.ID}}/draft">
+    <input type="hidden" name="draft_revision" value="{{.DraftRevision}}">
     <div class="field">
       <label for="reply-body">Message</label>
       <textarea id="reply-body" class="reply-textarea" name="body_text" rows="6" required placeholder="Write your reply...">{{.ReplyDraft}}</textarea>
     </div>
     <div class="reply-footer">
+      <button type="button" class="btn btn-secondary" data-save-draft>Save draft</button>
+      <button type="button" class="btn btn-secondary" data-discard-draft>Discard draft</button>
+      <span role="status" aria-live="polite" data-draft-status></span>
       <label class="file-field" for="reply-attachment">Attachment (optional)
         <input id="reply-attachment" type="file" name="attachment">
       </label>
