@@ -100,6 +100,20 @@ func IsValidTransition(from, to sqlc.ThreadStatus) bool {
 
 // Transition validates and executes a state transition on threadID, enqueueing IMAP moves when needed.
 func (s *Service) Transition(ctx context.Context, threadID uuid.UUID, targetStatus sqlc.ThreadStatus, actorID *uuid.UUID) error {
+	if atomicStore, ok := s.store.(AtomicStore); ok {
+		err := atomicStore.InTransaction(ctx, func(store Store, auditStore audit.Store) error {
+			txService := NewService(store, s.audit.WithStore(auditStore), nil)
+			return txService.transition(ctx, threadID, targetStatus, actorID)
+		})
+		if err == nil && (targetStatus == sqlc.ThreadStatusSpam || targetStatus == sqlc.ThreadStatusCompleted) {
+			s.wakeJobs()
+		}
+		return err
+	}
+	return s.transition(ctx, threadID, targetStatus, actorID)
+}
+
+func (s *Service) transition(ctx context.Context, threadID uuid.UUID, targetStatus sqlc.ThreadStatus, actorID *uuid.UUID) error {
 	thread, err := s.store.GetThreadByID(ctx, threadID)
 	if err != nil {
 		return fmt.Errorf("load thread %s: %w", threadID, err)
@@ -139,18 +153,24 @@ func (s *Service) CompleteFromNew(ctx context.Context, threadID uuid.UUID, actor
 	}
 	err := atomicStore.InTransaction(ctx, func(store Store, auditStore audit.Store) error {
 		txService := NewService(store, s.audit.WithStore(auditStore), nil)
-		if err := txService.Transition(ctx, threadID, sqlc.ThreadStatusInProgress, actorID); err != nil {
+		if err := txService.transition(ctx, threadID, sqlc.ThreadStatusInProgress, actorID); err != nil {
 			return err
 		}
-		return txService.Transition(ctx, threadID, sqlc.ThreadStatusCompleted, actorID)
+		return txService.transition(ctx, threadID, sqlc.ThreadStatusCompleted, actorID)
 	})
-	if err == nil && s.jobWakeCh != nil {
+	if err == nil {
+		s.wakeJobs()
+	}
+	return err
+}
+
+func (s *Service) wakeJobs() {
+	if s.jobWakeCh != nil {
 		select {
 		case s.jobWakeCh <- struct{}{}:
 		default:
 		}
 	}
-	return err
 }
 
 func (s *Service) enqueueFolderMoveJobs(ctx context.Context, threadID uuid.UUID, targetStatus sqlc.ThreadStatus) error {
