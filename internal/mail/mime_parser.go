@@ -17,6 +17,7 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/wichert/minicrm/internal/db/sqlc"
 	"github.com/wichert/minicrm/internal/threading"
+	"golang.org/x/net/html"
 )
 
 // ParsedAttachment holds an extracted MIME attachment and its raw payload.
@@ -47,8 +48,7 @@ type ParsedEmail struct {
 }
 
 var (
-	remoteImgSrcRe = regexp.MustCompile(`(?i)(<img\b[^>]*?)\bsrc=(["']https?://[^"']+["'])`)
-	htmlPolicy     = buildStrictEmailHTMLPolicy()
+	htmlPolicy = buildStrictEmailHTMLPolicy()
 )
 
 func buildStrictEmailHTMLPolicy() *bluemonday.Policy {
@@ -77,8 +77,46 @@ func SanitizeEmailHTML(rawHTML string) string {
 	if strings.TrimSpace(rawHTML) == "" {
 		return ""
 	}
-	rewritten := remoteImgSrcRe.ReplaceAllString(rawHTML, `${1}data-blocked-src=${2}`)
-	return htmlPolicy.Sanitize(rewritten)
+	// Parse attributes before rewriting so unquoted URLs, whitespace, and entities
+	// are handled consistently. Untrusted preexisting markers are never retained.
+	z := html.NewTokenizer(strings.NewReader(rawHTML))
+	var rewritten strings.Builder
+	for {
+		typ := z.Next()
+		if typ == html.ErrorToken {
+			break
+		}
+		if typ != html.StartTagToken && typ != html.SelfClosingTagToken {
+			rewritten.Write(z.Raw())
+			continue
+		}
+		token := z.Token()
+		if token.Data != "img" {
+			rewritten.WriteString(token.String())
+			continue
+		}
+		attrs := make([]html.Attribute, 0, len(token.Attr))
+		remote := ""
+		for _, attr := range token.Attr {
+			if attr.Key == "data-blocked-src" {
+				continue
+			}
+			value := strings.ToLower(strings.TrimSpace(attr.Val))
+			if attr.Key == "src" && (strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")) {
+				if remote == "" {
+					remote = strings.TrimSpace(attr.Val)
+				}
+				continue
+			}
+			attrs = append(attrs, attr)
+		}
+		if remote != "" {
+			attrs = append(attrs, html.Attribute{Key: "data-blocked-src", Val: remote})
+		}
+		token.Attr = attrs
+		rewritten.WriteString(token.String())
+	}
+	return htmlPolicy.Sanitize(rewritten.String())
 }
 
 // ParseRFC5322 parses a raw RFC 5322 MIME message into a ParsedEmail.

@@ -588,12 +588,13 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		atts, _ := s.store.ListAttachmentsByEmail(ctx, em.ID)
 		listedAtts := views.FilterListedAttachments(em.BodyHTMLSanitized, atts)
 		emailViews = append(emailViews, views.EmailItemView{
-			Email:         em,
-			FormattedSent: views.FormatTimestamp(em.SentAt, displayTZ),
-			FullSent:      views.FormatTimestampFull(em.SentAt, displayTZ),
-			Snippet:       views.ExtractEmailSnippet(em.BodyText, em.BodyHTMLSanitized, 110),
-			Attachments:   listedAtts,
-			IsLatest:      i == len(emails)-1,
+			Email:           em,
+			FormattedSent:   views.FormatTimestamp(em.SentAt, displayTZ),
+			FullSent:        views.FormatTimestampFull(em.SentAt, displayTZ),
+			Snippet:         views.ExtractEmailSnippet(em.BodyText, em.BodyHTMLSanitized, 110),
+			Attachments:     listedAtts,
+			HasRemoteImages: len(blockedImageURLs(em.BodyHTMLSanitized)) > 0,
+			IsLatest:        i == len(emails)-1,
 		})
 	}
 

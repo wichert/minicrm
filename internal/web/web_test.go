@@ -705,6 +705,26 @@ func TestCompleteFromNewHTTP(t *testing.T) {
 	}
 }
 
+func TestRemoteImageAccessAndNotice(t *testing.T) {
+	srv, store, router, _, singleUser := buildAccountTestServer(t)
+	threadID, emailID := uuid.New(), uuid.New()
+	store.threads[threadID] = sqlc.Thread{ID: threadID, AccountID: "sales", Status: sqlc.ThreadStatusNew, LastMessageAt: time.Now()}
+	store.emails[emailID] = sqlc.Email{ID: emailID, ThreadID: threadID, AccountID: "sales", BodyHTMLSanitized: `<img data-blocked-src="https://example.com/pixel">`}
+	page := httptest.NewRecorder()
+	router.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String(), nil))
+	if !strings.Contains(page.Body.String(), "Remote images blocked for your privacy") || !strings.Contains(page.Body.String(), "Load images for this message") {
+		t.Fatal("missing image consent notice")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/emails/"+emailID.String()+"/images/0", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), singleUser))
+	req = web.WithChiParam(web.WithChiParam(req, "id", emailID.String()), "index", "0")
+	rec := httptest.NewRecorder()
+	srv.HandleRemoteImage(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("inaccessible image: %d", rec.Code)
+	}
+}
+
 func TestAccountIsolationAndConditionalAccountsUI(t *testing.T) {
 	srv, store, router, multiUser, _ := buildAccountTestServer(t)
 	_ = srv

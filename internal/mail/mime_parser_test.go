@@ -34,6 +34,19 @@ func TestSanitizeEmailHTML(t *testing.T) {
 	}
 }
 
+func TestSanitizeRemoteImageAttributeVariants(t *testing.T) {
+	input := `<img src = https://example.com/a><img src="https://example.com/?a=1&amp;b=2"><img data-blocked-src="https://forged.invalid/x" src="cid:x"><img src="https&#58;//example.com/b">`
+	got := mail.SanitizeEmailHTML(input)
+	for _, want := range []string{`data-blocked-src="https://example.com/a"`, `data-blocked-src="https://example.com/?a=1&amp;b=2"`, `data-blocked-src="https://example.com/b"`, `src="cid:x"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %s", want, got)
+		}
+	}
+	if strings.Contains(got, "forged.invalid") {
+		t.Fatalf("forged marker retained: %s", got)
+	}
+}
+
 func TestParseRFC5322MultipartWithAttachment(t *testing.T) {
 	raw := "From: Alice <alice@client.com>\r\n" +
 		"To: Support <support@company.com>\r\n" +
