@@ -43,6 +43,7 @@ type ThreadSummaryItem struct {
 	LatestSnippet   string
 	LatestDirection string
 	MessageCount    int
+	CanAssignToMe   bool
 }
 
 // InboxViewData holds data for rendering the threads inbox view.
@@ -795,7 +796,13 @@ const inboxTablePartial = `
           <span class="customer-email" title="{{.Thread.CustomerEmail}}">{{.Thread.CustomerEmail}}</span>
         </td>
         <td class="status-cell"><span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span></td>
-        <td class="assignee-cell">{{if .AssigneeName}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}</td>
+        <td class="assignee-cell">{{if .AssigneeName}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}
+          {{if .CanAssignToMe}}<form method="post" action="/threads/{{.Thread.ID}}/assign" class="inline-form">
+            <input type="hidden" name="assignee_id" value="{{$.CurrentUser.ID}}">
+            <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+            <button type="submit" class="btn btn-secondary btn-small" aria-label="Assign {{.Thread.SubjectDisplay}} to me">Assign to me</button>
+          </form>{{end}}
+        </td>
         <td class="nowrap age-cell">
           {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="First message received {{.FullTime}}">{{.WaitLabel}}</span>
           {{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}
@@ -1084,7 +1091,7 @@ const threadDetailBody = `
     <div><dt>To</dt><dd>{{if .Thread.CustomerName}}{{.Thread.CustomerName}} {{end}}&lt;{{.Thread.CustomerEmail}}&gt;</dd></div>
   </dl>
   {{if eq .Thread.Status "new"}}
-  <p class="helper">Sending a reply assigns this thread to you and moves it to In progress.</p>
+  <p class="helper">If this thread is unassigned, sending will assign it to you. Sending a reply also moves a new thread to In progress.</p>
   {{end}}
   {{if .ReplyErrors}}
   <div class="form-errors" role="alert">

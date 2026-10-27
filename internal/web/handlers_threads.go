@@ -507,6 +507,7 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 			LatestSnippet:   views.ExtractEmailSnippet(th.LatestBodyText, th.LatestBodyHTML, 130),
 			LatestDirection: th.LatestDirection,
 			MessageCount:    th.MessageCount,
+			CanAssignToMe:   (th.Status == sqlc.ThreadStatusNew || th.Status == sqlc.ThreadStatusInProgress) && (th.AssigneeID == nil || *th.AssigneeID != user.ID),
 		})
 	}
 
@@ -899,6 +900,11 @@ func (s *Server) HandleAssignThread(w http.ResponseWriter, r *http.Request) {
 		assigneeName = assignee.DisplayName
 	}
 	s.setFlash(r, flashKindSuccess, fmt.Sprintf("Thread assigned to %s.", assigneeName))
+	if returnTo := sanitizeInboxBackURL(r.FormValue("return_to"), r.Host); returnTo != "" {
+		// #nosec G710 -- sanitizeInboxBackURL permits only the local /threads path.
+		http.Redirect(w, r, returnTo, http.StatusSeeOther)
+		return
+	}
 	redirectToThread(w, r, threadID)
 }
 

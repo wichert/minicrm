@@ -1546,6 +1546,35 @@ func TestBulkSpamRevalidatesAndPreservesFilter(t *testing.T) {
 	}
 }
 
+func TestInboxAssignToMePreservesPageAndEnforcesAccess(t *testing.T) {
+	_, store, router, user, _ := buildAccountTestServer(t)
+	id := uuid.New()
+	store.threads[id] = sqlc.Thread{ID: id, AccountID: "support", SubjectDisplay: "Needs attention", Status: sqlc.ThreadStatusNew, LastMessageAt: time.Now().UTC()}
+	page := "/threads?status=new&q=attention"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, page, nil))
+	if !strings.Contains(rec.Body.String(), `aria-label="Assign Needs attention to me"`) {
+		t.Fatal("missing queue assignment control")
+	}
+	form := url.Values{"assignee_id": {user.ID.String()}, "return_to": {page}}
+	req := httptest.NewRequest(http.MethodPost, "/threads/"+id.String()+"/assign", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != page || store.threads[id].AssigneeID == nil || *store.threads[id].AssigneeID != user.ID {
+		t.Fatalf("assignment failed: %d location=%s thread=%+v", rec.Code, rec.Header().Get("Location"), store.threads[id])
+	}
+	privateID := uuid.New()
+	store.threads[privateID] = sqlc.Thread{ID: privateID, AccountID: "secret", Status: sqlc.ThreadStatusNew}
+	req = httptest.NewRequest(http.MethodPost, "/threads/"+privateID.String()+"/assign", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || store.threads[privateID].AssigneeID != nil {
+		t.Fatal("private assignment was not rejected")
+	}
+}
+
 func TestCompletedThreadAssignmentDisabledAndRejected(t *testing.T) {
 	_, store, router, multiUser, _ := buildAccountTestServer(t)
 	threadID := uuid.New()
