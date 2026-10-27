@@ -20,6 +20,7 @@ type ReplyDraft struct {
 	AccountID  string    `json:"-"`
 	Revision   uuid.UUID `json:"revision"`
 	Body       string    `json:"body"`
+	Formatting string    `json:"formatting"`
 	SessionID  string    `json:"-"`
 	OccurredAt time.Time `json:"occurred_at"`
 	Discarded  bool      `json:"discarded"`
@@ -28,15 +29,15 @@ type ReplyDraft struct {
 // GetReplyDraft returns the most recent version including discard tombstones.
 func (q *Queries) GetReplyDraft(ctx context.Context, threadID uuid.UUID) (ReplyDraft, error) {
 	var d ReplyDraft
-	err := q.db.QueryRow(ctx, `SELECT thread_id, account_id, revision, body, session_id, occurred_at, discarded FROM reply_drafts WHERE thread_id=$1 ORDER BY id DESC LIMIT 1`, threadID).
-		Scan(&d.ThreadID, &d.AccountID, &d.Revision, &d.Body, &d.SessionID, &d.OccurredAt, &d.Discarded)
+	err := q.db.QueryRow(ctx, `SELECT thread_id, account_id, revision, body, formatting, session_id, occurred_at, discarded FROM reply_drafts WHERE thread_id=$1 ORDER BY id DESC LIMIT 1`, threadID).
+		Scan(&d.ThreadID, &d.AccountID, &d.Revision, &d.Body, &d.Formatting, &d.SessionID, &d.OccurredAt, &d.Discarded)
 	return d, err
 }
 
 // AppendReplyDraft appends a revision; caller must hold the thread row lock.
-func (q *Queries) AppendReplyDraft(ctx context.Context, thread Thread, body, session string, discard bool) (ReplyDraft, error) {
-	d := ReplyDraft{ThreadID: thread.ID, AccountID: thread.AccountID, Revision: uuid.New(), Body: body, SessionID: session, Discarded: discard}
-	err := q.db.QueryRow(ctx, `INSERT INTO reply_drafts (thread_id,account_id,revision,body,session_id,discarded) VALUES ($1,$2,$3,$4,$5,$6) RETURNING occurred_at`, d.ThreadID, d.AccountID, d.Revision, d.Body, d.SessionID, d.Discarded).Scan(&d.OccurredAt)
+func (q *Queries) AppendReplyDraft(ctx context.Context, thread Thread, body, formatting, session string, discard bool) (ReplyDraft, error) {
+	d := ReplyDraft{ThreadID: thread.ID, AccountID: thread.AccountID, Revision: uuid.New(), Body: body, Formatting: formatting, SessionID: session, Discarded: discard}
+	err := q.db.QueryRow(ctx, `INSERT INTO reply_drafts (thread_id,account_id,revision,body,formatting,session_id,discarded) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING occurred_at`, d.ThreadID, d.AccountID, d.Revision, d.Body, d.Formatting, d.SessionID, d.Discarded).Scan(&d.OccurredAt)
 	return d, err
 }
 
@@ -46,7 +47,7 @@ func (q *Queries) ClearReplyDraft(ctx context.Context, thread Thread, actor *uui
 	if err != nil {
 		return err
 	}
-	if _, err := q.AppendReplyDraft(ctx, thread, "", "system", true); err != nil {
+	if _, err := q.AppendReplyDraft(ctx, thread, "", "", "system", true); err != nil {
 		return err
 	}
 	if d.Revision == uuid.Nil || d.Discarded || d.Body == "" {
@@ -76,7 +77,7 @@ func (q *Queries) MergeReplyDrafts(ctx context.Context, source, target Thread) e
 	}
 	fromActive := !from.Discarded && from.Body != ""
 	toActive := !to.Discarded && to.Body != ""
-	if fromActive && toActive && from.Body != to.Body {
+	if fromActive && toActive && (from.Body != to.Body || from.Formatting != to.Formatting) {
 		return errors.New("both conversations have different reply drafts; resolve them before merging")
 	}
 	if _, err := q.db.Exec(ctx, `UPDATE reply_drafts SET thread_id=$1 WHERE thread_id=$2`, target.ID, source.ID); err != nil {
@@ -86,7 +87,7 @@ func (q *Queries) MergeReplyDrafts(ctx context.Context, source, target Thread) e
 	if fromActive {
 		chosen = from
 	}
-	_, err = q.AppendReplyDraft(ctx, target, chosen.Body, chosen.SessionID, !fromActive && !toActive)
+	_, err = q.AppendReplyDraft(ctx, target, chosen.Body, chosen.Formatting, chosen.SessionID, !fromActive && !toActive)
 	return err
 }
 

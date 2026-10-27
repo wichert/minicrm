@@ -34,36 +34,44 @@ document.addEventListener("DOMContentLoaded", function () {
     var field = form.querySelector("textarea[name=body_text]");
     var revision = form.querySelector("input[name=draft_revision]");
     var status = form.querySelector("[data-draft-status]");
-    var saved = field.value, timer, saving = false, conflicted = false, sending = false, initialized = false;
+    var formatting = form.querySelector("input[name=body_formatting]");
+    function snapshot() { return JSON.stringify([field.value, formatting.value]); }
+    var saved = snapshot(), timer, saving = false, conflicted = false, sending = false, initialized = false;
     fetch(form.dataset.draftUrl, { credentials: "same-origin" }).then(function (response) {
       if (!response.ok) { throw new Error("Could not check draft."); }
       return response.json();
     }).then(function (draft) {
       if (draft.revision !== revision.value) { conflicted = true; status.textContent = "Draft changed in another session. Copy your text before reloading."; }
-      saved = draft.discarded ? "" : draft.body;
+      saved = JSON.stringify(draft.discarded ? ["", ""] : [draft.body || "", draft.formatting || ""]);
       initialized = true;
-      if (!conflicted && field.value !== saved) { clearTimeout(timer); timer = setTimeout(function () { save(false); }, 3000); }
+      if (!conflicted && snapshot() !== saved) { clearTimeout(timer); timer = setTimeout(function () { save(false); }, 3000); }
     }).catch(function () { status.textContent = "Could not check draft. Reload before sending."; });
     function save(discard) {
       if (!initialized || saving || conflicted || sending) { return; }
-      var before = field.value, value = discard ? "" : before;
+      var before = snapshot(), value = discard ? "" : field.value, format = discard ? "" : formatting.value;
       saving = true;
       status.textContent = "Saving…";
-      fetch(form.dataset.draftUrl, { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revision: revision.value, body: value, discard: discard }) })
+      fetch(form.dataset.draftUrl, { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revision: revision.value, body: value, formatting: format, discard: discard }) })
         .then(function (response) {
           if (response.status === 409) { conflicted = true; throw new Error("Draft changed in another session. Copy your text before reloading."); }
           if (!response.ok) { throw new Error("Could not save draft."); }
           return response.json();
         }).then(function (draft) {
           revision.value = draft.revision;
-          saved = value;
-          if (discard && field.value === before) { field.value = ""; }
+          saved = JSON.stringify([value, format]);
+          if (discard && snapshot() === before) {
+            field.value = "";
+            formatting.value = "";
+            form.dispatchEvent(new Event("draftdiscarded"));
+          }
           status.textContent = discard ? "Draft discarded." : "Saved";
-          if (field.value !== saved) { clearTimeout(timer); timer = setTimeout(function () { save(false); }, 3000); }
+          if (snapshot() !== saved) { clearTimeout(timer); timer = setTimeout(function () { save(false); }, 3000); }
         }).catch(function (error) { status.textContent = error.message || "Could not save draft."; })
         .finally(function () { saving = false; });
     }
-    field.addEventListener("input", function () { clearTimeout(timer); timer = setTimeout(function () { save(false); }, 3000); });
+    function changed() { clearTimeout(timer); timer = setTimeout(function () { save(false); }, 3000); }
+    field.addEventListener("input", changed);
+    form.addEventListener("editorchange", changed);
     form.querySelector("[data-save-draft]").addEventListener("click", function () { clearTimeout(timer); save(false); });
     form.querySelector("[data-discard-draft]").addEventListener("click", function () { clearTimeout(timer); save(true); });
     form.addEventListener("submit", function (event) {
@@ -71,7 +79,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (!initialized || saving || conflicted) { event.preventDefault(); status.textContent = conflicted ? "Draft changed in another session. Copy your text before reloading." : "Wait for the draft to finish checking or saving."; return; }
       sending = true;
     });
-    window.addEventListener("beforeunload", function (event) { if (!sending && (field.value !== saved || saving)) { event.preventDefault(); event.returnValue = ""; } });
+    window.addEventListener("beforeunload", function (event) { if (!sending && (snapshot() !== saved || saving)) { event.preventDefault(); event.returnValue = ""; } });
   });
 
   // Confirm consequential actions in an accessible in-page dialog. When <dialog> is

@@ -102,7 +102,7 @@ func (s *testWebStore) GetReplyDraft(_ context.Context, id uuid.UUID) (sqlc.Repl
 	return d, nil
 }
 
-func (s *testWebStore) SaveReplyDraft(_ context.Context, id, expected uuid.UUID, body, session string, discard bool, actor *uuid.UUID) (sqlc.ReplyDraft, error) {
+func (s *testWebStore) SaveReplyDraft(_ context.Context, id, expected uuid.UUID, body, formatting, session string, discard bool, actor *uuid.UUID) (sqlc.ReplyDraft, error) {
 	old := s.drafts[id]
 	if old.Revision != expected {
 		return sqlc.ReplyDraft{}, sqlc.ErrDraftConflict
@@ -110,8 +110,9 @@ func (s *testWebStore) SaveReplyDraft(_ context.Context, id, expected uuid.UUID,
 	thread := s.threads[id]
 	if discard {
 		body = ""
+		formatting = ""
 	}
-	d := sqlc.ReplyDraft{ThreadID: id, AccountID: thread.AccountID, Revision: uuid.New(), Body: body, SessionID: session, Discarded: discard, OccurredAt: time.Now().UTC()}
+	d := sqlc.ReplyDraft{ThreadID: id, AccountID: thread.AccountID, Revision: uuid.New(), Body: body, Formatting: formatting, SessionID: session, Discarded: discard, OccurredAt: time.Now().UTC()}
 	s.drafts[id] = d
 	if discard && old.Revision != uuid.Nil && !old.Discarded && old.Body != "" {
 		s.threadEvents = append(s.threadEvents, sqlc.ThreadEvent{ThreadID: id, ActorUserID: actor, EventType: "draft_discarded"})
@@ -744,7 +745,7 @@ func TestDraftSaveRestoreConflictAndIsolation(t *testing.T) {
 		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/threads/"+id.String()+"/draft", strings.NewReader(body)))
 		return rec
 	}
-	rec := put(`{"revision":"00000000-0000-0000-0000-000000000000","body":"shared draft"}`)
+	rec := put(`{"revision":"00000000-0000-0000-0000-000000000000","body":"shared draft","formatting":"bold-state"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
 	}
@@ -757,7 +758,7 @@ func TestDraftSaveRestoreConflictAndIsolation(t *testing.T) {
 	}
 	page := httptest.NewRecorder()
 	router.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/threads/"+id.String(), nil))
-	if !strings.Contains(page.Body.String(), "shared draft") || !strings.Contains(page.Body.String(), draft.Revision.String()) {
+	if !strings.Contains(page.Body.String(), "shared draft") || !strings.Contains(page.Body.String(), "bold-state") || !strings.Contains(page.Body.String(), draft.Revision.String()) {
 		t.Fatal("draft not restored")
 	}
 	private := httptest.NewRecorder()

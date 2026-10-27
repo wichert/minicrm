@@ -9,7 +9,7 @@ import (
 )
 
 // SaveReplyDraft validates the revision under the thread row lock and appends a version.
-func (q *Queries) SaveReplyDraft(ctx context.Context, id, expected uuid.UUID, body, session string, discard bool, actor *uuid.UUID) (ReplyDraft, error) {
+func (q *Queries) SaveReplyDraft(ctx context.Context, id, expected uuid.UUID, body, formatting, session string, discard bool, actor *uuid.UUID) (ReplyDraft, error) {
 	tx, err := q.Begin(ctx)
 	if err != nil {
 		return ReplyDraft{}, err
@@ -32,13 +32,14 @@ func (q *Queries) SaveReplyDraft(ctx context.Context, id, expected uuid.UUID, bo
 	}
 	if discard {
 		body = ""
+		formatting = ""
 	}
 	if current.Revision != uuid.Nil && !current.Discarded && current.Body != "" && (discard || body == "") {
 		if err := tq.ClearReplyDraft(ctx, thread, actor, "discarded"); err != nil {
 			return ReplyDraft{}, err
 		}
 	}
-	d, err := tq.AppendReplyDraft(ctx, thread, body, session, discard)
+	d, err := tq.AppendReplyDraft(ctx, thread, body, formatting, session, discard)
 	if err != nil {
 		return ReplyDraft{}, err
 	}

@@ -302,7 +302,7 @@ func (m *e2eMemStore) GetReplyDraft(_ context.Context, _ uuid.UUID) (sqlc.ReplyD
 	return sqlc.ReplyDraft{}, pgx.ErrNoRows
 }
 
-func (m *e2eMemStore) SaveReplyDraft(_ context.Context, _, _ uuid.UUID, _, _ string, _ bool, _ *uuid.UUID) (sqlc.ReplyDraft, error) {
+func (m *e2eMemStore) SaveReplyDraft(_ context.Context, _, _ uuid.UUID, _, _, _ string, _ bool, _ *uuid.UUID) (sqlc.ReplyDraft, error) {
 	return sqlc.ReplyDraft{}, pgx.ErrNoRows
 }
 

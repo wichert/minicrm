@@ -40,9 +40,10 @@ func (s *Server) HandleDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var input struct {
-		Revision uuid.UUID `json:"revision"`
-		Body     string    `json:"body"`
-		Discard  bool      `json:"discard"`
+		Revision   uuid.UUID `json:"revision"`
+		Body       string    `json:"body"`
+		Formatting string    `json:"formatting"`
+		Discard    bool      `json:"discard"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, "invalid draft", http.StatusBadRequest)
@@ -52,7 +53,7 @@ func (s *Server) HandleDraft(w http.ResponseWriter, r *http.Request) {
 	if s.sessions != nil {
 		session = s.sessions.GetString(r.Context(), auth.SessionKeySessionID)
 	}
-	d, err := s.store.SaveReplyDraft(r.Context(), id, input.Revision, input.Body, session, input.Discard, &user.ID)
+	d, err := s.store.SaveReplyDraft(r.Context(), id, input.Revision, input.Body, input.Formatting, session, input.Discard, &user.ID)
 	if errors.Is(err, sqlc.ErrDraftConflict) {
 		http.Error(w, "Draft changed in another session. Copy your text before reloading.", http.StatusConflict)
 		return

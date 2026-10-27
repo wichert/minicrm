@@ -1,0 +1,19 @@
+{
+  "name": "minicrm-editor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reproducible build for the MiniCRM reply editor",
+  "scripts": {
+    "build": "esbuild editor.js --bundle --minify --legal-comments=external --outfile=../internal/web/static/editor.js"
+  },
+  "dependencies": {
+    "prosemirror-commands": "1.7.2",
+    "prosemirror-keymap": "1.2.3",
+    "prosemirror-model": "1.25.12",
+    "prosemirror-state": "1.4.4",
+    "prosemirror-view": "1.42.8"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

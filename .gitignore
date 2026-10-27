@@ -2,6 +2,7 @@
 /dev-oidc
 /bin/
 /data/
+/frontend/node_modules/
 /.pi
 /compose.*.yaml
 *.test

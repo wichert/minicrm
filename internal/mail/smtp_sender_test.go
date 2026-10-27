@@ -151,7 +151,8 @@ func TestComposeReplySMTPSendAndIMAPSentAppend(t *testing.T) {
 	replyEmail, err := outboxWorker.ComposeAndQueueReply(ctx, mail.ComposeReplyParams{
 		ThreadID:     thread.ID,
 		SenderUserID: baseStore.defaultUser.ID,
-		BodyText:     "We have updated your invoice.",
+		BodyText:     "ignored",
+		Formatting:   `{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"We have updated your invoice.","marks":[{"type":"strong"}]}]}]}`,
 		Attachments: []mail.OutgoingAttachmentInput{{
 			Filename:    "invoice.txt",
 			ContentType: "text/plain",
@@ -163,6 +164,9 @@ func TestComposeReplySMTPSendAndIMAPSentAppend(t *testing.T) {
 	}
 	if replyEmail.InReplyTo == nil || *replyEmail.InReplyTo != "orig-1@client.com" {
 		t.Fatalf("expected InReplyTo orig-1@client.com, got %v", replyEmail.InReplyTo)
+	}
+	if replyEmail.BodyText != "We have updated your invoice." || !strings.Contains(replyEmail.BodyHTMLSanitized, "<b>") {
+		t.Fatalf("formatted message not stored: %#v", replyEmail)
 	}
 	if baseStore.threads[thread.ID].Status != sqlc.ThreadStatusInProgress {
 		t.Fatalf("expected thread auto-transitioned to in_progress, got %s", baseStore.threads[thread.ID].Status)
@@ -176,11 +180,28 @@ func TestComposeReplySMTPSendAndIMAPSentAppend(t *testing.T) {
 		t.Fatalf("expected In-Reply-To header in SMTP message, got: %v", smtpTransport.sentRaw)
 	}
 
+	for _, expected := range []string{"multipart/alternative", "text/plain", "text/html"} {
+		if !strings.Contains(smtpTransport.sentRaw[0], expected) {
+			t.Fatalf("missing %s in SMTP MIME", expected)
+		}
+	}
 	appendedJobs, err := actionWorker.ProcessPending(ctx)
 	if err != nil || appendedJobs != 1 {
 		t.Fatalf("IMAPActionWorker.ProcessPending: count=%d err=%v", appendedJobs, err)
 	}
 	if len(imapSrv.appended["Sent"]) != 1 {
 		t.Fatalf("expected 1 message appended to IMAP Sent folder, got %d", len(imapSrv.appended["Sent"]))
+	}
+}
+
+func TestReplyFormattingEscapesAndRejectsUnsupportedNodes(t *testing.T) {
+	text, html, err := mail.FormatReplyDocument(`{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"<script>alert(1)</script>","marks":[{"type":"strong"},{"type":"em"}]}]}]}`)
+	if err != nil || text != "<script>alert(1)</script>" || !strings.Contains(html, "&lt;script&gt;") || strings.Contains(html, "<script>") {
+		t.Fatalf("unsafe conversion: %q %q %v", text, html, err)
+	}
+	for _, doc := range []string{`{"type":"doc","content":[{"type":"paragraph","content":[{"type":"image"}]}]}`, `{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"x","marks":[{"type":"link"}]}]}]}`} {
+		if _, _, err := mail.FormatReplyDocument(doc); err == nil {
+			t.Fatal("unsupported node accepted")
+		}
 	}
 }

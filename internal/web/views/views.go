@@ -116,6 +116,7 @@ type ThreadDetailViewData struct {
 	ReplyAllowed       bool
 	ReplyDraft         string
 	DraftRevision      string
+	DraftFormatting    string
 	PreviousThreads    []ThreadSummaryItem
 	// Errors are transition, assignment, or merge errors rendered in the thread header card.
 	Errors []string
@@ -721,6 +722,7 @@ const layoutHeader = `<!DOCTYPE html>
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/editor.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -1077,9 +1079,18 @@ const threadDetailBody = `
   {{end}}
   <form method="post" action="/threads/{{.Thread.ID}}/reply" enctype="multipart/form-data" class="reply-form" data-draft-url="/threads/{{.Thread.ID}}/draft">
     <input type="hidden" name="draft_revision" value="{{.DraftRevision}}">
+    <input type="hidden" name="body_formatting" value="{{.DraftFormatting}}" disabled>
     <div class="field">
       <label for="reply-body">Message</label>
       <textarea id="reply-body" class="reply-textarea" name="body_text" rows="6" required placeholder="Write your reply...">{{.ReplyDraft}}</textarea>
+      <div data-editor-controls hidden>
+        <div role="toolbar" aria-label="Reply formatting">
+          <button type="button" class="btn btn-secondary btn-small" data-editor-bold aria-pressed="false">Bold</button>
+          <button type="button" class="btn btn-secondary btn-small" data-editor-italic aria-pressed="false">Italic</button>
+          <button type="button" class="btn btn-secondary btn-small" data-editor-plain>Use plain text</button>
+        </div>
+        <div data-editor></div>
+      </div>
     </div>
     <div class="reply-footer">
       <button type="button" class="btn btn-secondary" data-save-draft>Save draft</button>
