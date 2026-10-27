@@ -656,6 +656,29 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		waitLabel, waitUrgency = views.FormatWaitDuration(waitSince, now)
 	}
 
+	var history []views.ThreadSummaryItem
+	if strings.TrimSpace(thread.CustomerEmail) != "" && len(user.AllowedAccounts) > 0 {
+		previous, historyErr := s.store.ListThreads(ctx, sqlc.ListThreadsFilter{
+			AllowedAccounts: user.AllowedAccounts,
+			CustomerEmail:   thread.CustomerEmail,
+			ExcludeThreadID: &thread.ID,
+			Limit:           100,
+		})
+		if historyErr != nil {
+			s.renderError(w, r, http.StatusInternalServerError, "Thread unavailable", "We could not load previous conversations.")
+			return
+		}
+		for _, previousThread := range previous {
+			if previousThread.ID == thread.ID || !user.HasAccountAccess(previousThread.AccountID) || !strings.EqualFold(previousThread.CustomerEmail, thread.CustomerEmail) {
+				continue
+			}
+			history = append(history, views.ThreadSummaryItem{
+				Thread: previousThread, AccountName: s.accountName(previousThread.AccountID),
+				FormattedTime: views.FormatTimestamp(previousThread.LastMessageAt, displayTZ),
+			})
+		}
+		s.audit.LogDataAccess(ctx, "thread_history", thread.ID.String())
+	}
 	replyAllowed := thread.Status != sqlc.ThreadStatusSpam && thread.Status != sqlc.ThreadStatusCompleted
 	b := s.appBranding()
 
@@ -687,6 +710,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		AccountFromAddress: s.accountFromAddress(thread.AccountID),
 		ReplyAllowed:       replyAllowed,
 		ReplyDraft:         replyDraft,
+		PreviousThreads:    history,
 		Errors:             headerErrors,
 		ReplyErrors:        replyErrors,
 	}); err != nil && status == http.StatusOK {

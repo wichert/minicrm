@@ -346,6 +346,8 @@ type ListThreadsFilter struct {
 	AccountID       *string
 	AllowedAccounts []string
 	Search          string
+	CustomerEmail   string
+	ExcludeThreadID *uuid.UUID
 	BeforeTime      *time.Time
 	BeforeID        *uuid.UUID
 	Limit           int
@@ -392,9 +394,11 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		       OR strpos(lower(t.customer_email::text), lower($7)) > 0
 		       OR strpos(lower(COALESCE(t.customer_name, '')), lower($7)) > 0)
 		  AND ($8::timestamptz IS NULL OR (t.last_message_at, t.id) < ($8, $9::uuid))
+		  AND ($10::text = '' OR t.customer_email = $10::citext)
+		  AND ($11::uuid IS NULL OR t.id <> $11)
 		ORDER BY t.last_message_at DESC, t.id DESC
-		LIMIT $10`
-	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.Limit)
+		LIMIT $12`
+	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.CustomerEmail, f.ExcludeThreadID, f.Limit)
 	if err != nil {
 		return nil, err
 	}

@@ -4,6 +4,10 @@ This document describes how MiniCRM links incoming and outgoing replies into con
 
 ---
 
+## Customer history
+
+Thread details list other conversations matching the same customer email address, across only the mail accounts accessible to the operator. This is an email-address match, not a resolved customer identity: aliases and changed addresses are not linked. History links open separately to avoid replacing the current composer. The panel shows up to 100 most recent matches; use inbox search for additional results.
+
 ## 1. Reply Linking & Threading (`internal/threading/`)
 
 Every email belongs to a `threads` record. When an incoming email is ingested, `threading.Matcher.ResolveThread` determines whether it belongs to an existing conversation or starts a new thread.
