@@ -93,6 +93,8 @@ go test -v -race ./e2e/...
 
 See [README.md](../README.md#docker-compose-test-stack) for the seeded accounts, published ports, and reset instructions.
 
+`internal/seed` covers the declarative loader: unit tests reject unknown accounts, non-increasing dates, and assignees without access, and round-trip generated RFC 822 through `mail.ParseRFC5322`. `TestSeedPipeline` (in `internal/mail`, build tag `seedintegration`) runs the full pipeline against a disposable database (`TEST_DATABASE_URL`) and an in-memory IMAP server: APPEND, sync, workflow transitions, and drained move jobs.
+
 ---
 
 ## 4. GitHub Actions CI Pipeline (`.github/workflows/ci.yml`)

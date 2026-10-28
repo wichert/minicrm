@@ -112,6 +112,16 @@ func (s *fakeIMAPServer) MoveMessage(_ context.Context, sourceMailbox string, _,
 
 func (s *fakeIMAPServer) AppendMessage(_ context.Context, targetMailbox string, rawRFC822 []byte) error {
 	s.appended[targetMailbox] = append(s.appended[targetMailbox], rawRFC822)
+	if _, ok := s.mailboxes[targetMailbox]; !ok {
+		s.mailboxes[targetMailbox] = make(map[int64][]byte)
+	}
+	var next int64 = 1
+	for uid := range s.mailboxes[targetMailbox] {
+		if uid >= next {
+			next = uid + 1
+		}
+	}
+	s.mailboxes[targetMailbox][next] = append([]byte(nil), rawRFC822...)
 	return nil
 }
 

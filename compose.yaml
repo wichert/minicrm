@@ -12,6 +12,7 @@
 #   smtp      - Mailpit catch-all SMTP server (web UI on http://localhost:8025)
 #   dev-oidc  - MiniCRM's dummy OIDC identity provider
 #   minicrm   - the MiniCRM application
+#   seed      - one-shot demo content (users, settings, and YAML mail) after minicrm is healthy
 #
 # The OIDC issuer is http://dev-oidc.localhost:9000, which resolves to 127.0.0.1 on the
 # host (browser) and is aliased to the dev-oidc container inside the compose network.
@@ -144,7 +145,7 @@ services:
       MINICRM_OIDC_GROUPS_CLAIM: "groups"
       MINICRM_OIDC_SCOPES: "openid,profile,email,groups"
 
-      # Account 1: Customer Support (INBOX seeded by the mail container).
+      # Account 1: Customer Support. Demo mail is APPENDed by the seed service.
       MINICRM_ACCOUNT_1_ID: "support"
       MINICRM_ACCOUNT_1_NAME: "Customer Support"
       MINICRM_ACCOUNT_1_OIDC_GROUP: "crm-support"
@@ -162,7 +163,7 @@ services:
       MINICRM_ACCOUNT_1_SMTP_FROM_ADDRESS: "support@example.com"
       MINICRM_ACCOUNT_1_SMTP_FROM_NAME: "Customer Support"
 
-      # Account 2: Sales (INBOX seeded by the mail container).
+      # Account 2: Sales. Demo mail is APPENDed by the seed service.
       MINICRM_ACCOUNT_2_ID: "sales"
       MINICRM_ACCOUNT_2_NAME: "Sales"
       MINICRM_ACCOUNT_2_OIDC_GROUP: "crm-sales"
@@ -192,6 +193,48 @@ services:
       smtp:
         condition: service_started
       dev-oidc:
+        condition: service_healthy
+
+  seed:
+    <<: *app
+    command: ["seed", "-config", "/seed/dev-seed.yaml", "-timeout", "5m"]
+    environment:
+      MINICRM_DATABASE_URL: "postgres://minicrm:minicrm@postgres:5432/minicrm?sslmode=disable"
+      MINICRM_ATTACHMENTS_DIR: "/data/attachments"
+      MINICRM_ACCOUNT_1_ID: "support"
+      MINICRM_ACCOUNT_1_NAME: "Customer Support"
+      MINICRM_ACCOUNT_1_OIDC_GROUP: "crm-support"
+      MINICRM_ACCOUNT_1_IMAP_HOST: "mail"
+      MINICRM_ACCOUNT_1_IMAP_PORT: "993"
+      MINICRM_ACCOUNT_1_IMAP_USERNAME: "support@example.com"
+      MINICRM_ACCOUNT_1_IMAP_PASSWORD: "secret"
+      MINICRM_ACCOUNT_1_IMAP_IMPLICIT_TLS: "true"
+      MINICRM_ACCOUNT_1_SMTP_HOST: "smtp"
+      MINICRM_ACCOUNT_1_SMTP_PORT: "1025"
+      MINICRM_ACCOUNT_1_SMTP_TLS_MODE: "starttls"
+      MINICRM_ACCOUNT_1_SMTP_FROM_ADDRESS: "support@example.com"
+      MINICRM_ACCOUNT_1_SMTP_FROM_NAME: "Customer Support"
+      MINICRM_ACCOUNT_2_ID: "sales"
+      MINICRM_ACCOUNT_2_NAME: "Sales"
+      MINICRM_ACCOUNT_2_OIDC_GROUP: "crm-sales"
+      MINICRM_ACCOUNT_2_IMAP_HOST: "mail"
+      MINICRM_ACCOUNT_2_IMAP_PORT: "993"
+      MINICRM_ACCOUNT_2_IMAP_USERNAME: "sales@example.com"
+      MINICRM_ACCOUNT_2_IMAP_PASSWORD: "secret"
+      MINICRM_ACCOUNT_2_IMAP_IMPLICIT_TLS: "true"
+      MINICRM_ACCOUNT_2_SMTP_HOST: "smtp"
+      MINICRM_ACCOUNT_2_SMTP_PORT: "1025"
+      MINICRM_ACCOUNT_2_SMTP_TLS_MODE: "starttls"
+      MINICRM_ACCOUNT_2_SMTP_FROM_ADDRESS: "sales@example.com"
+      MINICRM_ACCOUNT_2_SMTP_FROM_NAME: "Sales"
+    volumes:
+      - mailcerts:/certs:ro
+      - attachments:/data/attachments
+      - ./docker/seed:/seed:ro
+    depends_on:
+      minicrm:
+        condition: service_started
+      mail:
         condition: service_healthy
 
 volumes:

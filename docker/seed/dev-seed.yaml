@@ -1,0 +1,704 @@
+accounts: [support, sales]
+users:
+  - email: alex@example.com
+    display_name: "Alex Agent"
+    accounts: [support, sales]
+  - email: sam@example.com
+    display_name: "Sam Support"
+    accounts: [support]
+settings:
+  timezone: Europe/Amsterdam
+  default_assignees:
+    support: sam@example.com
+    sales: alex@example.com
+threads:
+  - id: login-issue
+    account: support
+    customer: alice@customer.example
+    customer_name: "Alice Example"
+    subject: "Cannot log in to my account"
+    status: completed
+    assigned_to: sam@example.com
+    messages:
+      - date: 2026-10-01T12:00:00Z
+        body: "Hi support team, I have been unable to log in since this morning. I get an invalid password error even after resetting my password twice. My account email is alice@customer.example."
+      - date: 2026-10-01T15:00:00Z
+        direction: outbound
+        body: "Hi Alice, sorry to hear that. Could you check whether Caps Lock is on? Kind regards, Support."
+      - date: 2026-10-01T18:00:00Z
+        body: "Never mind, it works now. I had Caps Lock enabled and did not notice. Sorry for the noise and thanks for the quick response!"
+  - id: invoice-question
+    account: support
+    customer: bob@customer.example
+    customer_name: "Bob Builder"
+    subject: "Question about invoice INV-2026-0042"
+    status: in_progress
+    assigned_to: alex@example.com
+    messages:
+      - date: 2026-10-01T21:00:00Z
+        html: true
+        body: "Hello, I received invoice INV-2026-0042 and it looks like the seats were billed twice. Could you take a look and send a corrected invoice?"
+      - date: 2026-10-02T00:00:00Z
+        direction: outbound
+        body: "Hi Bob, we see the duplicate line and will issue a corrected invoice today."
+  - id: feature-request
+    account: support
+    customer: carol@customer.example
+    customer_name: "Carol Danvers"
+    subject: "Feature request: export threads to CSV"
+    status: in_progress
+    assigned_source: default
+    messages:
+      - date: 2026-10-02T03:00:00Z
+        body: "Hi there, would it be possible to export a thread list to CSV? Our finance team would like to reconcile closed tickets with our bookkeeping. It is not urgent."
+      - date: 2026-11-01T08:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: error-screenshots
+    account: support
+    customer: erin@customer.example
+    customer_name: "Erin Engineer"
+    subject: "Export fails with an error (screenshots attached)"
+    status: in_progress
+    assigned_to: sam@example.com
+    draft: "Looking at the screenshots now — the export job is failing on the date column."
+    messages:
+      - date: 2026-10-02T06:00:00Z
+        body: "Hi, when I try to export a report I get the error shown in the attached screenshots. Could you take a look?"
+        attach:
+          - filename: export-error.png
+            content_type: image/png
+            file: fixtures/export-error.png
+          - filename: phone-photo.jpg
+            content_type: image/jpeg
+            file: fixtures/phone-photo.jpg
+      - date: 2026-11-02T09:15:00Z
+        body: "Adding a bit more detail: it also happens after a refresh."
+  - id: payment-receipt
+    account: support
+    customer: bob@customer.example
+    customer_name: "Bob Builder"
+    subject: "Payment receipt for INV-2026-0042"
+    status: completed
+    messages:
+      - date: 2026-10-02T09:00:00Z
+        body: "Hello, for your records the bank receipt for the corrected invoice is attached as a PDF."
+        attach:
+          - filename: receipt-INV-2026-0042.pdf
+            content_type: application/pdf
+            file: fixtures/receipt-INV-2026-0042.pdf
+      - date: 2026-11-03T10:15:00Z
+        body: "Our office manager asked me to check whether this was received."
+  - id: signed-contract
+    account: support
+    customer: carla@acme.example
+    customer_name: "Carla Contract"
+    subject: "Signed support contract"
+    messages:
+      - date: 2026-10-02T12:00:00Z
+        body: "Hi team, please find our signed support contract attached."
+        attach:
+          - filename: support-contract-signed.pdf
+            content_type: application/pdf
+            file: fixtures/support-contract-signed.pdf
+          - filename: logo.png
+            content_type: image/png
+            file: fixtures/logo.png
+      - date: 2026-11-04T11:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: onboarding-call
+    account: support
+    customer: gina@customer.example
+    customer_name: "Gina Guest"
+    subject: "Your onboarding call"
+    messages:
+      - date: 2026-10-02T15:00:00Z
+        direction: outbound
+        body: "Hi Gina, shall we schedule the onboarding call for next week? Kind regards, Support."
+      - date: 2026-10-02T18:00:00Z
+        body: "Hi, Tuesday afternoon works for me. Talk then!"
+  - id: monthly-update
+    account: support
+    customer: list@partner.example
+    customer_name: "Newsletter List"
+    subject: "Monthly update"
+    messages:
+      - date: 2026-10-02T21:00:00Z
+        body: "This monthly update was copied into the inbox by a mailing list and can be ignored or marked spam later."
+      - date: 2026-11-05T12:15:00Z
+        body: "This is still happening for two of my colleagues as well."
+  - id: frank-1
+    account: support
+    customer: frank@customer.example
+    customer_name: "Frank Cooper"
+    subject: "API rate limit on the reporting endpoint"
+    status: in_progress
+    assigned_to: alex@example.com
+    messages:
+      - date: 2026-10-03T00:00:00Z
+        body: "Our nightly job started getting 429s on /reports after 02:00 UTC. Can you raise the limit for account frank-co?"
+      - date: 2026-11-06T13:15:00Z
+        body: "Following up — is there an update on this?"
+  - id: frank-2
+    account: support
+    customer: frank@customer.example
+    customer_name: "Frank Cooper"
+    subject: "Webhook retries never stop"
+    messages:
+      - date: 2026-10-03T03:00:00Z
+        body: "A webhook to https://hooks.frank.example/minicrm has been retrying for six hours. Please pause it."
+      - date: 2026-11-07T14:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: frank-3
+    account: support
+    customer: frank@customer.example
+    customer_name: "Frank Cooper"
+    subject: "SSO metadata update"
+    status: in_progress
+    assigned_source: default
+    messages:
+      - date: 2026-10-03T06:00:00Z
+        body: "We rotated our IdP certificate. The new metadata URL is https://idp.frank.example/metadata."
+      - date: 2026-11-08T15:15:00Z
+        body: "Our office manager asked me to check whether this was received."
+  - id: frank-4
+    account: support
+    customer: frank@customer.example
+    customer_name: "Frank Cooper"
+    subject: "Billing contact change"
+    status: completed
+    messages:
+      - date: 2026-10-03T09:00:00Z
+        body: "Please update the billing contact to frank.billing@customer.example before the next invoice."
+      - date: 2026-11-09T16:15:00Z
+        body: "Happy to jump on a call if that is easier."
+  - id: password-reset-loop
+    account: support
+    customer: helen@customer.example
+    customer_name: "Helen Park"
+    subject: "Password reset email never arrives"
+    status: completed
+    assigned_to: sam@example.com
+    messages:
+      - date: 2026-10-03T12:00:00Z
+        body: "The reset email never arrives, including in spam. Can you trigger one manually?"
+      - date: 2026-10-03T15:00:00Z
+        direction: outbound
+        body: "We sent a reset from our side. Please try the link within an hour."
+      - date: 2026-10-03T18:00:00Z
+        body: "Got it, I am back in. Thanks."
+  - id: password-reset-followup
+    account: support
+    customer: helen@customer.example
+    customer_name: "Helen Park"
+    subject: "Re: Password reset email never arrives"
+    reopens: password-reset-loop
+    messages:
+      - date: 2026-10-03T21:00:00Z
+        body: "The same reset problem is back this morning. The link in yesterday email already expired."
+      - date: 2026-11-10T17:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: spam-prize
+    account: support
+    customer: winner@lottery.example
+    customer_name: "Prize Desk"
+    subject: "You won a prize — claim now"
+    status: spam
+    messages:
+      - date: 2026-10-04T00:00:00Z
+        body: "Congratulations, you have been selected. Click the link and send your password to claim."
+  - id: spam-crypto
+    account: support
+    customer: vip@coin-drop.example
+    customer_name: "Crypto VIP"
+    subject: "Double your crypto overnight"
+    status: spam
+    messages:
+      - date: 2026-10-04T03:00:00Z
+        body: "Guaranteed returns. Reply with your wallet seed phrase to get started."
+  - id: spam-invoice
+    account: support
+    customer: billing@pay-now-secure.example
+    customer_name: "Pay Now"
+    subject: "Invoice overdue — account suspended"
+    status: spam
+    messages:
+      - date: 2026-10-04T06:00:00Z
+        body: "Your mailbox will be closed unless you open the attachment and pay today. This is not a real invoice."
+  - id: spam-pharma
+    account: support
+    customer: deals@health-rx.example
+    customer_name: "Health Rx"
+    subject: "Discount medication, no prescription"
+    status: spam
+    messages:
+      - date: 2026-10-04T09:00:00Z
+        body: "Order now. Limited stock. Unsubscribe is not monitored."
+  - id: spam-seo
+    account: support
+    customer: growth@rank-fast.example
+    customer_name: "Rank Fast"
+    subject: "We will put you on page one"
+    status: spam
+    messages:
+      - date: 2026-10-04T12:00:00Z
+        body: "Buy 500 backlinks this week. Reply YES and we invoice later."
+  - id: spam-giftcard
+    account: support
+    customer: hr@gift-cards-now.example
+    customer_name: "HR Rewards"
+    subject: "Your gift card is waiting"
+    status: spam
+    messages:
+      - date: 2026-10-04T15:00:00Z
+        body: "Confirm your date of birth and employee id to release a gift card. Do not reply to this if you are a real customer."
+  - id: export-done
+    account: support
+    customer: ivan@customer.example
+    customer_name: "Ivan Petrov"
+    subject: "CSV export is working again"
+    status: completed
+    assigned_to: alex@example.com
+    messages:
+      - date: 2026-10-04T18:00:00Z
+        body: "The CSV export failed for the whole finance team yesterday."
+      - date: 2026-10-04T21:00:00Z
+        direction: outbound
+        body: "We shipped a fix this morning. Please retry the export."
+      - date: 2026-10-05T00:00:00Z
+        body: "Confirmed, the export downloaded. You can close this."
+  - id: quota-warning
+    account: support
+    customer: nora@customer.example
+    customer_name: "Nora Quinn"
+    subject: "Storage quota warning on attachments"
+    status: in_progress
+    assigned_to: sam@example.com
+    messages:
+      - date: 2026-10-05T03:00:00Z
+        body: "We hit the attachment quota while uploading a 20 MB contract scan. Can you raise it for this week?"
+      - date: 2026-10-05T06:00:00Z
+        direction: outbound
+        body: "Thanks for the report. We are looking into it and will update you today."
+  - id: mobile-login
+    account: support
+    customer: omar@customer.example
+    customer_name: "Omar Aziz"
+    subject: "Mobile app asks for a password every hour"
+    status: in_progress
+    assigned_to: alex@example.com
+    messages:
+      - date: 2026-10-05T09:00:00Z
+        body: "The iOS app forgets the session after about an hour. Desktop stays signed in."
+      - date: 2026-10-05T12:00:00Z
+        direction: outbound
+        body: "Thanks for the report. We are looking into it and will update you today."
+  - id: dark-mode
+    account: support
+    customer: priya@customer.example
+    customer_name: "Priya Shah"
+    subject: "Dark mode flickers on the thread list"
+    status: in_progress
+    assigned_source: default
+    messages:
+      - date: 2026-10-05T15:00:00Z
+        body: "Switching to dark mode flashes white between threads. Chrome 131 on macOS."
+      - date: 2026-10-05T18:00:00Z
+        direction: outbound
+        body: "Thanks for the report. We are looking into it and will update you today."
+  - id: timezone-shift
+    account: support
+    customer: quinn@customer.example
+    customer_name: "Quinn Lee"
+    subject: "Timestamps are five hours off"
+    status: in_progress
+    assigned_to: sam@example.com
+    messages:
+      - date: 2026-10-05T21:00:00Z
+        body: "Our team is in America/Chicago but the thread list shows UTC. Did the account timezone reset?"
+      - date: 2026-10-06T00:00:00Z
+        direction: outbound
+        body: "Thanks for the report. We are looking into it and will update you today."
+  - id: alias-mail
+    account: support
+    customer: ruth@customer.example
+    customer_name: "Ruth Gomez"
+    subject: "Mail to our alias is not arriving"
+    status: in_progress
+    assigned_source: default
+    messages:
+      - date: 2026-10-06T03:00:00Z
+        body: "support-alias@customer.example should land in the same inbox. Nothing since Monday."
+      - date: 2026-10-06T06:00:00Z
+        direction: outbound
+        body: "Thanks for the report. We are looking into it and will update you today."
+  - id: api-token
+    account: support
+    customer: samir@customer.example
+    customer_name: "Samir Haddad"
+    subject: "API token was revoked without notice"
+    status: in_progress
+    assigned_to: alex@example.com
+    messages:
+      - date: 2026-10-06T09:00:00Z
+        body: "Our integration token stopped working at 04:12 UTC. The audit log does not show a revoke."
+      - date: 2026-10-06T12:00:00Z
+        direction: outbound
+        body: "Thanks for the report. We are looking into it and will update you today."
+  - id: vacation-reply
+    account: support
+    customer: tina@customer.example
+    customer_name: "Tina Berg"
+    subject: "Vacation replies are opening new threads"
+    status: in_progress
+    assigned_to: sam@example.com
+    messages:
+      - date: 2026-10-06T15:00:00Z
+        body: "Out-of-office replies from our side are showing up as brand new conversations."
+      - date: 2026-10-06T18:00:00Z
+        direction: outbound
+        body: "Thanks for the report. We are looking into it and will update you today."
+  - id: calendar-sync
+    account: support
+    customer: uma@customer.example
+    customer_name: "Uma Desai"
+    subject: "Calendar sync duplicates events"
+    messages:
+      - date: 2026-10-06T21:00:00Z
+        body: "Every support call is created twice in Google Calendar after we connected the integration."
+      - date: 2026-11-11T08:15:00Z
+        body: "Following up — is there an update on this?"
+  - id: search-miss
+    account: support
+    customer: victor@customer.example
+    customer_name: "Victor Holm"
+    subject: "Search misses closed threads"
+    messages:
+      - date: 2026-10-07T00:00:00Z
+        body: "Searching for invoice numbers only returns open threads. Closed ones used to appear."
+      - date: 2026-11-12T09:15:00Z
+        body: "Adding a bit more detail: it also happens after a refresh."
+  - id: notification-storm
+    account: support
+    customer: wendy@customer.example
+    customer_name: "Wendy Cho"
+    subject: "Too many assignment emails"
+    messages:
+      - date: 2026-10-07T03:00:00Z
+        body: "I received twelve assignment notifications in an hour for threads I did not touch."
+      - date: 2026-11-13T10:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: pdf-preview
+    account: support
+    customer: xavier@customer.example
+    customer_name: "Xavier Blum"
+    subject: "PDF preview is blank"
+    messages:
+      - date: 2026-10-07T06:00:00Z
+        body: "Opening a PDF attachment shows a blank frame. Download still works."
+      - date: 2026-11-14T11:15:00Z
+        body: "Happy to jump on a call if that is easier."
+  - id: two-factor
+    account: support
+    customer: yasmin@customer.example
+    customer_name: "Yasmin Odeh"
+    subject: "Two-factor prompt loops"
+    messages:
+      - date: 2026-10-07T09:00:00Z
+        body: "After entering the code I am sent back to the login page. This started after the weekend."
+      - date: 2026-11-15T12:15:00Z
+        body: "This is still happening for two of my colleagues as well."
+  - id: shared-inbox
+    account: support
+    customer: zane@customer.example
+    customer_name: "Zane Idris"
+    subject: "Shared inbox label missing"
+    messages:
+      - date: 2026-10-07T12:00:00Z
+        body: "The shared label we used last quarter is gone from the sidebar."
+      - date: 2026-11-16T13:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: slow-open
+    account: support
+    customer: amy@customer.example
+    customer_name: "Amy Frost"
+    subject: "Thread page takes ten seconds"
+    messages:
+      - date: 2026-10-07T15:00:00Z
+        body: "Opening any thread with more than twenty messages is very slow this week."
+      - date: 2026-11-17T14:15:00Z
+        body: "Adding a bit more detail: it also happens after a refresh."
+  - id: wrong-assignee
+    account: support
+    customer: ben@customer.example
+    customer_name: "Ben Carter"
+    subject: "New mail assigned to a former colleague"
+    messages:
+      - date: 2026-10-07T18:00:00Z
+        body: "Threads are still defaulting to Jordan, who left in August."
+      - date: 2026-11-18T15:15:00Z
+        body: "Our office manager asked me to check whether this was received."
+  - id: footer-logo
+    account: support
+    customer: cleo@customer.example
+    customer_name: "Cleo Martin"
+    subject: "Reply footer shows the old logo"
+    messages:
+      - date: 2026-10-07T21:00:00Z
+        body: "Outbound replies still use last year logo in the signature."
+      - date: 2026-11-19T16:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: csv-comma
+    account: support
+    customer: dan@customer.example
+    customer_name: "Dan Okonkwo"
+    subject: "CSV export uses the wrong separator"
+    messages:
+      - date: 2026-10-08T00:00:00Z
+        body: "Our locale expects semicolons. The export uses commas and Excel splits columns wrong."
+      - date: 2026-11-20T17:15:00Z
+        body: "This is still happening for two of my colleagues as well."
+  - id: holiday-hours
+    account: support
+    customer: eva@customer.example
+    customer_name: "Eva Lind"
+    subject: "Holiday hours not on the auto-reply"
+    messages:
+      - date: 2026-10-08T03:00:00Z
+        body: "The auto-reply still says we are open on Friday. The office is closed."
+      - date: 2026-11-21T08:15:00Z
+        body: "Following up — is there an update on this?"
+  - id: bounce-back
+    account: support
+    customer: finn@customer.example
+    customer_name: "Finn Rossi"
+    subject: "Our replies are bouncing"
+    messages:
+      - date: 2026-10-08T06:00:00Z
+        body: "Mail we send to support@ is bouncing with a 550 from our gateway since this morning."
+      - date: 2026-11-22T09:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: dave-pricing
+    account: sales
+    customer: dave@prospect.example
+    customer_name: "Dave Prospect"
+    subject: "Pricing for 50 seats"
+    status: in_progress
+    assigned_to: alex@example.com
+    messages:
+      - date: 2026-10-08T09:00:00Z
+        body: "Hello sales team, we are evaluating MiniCRM for a team of 50 people and would like annual pricing, including onboarding support."
+      - date: 2026-10-08T12:00:00Z
+        body: "One more question: is there a discount if we pay for two years up front?"
+  - id: dave-po
+    account: sales
+    customer: dave@prospect.example
+    customer_name: "Dave Prospect"
+    subject: "Purchase order PO-7781"
+    status: in_progress
+    assigned_to: alex@example.com
+    messages:
+      - date: 2026-10-08T15:00:00Z
+        body: "Hello, we would like to go ahead with 50 seats. The purchase order and a scan of the signed approval form are attached."
+        attach:
+          - filename: PO-7781.pdf
+            content_type: application/pdf
+            file: fixtures/PO-7781.pdf
+          - filename: signed-approval-scan.jpg
+            content_type: image/jpeg
+            file: fixtures/signed-approval-scan.jpg
+      - date: 2026-11-23T10:15:00Z
+        body: "Our office manager asked me to check whether this was received."
+  - id: dave-renewal
+    account: sales
+    customer: dave@prospect.example
+    customer_name: "Dave Prospect"
+    subject: "Renewal options after year one"
+    messages:
+      - date: 2026-10-08T18:00:00Z
+        body: "If the pilot goes well, what does renewal pricing look like for year two?"
+      - date: 2026-11-24T11:15:00Z
+        body: "Happy to jump on a call if that is easier."
+  - id: mia-brand
+    account: sales
+    customer: mia@partner.example
+    customer_name: "Mia Marketing"
+    subject: "Co-marketing: our logo and one-pager"
+    status: in_progress
+    assigned_source: default
+    messages:
+      - date: 2026-10-08T21:00:00Z
+        body: "Hi, as discussed, attached are our logo and the partnership one-pager."
+        attach:
+          - filename: partner-logo.png
+            content_type: image/png
+            file: fixtures/partner-logo.png
+          - filename: partnership-one-pager.pdf
+            content_type: application/pdf
+            file: fixtures/partnership-one-pager.pdf
+      - date: 2026-11-25T12:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: mia-webinar
+    account: sales
+    customer: mia@partner.example
+    customer_name: "Mia Marketing"
+    subject: "Joint webinar in November"
+    messages:
+      - date: 2026-10-09T00:00:00Z
+        body: "Can we lock 12 November for a joint webinar? We can bring about 80 registrants."
+      - date: 2026-10-09T03:00:00Z
+        direction: outbound
+        body: "12 November works. I will send a run-of-show tomorrow."
+  - id: lena-quote
+    account: sales
+    customer: lena@northwind.example
+    customer_name: "Lena Berg"
+    subject: "Quote for the northwind rollout"
+    status: in_progress
+    assigned_to: alex@example.com
+    messages:
+      - date: 2026-10-09T06:00:00Z
+        body: "Please send a quote for 20 seats, EU hosting, and a two-hour admin training."
+      - date: 2026-11-26T13:15:00Z
+        body: "Following up — is there an update on this?"
+  - id: lena-security
+    account: sales
+    customer: lena@northwind.example
+    customer_name: "Lena Berg"
+    subject: "Security questionnaire before we sign"
+    messages:
+      - date: 2026-10-09T09:00:00Z
+        body: "Procurement needs the security questionnaire filled in before they will issue a PO."
+      - date: 2026-11-27T14:15:00Z
+        body: "Adding a bit more detail: it also happens after a refresh."
+  - id: omar-trial
+    account: sales
+    customer: omar.sales@harbor.example
+    customer_name: "Omar Saleh"
+    subject: "Trial extension for the harbor team"
+    status: completed
+    messages:
+      - date: 2026-10-09T12:00:00Z
+        body: "Our trial ends Friday and legal is still reviewing. Can you extend it two weeks?"
+      - date: 2026-10-09T15:00:00Z
+        direction: outbound
+        body: "Extended through the 31st. The same login still works."
+  - id: omar-seats
+    account: sales
+    customer: omar.sales@harbor.example
+    customer_name: "Omar Saleh"
+    subject: "Adding five seats mid-trial"
+    messages:
+      - date: 2026-10-09T18:00:00Z
+        body: "We need five more seats on the trial workspace before the workshop on Thursday."
+      - date: 2026-11-01T15:15:00Z
+        direction: outbound
+        body: "Thanks for writing in. We are on it and will reply with a fix or a workaround."
+  - id: quote-pico
+    account: sales
+    customer: pico@studio.example
+    customer_name: "Pico Studio"
+    subject: "Quote for a five-seat studio plan"
+    messages:
+      - date: 2026-10-09T21:00:00Z
+        body: "We are a design studio. What is the smallest plan that includes shared drafts?"
+      - date: 2026-11-02T16:15:00Z
+        body: "Happy to jump on a call if that is easier."
+  - id: renewal-kite
+    account: sales
+    customer: kite@retail.example
+    customer_name: "Kite Retail"
+    subject: "Renewal confirmed for next year"
+    status: completed
+    messages:
+      - date: 2026-10-10T00:00:00Z
+        body: "Please renew us for another year on the same 30-seat plan."
+      - date: 2026-11-03T17:15:00Z
+        body: "This is still happening for two of my colleagues as well."
+  - id: trial-nova
+    account: sales
+    customer: nova@labs.example
+    customer_name: "Nova Labs"
+    subject: "Trial question: can we import IMAP history?"
+    messages:
+      - date: 2026-10-10T03:00:00Z
+        body: "Does the trial include a one-time import of the last 90 days of mail?"
+  - id: quote-orbit
+    account: sales
+    customer: orbit@agency.example
+    customer_name: "Orbit Agency"
+    subject: "Agency quote with three client workspaces"
+    status: in_progress
+    assigned_to: alex@example.com
+    messages:
+      - date: 2026-10-10T06:00:00Z
+        body: "We need one workspace per client. Can the quote cover three workspaces?"
+  - id: renewal-plume
+    account: sales
+    customer: plume@media.example
+    customer_name: "Plume Media"
+    subject: "Renewal pricing if we drop to 12 seats"
+    messages:
+      - date: 2026-10-10T09:00:00Z
+        body: "Headcount fell. What does renewal look like at 12 seats instead of 25?"
+  - id: trial-quartz
+    account: sales
+    customer: quartz@legal.example
+    customer_name: "Quartz Legal"
+    subject: "Trial closed — we will revisit in Q1"
+    status: completed
+    messages:
+      - date: 2026-10-10T12:00:00Z
+        body: "Thanks for the trial. We are pausing until Q1 and will reopen then."
+  - id: spam-leads
+    account: sales
+    customer: leads@buy-pipeline.example
+    customer_name: "Lead Machine"
+    subject: "10,000 verified leads for your sales team"
+    status: spam
+    messages:
+      - date: 2026-10-10T15:00:00Z
+        body: "Buy a lead list today. Reply with your card number to unlock the download."
+  - id: spam-seo-sales
+    account: sales
+    customer: seo@rank-your-crm.example
+    customer_name: "Rank Your CRM"
+    subject: "Guaranteed first page for your CRM"
+    status: spam
+    messages:
+      - date: 2026-10-10T18:00:00Z
+        body: "We place backlinks for CRM vendors. Send payment details to start this week."
+  - id: quote-river
+    account: sales
+    customer: river@co-op.example
+    customer_name: "River Co-op"
+    subject: "Quote for a co-op with shared billing"
+    messages:
+      - date: 2026-10-10T21:00:00Z
+        body: "Eight member organisations want one invoice. Is shared billing available?"
+  - id: renewal-sage
+    account: sales
+    customer: sage@clinic.example
+    customer_name: "Sage Clinic"
+    subject: "Renewal and a BAA"
+    status: in_progress
+    assigned_source: default
+    messages:
+      - date: 2026-10-11T00:00:00Z
+        body: "We need a business associate agreement attached to the renewal."
+  - id: trial-tide
+    account: sales
+    customer: tide@marina.example
+    customer_name: "Tide Marina"
+    subject: "Trial: two agents or the whole desk?"
+    messages:
+      - date: 2026-10-11T03:00:00Z
+        body: "Is the trial limited to two agents, or can the whole desk sign in?"
