@@ -11,7 +11,8 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/minicrm ./cmd/minicrm \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/dev-oidc ./cmd/dev-oidc
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/dev-oidc ./cmd/dev-oidc \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/seed ./cmd/seed
 
 # Minimal runtime image. The entrypoint trusts the self-signed dev mail CA (mounted at
 # /certs/ca.crt) by pointing Go at a combined CA bundle, then drops to the unprivileged
@@ -26,6 +27,7 @@ RUN apk add --no-cache ca-certificates tzdata su-exec \
 
 COPY --from=build /out/minicrm /usr/local/bin/minicrm
 COPY --from=build /out/dev-oidc /usr/local/bin/dev-oidc
+COPY --from=build /out/seed /usr/local/bin/seed
 COPY docker/minicrm-entrypoint.sh /usr/local/bin/minicrm-entrypoint
 
 RUN chmod +x /usr/local/bin/minicrm-entrypoint

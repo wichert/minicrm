@@ -154,6 +154,7 @@ go build -o minicrm ./cmd/minicrm
 | `smtp` | Mailpit catch-all SMTP server + web UI | `1025` (SMTP), `8025` (UI) |
 | `dev-oidc` | Dummy OIDC identity provider (`cmd/dev-oidc`) | `9000` |
 | `minicrm` | MiniCRM HTTP server and background workers | `8080` |
+| `seed` | One-shot loader for `docker/seed/dev-seed.yaml` | — |
 | `certgen` | One-shot generator for the self-signed IMAP/SMTP TLS certificate | — |
 
 ```bash
@@ -166,12 +167,16 @@ podman-compose up --build -d
 
 Open <http://localhost:8080/threads>. The dummy OIDC server signs you in automatically as **Dev Admin (admin@example.com)**, who has access to both mail accounts.
 
+The one-shot `seed` service runs `cmd/seed` after MiniCRM has started. It does not migrate: it waits until the application schema exists, then loads [`docker/seed/dev-seed.yaml`](./docker/seed/dev-seed.yaml). That file pre-creates **Alex Agent** (`alex@example.com`, access to Customer Support and Sales) and **Sam Support** (`sam@example.com`, Customer Support only), sets the display timezone and default assignees, and describes the demo threads. The CLI generates RFC 822, APPENDs it to Dovecot, ingests it through the same sync and threading code as production, then applies assignments, completed and spam states, and one shared draft via the workflow service so Archive and Junk moves really run. If the first seeded message is already in the database, later phases are skipped, so the service is safe to rerun. These assignees are not separate login identities: the dummy OIDC server still signs in as Dev Admin.
+
+Edit `docker/seed/dev-seed.yaml` to change the demo. Attachment bytes live in `docker/seed/fixtures/`. The mail container still drops only the attachment-bearing `.eml` files and the `Sent/` fixtures into Maildir; everything else comes from the YAML so those messages are not ingested twice.
+
 **Seeded mail accounts** (both use password `secret`):
 
 | Account | Login | Seeded threads |
 |---|---|---|
-| Customer Support | `support@example.com` | Login issue with a reply, invoice question (HTML), feature request |
-| Sales | `sales@example.com` | Pricing request with an attachment and a follow-up reply |
+| Customer Support | `support@example.com` | About 40 threads: login issue, HTML invoice, attachments, a same-sender family, spam, completed threads, a Reopen & Merge follow-up, and unassigned new mail |
+| Sales | `sales@example.com` | About 20 threads: Dave's pricing and purchase-order family, Mia's partnership mail, two more multi-thread senders, plus completed and spam rows |
 
 **Useful endpoints and notes:**
 
