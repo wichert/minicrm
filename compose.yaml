@@ -10,6 +10,7 @@
 #   certgen   - one-shot generator for the self-signed IMAP TLS certificate
 #   mail      - Dovecot IMAP server with two seeded accounts (support@ and sales@)
 #   smtp      - Mailpit catch-all SMTP server (web UI on http://localhost:8025)
+#               (wrapped so it waits for the certgen certificate like mail/minicrm do)
 #   dev-oidc  - MiniCRM's dummy OIDC identity provider
 #   minicrm   - the MiniCRM application
 #   seed      - one-shot demo content (users, settings, and YAML mail) after minicrm is healthy
@@ -77,7 +78,10 @@ services:
       start_period: 5s
 
   smtp:
-    image: axllent/mailpit:v1.29
+    build:
+      context: ./docker/smtp
+      dockerfile: Dockerfile
+    image: minicrm-dev-smtp:latest
     environment:
       MP_SMTP_AUTH_ACCEPT_ANY: "1"
       MP_SMTP_AUTH_ALLOW_INSECURE: "1"
@@ -92,6 +96,13 @@ services:
     ports:
       - "1025:1025"
       - "8025:8025"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 1025"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      # Allows for the certgen wait in the entrypoint wrapper before SMTP listens.
+      start_period: 60s
 
   dev-oidc:
     <<: *app
@@ -191,7 +202,7 @@ services:
       mail:
         condition: service_healthy
       smtp:
-        condition: service_started
+        condition: service_healthy
       dev-oidc:
         condition: service_healthy
     healthcheck:
@@ -217,6 +228,8 @@ services:
       MINICRM_ACCOUNT_1_IMAP_IMPLICIT_TLS: "true"
       MINICRM_ACCOUNT_1_SMTP_HOST: "smtp"
       MINICRM_ACCOUNT_1_SMTP_PORT: "1025"
+      MINICRM_ACCOUNT_1_SMTP_USERNAME: "support@example.com"
+      MINICRM_ACCOUNT_1_SMTP_PASSWORD: "secret"
       MINICRM_ACCOUNT_1_SMTP_TLS_MODE: "starttls"
       MINICRM_ACCOUNT_1_SMTP_FROM_ADDRESS: "support@example.com"
       MINICRM_ACCOUNT_1_SMTP_FROM_NAME: "Customer Support"
@@ -230,6 +243,8 @@ services:
       MINICRM_ACCOUNT_2_IMAP_IMPLICIT_TLS: "true"
       MINICRM_ACCOUNT_2_SMTP_HOST: "smtp"
       MINICRM_ACCOUNT_2_SMTP_PORT: "1025"
+      MINICRM_ACCOUNT_2_SMTP_USERNAME: "sales@example.com"
+      MINICRM_ACCOUNT_2_SMTP_PASSWORD: "secret"
       MINICRM_ACCOUNT_2_SMTP_TLS_MODE: "starttls"
       MINICRM_ACCOUNT_2_SMTP_FROM_ADDRESS: "sales@example.com"
       MINICRM_ACCOUNT_2_SMTP_FROM_NAME: "Sales"
