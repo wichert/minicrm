@@ -685,7 +685,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		s.renderError(w, r, http.StatusInternalServerError, "Thread unavailable", "We could not load the reply draft.")
 		return
 	}
-	if status == http.StatusOK && replyDraft == "" && !draft.Discarded {
+	if len(replyErrors) == 0 && !draft.Discarded {
 		replyDraft = draft.Body
 	}
 	if status != http.StatusOK && len(replyErrors) > 0 {

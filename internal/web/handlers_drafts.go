@@ -50,7 +50,7 @@ func (s *Server) HandleDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	session := ""
 	if s.sessions != nil {
-		session = s.sessions.Token(r.Context())
+		session = s.sessions.GetString(r.Context(), auth.SessionKeySessionID)
 	}
 	d, err := s.store.SaveReplyDraft(r.Context(), id, input.Revision, input.Body, session, input.Discard, &user.ID)
 	if errors.Is(err, sqlc.ErrDraftConflict) {

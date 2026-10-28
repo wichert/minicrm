@@ -46,11 +46,11 @@ func (q *Queries) ClearReplyDraft(ctx context.Context, thread Thread, actor *uui
 	if err != nil {
 		return err
 	}
-	if d.Revision == uuid.Nil || d.Discarded || d.Body == "" {
-		return nil
-	}
 	if _, err := q.AppendReplyDraft(ctx, thread, "", "system", true); err != nil {
 		return err
+	}
+	if d.Revision == uuid.Nil || d.Discarded || d.Body == "" {
+		return nil
 	}
 	value, err := json.Marshal(map[string]string{"reason": reason})
 	if err != nil {
@@ -61,6 +61,33 @@ func (q *Queries) ClearReplyDraft(ctx context.Context, thread Thread, actor *uui
 	}
 	slog.InfoContext(ctx, "data_change", "event_category", "data_change", "resource_type", "thread", "resource_id", thread.ID.String(), "event_type", "draft_discarded")
 	return nil
+}
+
+// MergeReplyDrafts preserves both revision histories and the current draft under the
+// surviving thread. Both thread rows must be locked by the caller.
+func (q *Queries) MergeReplyDrafts(ctx context.Context, source, target Thread) error {
+	from, err := q.CurrentReplyDraft(ctx, source.ID)
+	if err != nil {
+		return err
+	}
+	to, err := q.CurrentReplyDraft(ctx, target.ID)
+	if err != nil {
+		return err
+	}
+	fromActive := !from.Discarded && from.Body != ""
+	toActive := !to.Discarded && to.Body != ""
+	if fromActive && toActive && from.Body != to.Body {
+		return errors.New("both conversations have different reply drafts; resolve them before merging")
+	}
+	if _, err := q.db.Exec(ctx, `UPDATE reply_drafts SET thread_id=$1 WHERE thread_id=$2`, target.ID, source.ID); err != nil {
+		return err
+	}
+	chosen := to
+	if fromActive {
+		chosen = from
+	}
+	_, err = q.AppendReplyDraft(ctx, target, chosen.Body, chosen.SessionID, !fromActive && !toActive)
+	return err
 }
 
 // CurrentReplyDraft returns a zero-revision empty draft when none has been saved.

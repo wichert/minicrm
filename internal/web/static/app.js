@@ -40,11 +40,12 @@ document.addEventListener("DOMContentLoaded", function () {
       return response.json();
     }).then(function (draft) {
       if (draft.revision !== revision.value) { conflicted = true; status.textContent = "Draft changed in another session. Copy your text before reloading."; }
+      saved = draft.discarded ? "" : draft.body;
       initialized = true;
       if (!conflicted && field.value !== saved) { clearTimeout(timer); timer = setTimeout(function () { save(false); }, 3000); }
     }).catch(function () { status.textContent = "Could not check draft. Reload before sending."; });
     function save(discard) {
-      if (!initialized || saving || conflicted) { return; }
+      if (!initialized || saving || conflicted || sending) { return; }
       var before = field.value, value = discard ? "" : before;
       saving = true;
       status.textContent = "Saving…";
@@ -66,6 +67,7 @@ document.addEventListener("DOMContentLoaded", function () {
     form.querySelector("[data-save-draft]").addEventListener("click", function () { clearTimeout(timer); save(false); });
     form.querySelector("[data-discard-draft]").addEventListener("click", function () { clearTimeout(timer); save(true); });
     form.addEventListener("submit", function (event) {
+      if (event.defaultPrevented) { return; }
       if (!initialized || saving || conflicted) { event.preventDefault(); status.textContent = conflicted ? "Draft changed in another session. Copy your text before reloading." : "Wait for the draft to finish checking or saving."; return; }
       sending = true;
     });
