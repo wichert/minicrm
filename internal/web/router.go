@@ -57,6 +57,8 @@ func NewRouter(srv *Server, authSvc *auth.Service, sessions *scs.SessionManager)
 
 		authed.Get("/threads", srv.HandleListThreads)
 		authed.Get("/threads/{id}", srv.HandleViewThread)
+		authed.Get("/threads/{id}/draft", srv.HandleDraft)
+		authed.Put("/threads/{id}/draft", srv.HandleDraft)
 		authed.Post("/threads/{id}/transition", srv.HandleTransitionThread)
 		authed.Post("/threads/{id}/assign", srv.HandleAssignThread)
 		authed.Post("/threads/{id}/reopen-merge", srv.HandleReopenMerge)

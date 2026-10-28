@@ -298,6 +298,14 @@ func (m *e2eMemStore) GetThreadByID(_ context.Context, _ uuid.UUID) (sqlc.Thread
 	return sqlc.Thread{}, pgx.ErrNoRows
 }
 
+func (m *e2eMemStore) GetReplyDraft(_ context.Context, _ uuid.UUID) (sqlc.ReplyDraft, error) {
+	return sqlc.ReplyDraft{}, pgx.ErrNoRows
+}
+
+func (m *e2eMemStore) SaveReplyDraft(_ context.Context, _, _ uuid.UUID, _, _ string, _ bool, _ *uuid.UUID) (sqlc.ReplyDraft, error) {
+	return sqlc.ReplyDraft{}, pgx.ErrNoRows
+}
+
 func (m *e2eMemStore) UpdateThreadStatus(_ context.Context, _ uuid.UUID, _ sqlc.ThreadStatus) error {
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/alexedwards/scs/v2"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/wichert/minicrm/internal/audit"
 	"github.com/wichert/minicrm/internal/auth"
 	"github.com/wichert/minicrm/internal/db/sqlc"
@@ -52,6 +53,8 @@ type HandlerStore interface {
 	ListThreads(ctx context.Context, f sqlc.ListThreadsFilter) ([]sqlc.Thread, error)
 	ListCustomerHistory(ctx context.Context, accounts []string, email string, exclude uuid.UUID, limit int) ([]sqlc.Thread, error)
 	GetThreadByID(ctx context.Context, id uuid.UUID) (sqlc.Thread, error)
+	GetReplyDraft(ctx context.Context, threadID uuid.UUID) (sqlc.ReplyDraft, error)
+	SaveReplyDraft(ctx context.Context, threadID uuid.UUID, expected uuid.UUID, body, session string, discard bool, actor *uuid.UUID) (sqlc.ReplyDraft, error)
 	ListEmailsByThread(ctx context.Context, threadID uuid.UUID) ([]sqlc.Email, error)
 	GetEmailByID(ctx context.Context, id uuid.UUID) (sqlc.Email, error)
 	ListAttachmentsByEmail(ctx context.Context, emailID uuid.UUID) ([]sqlc.Attachment, error)
@@ -677,6 +680,19 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		s.audit.LogDataAccess(ctx, "thread_history", thread.ID.String())
 	}
 	replyAllowed := thread.Status != sqlc.ThreadStatusSpam && thread.Status != sqlc.ThreadStatusCompleted
+	draft, draftErr := s.store.GetReplyDraft(ctx, thread.ID)
+	if draftErr != nil && !errors.Is(draftErr, pgx.ErrNoRows) {
+		s.renderError(w, r, http.StatusInternalServerError, "Thread unavailable", "We could not load the reply draft.")
+		return
+	}
+	if len(replyErrors) == 0 && !draft.Discarded {
+		replyDraft = draft.Body
+	}
+	if status != http.StatusOK && len(replyErrors) > 0 {
+		if submittedRevision, err := uuid.Parse(r.FormValue("draft_revision")); err == nil {
+			draft.Revision = submittedRevision
+		}
+	}
 	b := s.appBranding()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -707,6 +723,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		AccountFromAddress: s.accountFromAddress(thread.AccountID),
 		ReplyAllowed:       replyAllowed,
 		ReplyDraft:         replyDraft,
+		DraftRevision:      draft.Revision.String(),
 		PreviousThreads:    history,
 		Errors:             headerErrors,
 		ReplyErrors:        replyErrors,
@@ -955,11 +972,20 @@ func (s *Server) HandleReplyThread(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	revision := uuid.Nil
+	if rawRevision := r.FormValue("draft_revision"); rawRevision != "" {
+		revision, err = uuid.Parse(rawRevision)
+	}
+	if err != nil {
+		s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity, nil, []string{"The draft revision is invalid. Copy your reply and reload the page."}, bodyText)
+		return
+	}
 	if _, err := s.outbox.ComposeAndQueueReply(ctx, mail.ComposeReplyParams{
-		ThreadID:     threadID,
-		SenderUserID: user.ID,
-		BodyText:     bodyText,
-		Attachments:  uploaded,
+		ThreadID:      threadID,
+		SenderUserID:  user.ID,
+		BodyText:      bodyText,
+		Attachments:   uploaded,
+		DraftRevision: &revision,
 	}); err != nil {
 		s.audit.LogDataAccess(ctx, "thread", thread.ID.String())
 		s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity, nil, []string{err.Error()}, bodyText)

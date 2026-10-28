@@ -81,6 +81,7 @@ type Thread struct {
 	ReopensThreadID   *uuid.UUID   `json:"reopens_thread_id,omitempty"`
 	LastMessageAt     time.Time    `json:"last_message_at"`
 	// Summary fields populated by ListThreads for inbox triage.
+	HasDraft        bool      `json:"has_draft,omitempty"`
 	MessageCount    int       `json:"message_count,omitempty"`
 	LatestBodyText  string    `json:"latest_body_text,omitempty"`
 	LatestBodyHTML  string    `json:"latest_body_html,omitempty"`

@@ -47,6 +47,7 @@ type testWebStore struct {
 	auditLogs       []sqlc.AuditLog
 	jobs            []sqlc.IMAPJob
 	accountSettings map[string]sqlc.AccountSettings
+	drafts          map[uuid.UUID]sqlc.ReplyDraft
 }
 
 func newTestWebStore() *testWebStore {
@@ -74,6 +75,7 @@ func newTestWebStore() *testWebStore {
 		emails:          make(map[uuid.UUID]sqlc.Email),
 		attachments:     make(map[uuid.UUID]sqlc.Attachment),
 		accountSettings: make(map[string]sqlc.AccountSettings),
+		drafts:          make(map[uuid.UUID]sqlc.ReplyDraft),
 	}
 }
 
@@ -90,6 +92,31 @@ func (s *testWebStore) InTransaction(_ context.Context, fn func(workflow.Store, 
 	}
 	s.threads, s.threadEvents, s.jobs = clone.threads, clone.threadEvents, clone.jobs
 	return nil
+}
+
+func (s *testWebStore) GetReplyDraft(_ context.Context, id uuid.UUID) (sqlc.ReplyDraft, error) {
+	d, ok := s.drafts[id]
+	if !ok {
+		return sqlc.ReplyDraft{}, pgx.ErrNoRows
+	}
+	return d, nil
+}
+
+func (s *testWebStore) SaveReplyDraft(_ context.Context, id, expected uuid.UUID, body, session string, discard bool, actor *uuid.UUID) (sqlc.ReplyDraft, error) {
+	old := s.drafts[id]
+	if old.Revision != expected {
+		return sqlc.ReplyDraft{}, sqlc.ErrDraftConflict
+	}
+	thread := s.threads[id]
+	if discard {
+		body = ""
+	}
+	d := sqlc.ReplyDraft{ThreadID: id, AccountID: thread.AccountID, Revision: uuid.New(), Body: body, SessionID: session, Discarded: discard, OccurredAt: time.Now().UTC()}
+	s.drafts[id] = d
+	if discard && old.Revision != uuid.Nil && !old.Discarded && old.Body != "" {
+		s.threadEvents = append(s.threadEvents, sqlc.ThreadEvent{ThreadID: id, ActorUserID: actor, EventType: "draft_discarded"})
+	}
+	return d, nil
 }
 
 func (s *testWebStore) GetAccountSettings(_ context.Context, accountID string) (sqlc.AccountSettings, error) {
@@ -647,6 +674,8 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 		case strings.HasPrefix(r.URL.Path, "/threads/"):
 			rest := strings.TrimPrefix(r.URL.Path, "/threads/")
 			switch {
+			case strings.HasSuffix(rest, "/draft"):
+				srv.HandleDraft(w, web.WithChiParam(r, "id", strings.TrimSuffix(rest, "/draft")))
 			case strings.HasSuffix(rest, "/assign"):
 				srv.HandleAssignThread(w, web.WithChiParam(r, "id", strings.TrimSuffix(rest, "/assign")))
 			case strings.HasSuffix(rest, "/reply"):
@@ -703,6 +732,42 @@ func TestCompleteFromNewHTTP(t *testing.T) {
 	}
 	if rec := request("", url.Values{"status": {"completed"}, "complete_from_new": {"1"}}); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("wrong source status: %d", rec.Code)
+	}
+}
+
+func TestDraftSaveRestoreConflictAndIsolation(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	id := uuid.New()
+	store.threads[id] = sqlc.Thread{ID: id, AccountID: "sales", Status: sqlc.ThreadStatusNew, LastMessageAt: time.Now()}
+	put := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/threads/"+id.String()+"/draft", strings.NewReader(body)))
+		return rec
+	}
+	rec := put(`{"revision":"00000000-0000-0000-0000-000000000000","body":"shared draft"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
+	}
+	var draft sqlc.ReplyDraft
+	if err := json.Unmarshal(rec.Body.Bytes(), &draft); err != nil {
+		t.Fatal(err)
+	}
+	if rec = put(`{"revision":"00000000-0000-0000-0000-000000000000","body":"stale"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("stale save: %d", rec.Code)
+	}
+	page := httptest.NewRecorder()
+	router.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/threads/"+id.String(), nil))
+	if !strings.Contains(page.Body.String(), "shared draft") || !strings.Contains(page.Body.String(), draft.Revision.String()) {
+		t.Fatal("draft not restored")
+	}
+	private := httptest.NewRecorder()
+	router.ServeHTTP(private, httptest.NewRequest(http.MethodGet, "/threads/"+id.String()+"/draft?as=single", nil))
+	if private.Code != http.StatusNotFound {
+		t.Fatalf("private draft accessible: %d", private.Code)
+	}
+	rec = put(fmt.Sprintf(`{"revision":%q,"discard":true}`, draft.Revision.String()))
+	if rec.Code != http.StatusOK || len(store.threadEvents) != 1 || store.threadEvents[0].EventType != "draft_discarded" {
+		t.Fatalf("discard: %d events=%v", rec.Code, store.threadEvents)
 	}
 }
 

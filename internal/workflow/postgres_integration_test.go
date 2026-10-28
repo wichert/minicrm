@@ -84,6 +84,63 @@ func TestPostgresCompleteFromNewOrderingAndConcurrency(t *testing.T) {
 	if first["status"] != "in_progress" || second["status"] != "completed" {
 		t.Fatalf("wrong order: %v %v", first, second)
 	}
+	// A terminal transition must invalidate even a never-saved revision.
+	id = newThread()
+	if err := svc.Transition(ctx, id, sqlc.ThreadStatusSpam, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.SaveReplyDraft(ctx, id, uuid.Nil, "stale", "session", false, nil); !errors.Is(err, sqlc.ErrDraftConflict) {
+		t.Fatalf("stale revision accepted: %v", err)
+	}
+
+	// Reopen preserves the follow-up draft and its historical revisions.
+	target, source := newThread(), newThread()
+	if _, err := pool.Exec(ctx, `UPDATE threads SET status='completed' WHERE id=$1`, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE threads SET reopens_thread_id=$1 WHERE id=$2`, target, source); err != nil {
+		t.Fatal(err)
+	}
+	original, err := q.SaveReplyDraft(ctx, source, uuid.Nil, "draft to preserve", "session", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ReopenAndMerge(ctx, source, nil); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := q.GetReplyDraft(ctx, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.Body != original.Body || draft.Revision == original.Revision {
+		t.Fatalf("unexpected merged draft: %+v", draft)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM reply_drafts WHERE thread_id=$1 AND revision=$2`, target, original.Revision).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("source history missing: count=%d err=%v", count, err)
+	}
+
+	// Distinct active drafts must never overwrite one another during merge.
+	target, source = newThread(), newThread()
+	if _, err := q.SaveReplyDraft(ctx, target, uuid.Nil, "target draft", "session", false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.SaveReplyDraft(ctx, source, uuid.Nil, "source draft", "session", false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE threads SET status='completed' WHERE id=$1`, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE threads SET reopens_thread_id=$1 WHERE id=$2`, target, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ReopenAndMerge(ctx, source, nil); err == nil {
+		t.Fatal("merge overwrote distinct drafts")
+	}
+	if _, err := q.GetThreadByID(ctx, source); err != nil {
+		t.Fatalf("source deleted on failed merge: %v", err)
+	}
+
 	for i := 0; i < 20; i++ {
 		id = newThread()
 		var wg sync.WaitGroup

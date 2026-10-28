@@ -154,7 +154,7 @@ func run(logger *slog.Logger) error {
 	actionWorker := mail.NewIMAPActionWorker(queries, attStore, accountDialer, imapJobWakeCh, logger).WithEndpoints(accountEndpoints)
 
 	outboxWorker := mail.NewOutboxWorker(
-		queries,
+		mail.QueriesOutboxAdapter{Queries: queries},
 		attStore,
 		accountSenders,
 		auditLogger,

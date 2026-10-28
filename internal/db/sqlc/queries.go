@@ -389,7 +389,8 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		       COALESCE(latest.body_text, ''),
 		       COALESCE(latest.body_html_sanitized, ''),
 		       COALESCE(latest.direction, ''),
-		       COALESCE(stats.opened_at, t.last_message_at)
+		       COALESCE(stats.opened_at, t.last_message_at),
+		       COALESCE((SELECT NOT d.discarded AND d.body <> '' FROM reply_drafts d WHERE d.thread_id=t.id ORDER BY d.id DESC LIMIT 1), false)
 		FROM threads t
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*)::int AS message_count,
@@ -429,7 +430,7 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		if err := rows.Scan(
 			&t.ID, &t.AccountID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
 			&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
-			&t.MessageCount, &t.LatestBodyText, &t.LatestBodyHTML, &t.LatestDirection, &t.OpenedAt,
+			&t.MessageCount, &t.LatestBodyText, &t.LatestBodyHTML, &t.LatestDirection, &t.OpenedAt, &t.HasDraft,
 		); err != nil {
 			return nil, err
 		}

@@ -28,10 +28,11 @@ type OutgoingAttachmentInput struct {
 
 // ComposeReplyParams describes an operator's outbound reply to a thread.
 type ComposeReplyParams struct {
-	ThreadID     uuid.UUID
-	SenderUserID uuid.UUID
-	BodyText     string
-	Attachments  []OutgoingAttachmentInput
+	ThreadID      uuid.UUID
+	SenderUserID  uuid.UUID
+	BodyText      string
+	Attachments   []OutgoingAttachmentInput
+	DraftRevision *uuid.UUID
 }
 
 // SMTPTransport abstracts SMTP message delivery using username + password authentication.
@@ -105,6 +106,35 @@ type OutboxStore interface {
 	EnqueueIMAPJob(ctx context.Context, job sqlc.IMAPJob) (sqlc.IMAPJob, error)
 }
 
+// AtomicOutboxStore runs composition and audit writes in the same transaction.
+type AtomicOutboxStore interface {
+	InOutboxTransaction(context.Context, func(OutboxStore, audit.Store) error) error
+}
+
+// QueriesOutboxAdapter makes database composition transactional and serializes it
+// against workflow operations using the same thread row lock.
+type QueriesOutboxAdapter struct{ *sqlc.Queries }
+
+// InOutboxTransaction binds the outbox and audit writes to a transaction.
+func (a QueriesOutboxAdapter) InOutboxTransaction(ctx context.Context, fn func(OutboxStore, audit.Store) error) error {
+	tx, err := a.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := a.WithTx(tx)
+	if err := fn(lockedOutboxQueries{q}, q); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+type lockedOutboxQueries struct{ *sqlc.Queries }
+
+func (q lockedOutboxQueries) GetThreadByID(ctx context.Context, id uuid.UUID) (sqlc.Thread, error) {
+	return q.LockThreadByID(ctx, id)
+}
+
 // AccountSenderConfig holds the outbound SMTP identity of a single mail account.
 type AccountSenderConfig struct {
 	AccountID   string
@@ -172,6 +202,26 @@ func (w *OutboxWorker) senderFor(accountID string) (AccountSenderConfig, error) 
 
 // ComposeAndQueueReply creates an outbound email linked to the thread's latest message and queues it for SMTP delivery.
 func (w *OutboxWorker) ComposeAndQueueReply(ctx context.Context, p ComposeReplyParams) (sqlc.Email, error) {
+	if atomic, ok := w.store.(AtomicOutboxStore); ok {
+		var email sqlc.Email
+		err := atomic.InOutboxTransaction(ctx, func(store OutboxStore, auditStore audit.Store) error {
+			worker := *w
+			worker.store = store
+			worker.audit = w.audit.WithStore(auditStore)
+			worker.outboxWakeCh = nil
+			var err error
+			email, err = worker.composeAndQueueReply(ctx, p)
+			return err
+		})
+		if err == nil {
+			w.wakeOutbox()
+		}
+		return email, err
+	}
+	return w.composeAndQueueReply(ctx, p)
+}
+
+func (w *OutboxWorker) composeAndQueueReply(ctx context.Context, p ComposeReplyParams) (sqlc.Email, error) {
 	if strings.TrimSpace(p.BodyText) == "" {
 		return sqlc.Email{}, errors.New("reply body must not be empty")
 	}
@@ -186,6 +236,21 @@ func (w *OutboxWorker) ComposeAndQueueReply(ctx context.Context, p ComposeReplyP
 	}
 	if thread.Status == sqlc.ThreadStatusCompleted {
 		return sqlc.Email{}, errors.New("replies are disabled on completed threads")
+	}
+	if drafts, ok := w.store.(interface {
+		CurrentReplyDraft(context.Context, uuid.UUID) (sqlc.ReplyDraft, error)
+		ClearReplyDraft(context.Context, sqlc.Thread, *uuid.UUID, string) error
+	}); ok {
+		current, err := drafts.CurrentReplyDraft(ctx, thread.ID)
+		if err != nil {
+			return sqlc.Email{}, err
+		}
+		if p.DraftRevision == nil || *p.DraftRevision != current.Revision {
+			return sqlc.Email{}, sqlc.ErrDraftConflict
+		}
+		if err := drafts.ClearReplyDraft(ctx, thread, &p.SenderUserID, "reply_sent"); err != nil {
+			return sqlc.Email{}, err
+		}
 	}
 	sender, err := w.senderFor(thread.AccountID)
 	if err != nil {
@@ -316,11 +381,15 @@ func (w *OutboxWorker) ComposeAndQueueReply(ctx context.Context, p ComposeReplyP
 		}
 	}
 
+	w.wakeOutbox()
+	return emailRec, nil
+}
+
+func (w *OutboxWorker) wakeOutbox() {
 	select {
 	case w.outboxWakeCh <- struct{}{}:
 	default:
 	}
-	return emailRec, nil
 }
 
 // Run processes pending outbox emails until ctx is canceled.

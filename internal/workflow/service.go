@@ -122,6 +122,15 @@ func (s *Service) transition(ctx context.Context, threadID uuid.UUID, targetStat
 		return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, thread.Status, targetStatus)
 	}
 
+	if targetStatus == sqlc.ThreadStatusSpam || targetStatus == sqlc.ThreadStatusCompleted {
+		if draftStore, ok := s.store.(interface {
+			ClearReplyDraft(context.Context, sqlc.Thread, *uuid.UUID, string) error
+		}); ok {
+			if err := draftStore.ClearReplyDraft(ctx, thread, actorID, "terminal_transition"); err != nil {
+				return err
+			}
+		}
+	}
 	if err := s.store.UpdateThreadStatus(ctx, threadID, targetStatus); err != nil {
 		return fmt.Errorf("update thread status: %w", err)
 	}
@@ -299,6 +308,22 @@ func (s *Service) AssignUnassignedThreadsForAccount(ctx context.Context, account
 // ReopenAndMerge merges a follow-up 'new' thread into its referenced 'completed' thread
 // and transitions that completed thread back to 'in_progress'.
 func (s *Service) ReopenAndMerge(ctx context.Context, followUpThreadID uuid.UUID, actorID *uuid.UUID) (uuid.UUID, error) {
+	if atomicStore, ok := s.store.(AtomicStore); ok {
+		var targetID uuid.UUID
+		err := atomicStore.InTransaction(ctx, func(store Store, auditStore audit.Store) error {
+			var err error
+			targetID, err = NewService(store, s.audit.WithStore(auditStore), nil).reopenAndMerge(ctx, followUpThreadID, actorID)
+			return err
+		})
+		if err != nil {
+			return uuid.Nil, err
+		}
+		return targetID, nil
+	}
+	return s.reopenAndMerge(ctx, followUpThreadID, actorID)
+}
+
+func (s *Service) reopenAndMerge(ctx context.Context, followUpThreadID uuid.UUID, actorID *uuid.UUID) (uuid.UUID, error) {
 	followUp, err := s.store.GetThreadByID(ctx, followUpThreadID)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("load follow-up thread: %w", err)
@@ -318,6 +343,13 @@ func (s *Service) ReopenAndMerge(ctx context.Context, followUpThreadID uuid.UUID
 		return uuid.Nil, fmt.Errorf("%w: threads belong to different mail accounts", ErrCannotReopenMerge)
 	}
 
+	if drafts, ok := s.store.(interface {
+		MergeReplyDrafts(context.Context, sqlc.Thread, sqlc.Thread) error
+	}); ok {
+		if err := drafts.MergeReplyDrafts(ctx, followUp, target); err != nil {
+			return uuid.Nil, fmt.Errorf("merge reply drafts: %w", err)
+		}
+	}
 	if err := s.store.ReparentThreadEmailsAndEvents(ctx, followUp.ID, target.ID); err != nil {
 		return uuid.Nil, fmt.Errorf("reparent emails and events: %w", err)
 	}
