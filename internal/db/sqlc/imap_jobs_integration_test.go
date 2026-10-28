@@ -2,7 +2,6 @@ package sqlc_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"testing"
@@ -10,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/wichert/minicrm/internal/db/migrations"
 	"github.com/wichert/minicrm/internal/db/sqlc"
 )
@@ -22,25 +21,36 @@ func TestIMAPJobsOrderedAcrossWorkers(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL to a disposable PostgreSQL database")
 	}
 	ctx := context.Background()
-	db, err := sql.Open("pgx", url)
+	config, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		t.Fatal(err)
 	}
+	admin, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "imap_test_" + uuid.NewString()[:8]
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	db := stdlib.OpenDB(*config.ConnConfig)
 	defer db.Close()
 	if err := migrations.Up(ctx, db, "support"); err != nil {
 		t.Fatal(err)
 	}
-	pool, err := pgxpool.New(ctx, url)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
+	defer pool.Close()
 	threadID, emailID := uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO threads (id, account_id, subject_normalized, subject_display, customer_email) VALUES ($1,'support','integration','integration','integration@example.com')`, threadID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM threads WHERE id=$1`, threadID) })
 	_, err = pool.Exec(ctx, `INSERT INTO emails (id,thread_id,account_id,direction,message_id,imap_mailbox,imap_uidvalidity,imap_uid,from_address,subject,subject_normalized,sent_at) VALUES ($1,$2,'support','inbound',$3,'INBOX',1,42,'a@example.com','integration','integration',now())`, emailID, threadID, emailID.String())
 	if err != nil {
 		t.Fatal(err)
