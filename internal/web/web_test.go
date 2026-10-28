@@ -1142,6 +1142,9 @@ func TestInboxKeysetPaginationAndSearch(t *testing.T) {
 		store.threads[id] = sqlc.Thread{ID: id, AccountID: "support", SubjectDisplay: fmt.Sprintf("Match %03d", i),
 			CustomerEmail: "client@example.com", Status: sqlc.ThreadStatusNew, LastMessageAt: now}
 	}
+	nonMatchID := uuid.New()
+	store.threads[nonMatchID] = sqlc.Thread{ID: nonMatchID, AccountID: "support", SubjectDisplay: "Unrelated subject",
+		CustomerEmail: "other@example.com", Status: sqlc.ThreadStatusNew, LastMessageAt: now}
 	secretID := uuid.New()
 	store.threads[secretID] = sqlc.Thread{ID: secretID, AccountID: "secret", SubjectDisplay: "Match private", Status: sqlc.ThreadStatusNew, LastMessageAt: now}
 	path := "/threads?status=new&account=support&q=Match"
