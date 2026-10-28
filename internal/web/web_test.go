@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/wichert/minicrm/internal/audit"
@@ -717,7 +718,10 @@ func TestRemoteImageAccessAndNotice(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/emails/"+emailID.String()+"/images/0", nil)
 	req = req.WithContext(auth.WithUser(req.Context(), singleUser))
-	req = web.WithChiParam(web.WithChiParam(req, "id", emailID.String()), "index", "0")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", emailID.String())
+	rctx.URLParams.Add("index", "0")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	rec := httptest.NewRecorder()
 	srv.HandleRemoteImage(rec, req)
 	if rec.Code != http.StatusNotFound {

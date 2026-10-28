@@ -178,8 +178,16 @@ document.addEventListener("DOMContentLoaded", function () {
       var frame = button.closest(".message").querySelector(".email-frame");
       try {
         var doc = frame.contentDocument;
-        if (!doc || !doc.body) { return; }
-        doc.querySelectorAll("img[data-blocked-src]").forEach(function (image, index) {
+        if (!doc || !doc.body || doc.readyState !== "complete" || doc.URL === "about:blank") {
+          button.textContent = "Message is still loading; try again";
+          return;
+        }
+        var images = doc.querySelectorAll("img[data-blocked-src]");
+        if (!images.length) {
+          button.textContent = "No blocked images found; try again";
+          return;
+        }
+        images.forEach(function (image, index) {
           image.src = button.dataset.imagePrefix + index;
           image.removeAttribute("data-blocked-src");
         });

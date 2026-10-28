@@ -36,6 +36,10 @@ func TestBlockedImageURLs(t *testing.T) {
 	if len(urls) != 2 || urls[0] != "https://x.example/a?a=1&b=2" || urls[1] != "https://y.example/" {
 		t.Fatalf("unexpected URLs: %v", urls)
 	}
+	fostered := blockedImageURLs(`<table><tr><td><img data-blocked-src="https://example.com/inside"></td></tr><img data-blocked-src="https://example.com/fostered"></table>`)
+	if len(fostered) != 2 || fostered[0] != "https://example.com/fostered" || fostered[1] != "https://example.com/inside" {
+		t.Fatalf("images must follow browser DOM order: %v", fostered)
+	}
 	for _, u := range []string{"file:///etc/passwd", "http://user:password@example.com", "http://example.com:8080/"} {
 		if validImageURL(u) {
 			t.Errorf("allowed %s", u)

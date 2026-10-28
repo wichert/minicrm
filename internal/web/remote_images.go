@@ -23,27 +23,29 @@ const maxRemoteImageBytes = 5 << 20
 
 // blockedImageURLs returns image URLs only from sanitized message content, in DOM order.
 func blockedImageURLs(body string) []string {
-	z := html.NewTokenizer(strings.NewReader(body))
+	// Match the document and div wrapper in RenderIsolatedEmailBody: HTML table
+	// foster-parenting can move images relative to their source order.
+	doc, err := html.Parse(strings.NewReader("<!doctype html><html><head></head><body><div>" + body + "</div></body></html>"))
+	if err != nil {
+		return nil
+	}
 	var result []string
-	for {
-		typ := z.Next()
-		if typ == html.ErrorToken {
-			return result
-		}
-		if typ != html.StartTagToken && typ != html.SelfClosingTagToken {
-			continue
-		}
-		tag := z.Token()
-		if tag.Data != "img" {
-			continue
-		}
-		for _, attr := range tag.Attr {
-			if attr.Key == "data-blocked-src" {
-				result = append(result, attr.Val)
-				break
+	var visit func(*html.Node)
+	visit = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "img" {
+			for _, attr := range n.Attr {
+				if attr.Key == "data-blocked-src" {
+					result = append(result, attr.Val)
+					break
+				}
 			}
 		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			visit(child)
+		}
 	}
+	visit(doc)
+	return result
 }
 
 var nonPublicPrefixes = func() []netip.Prefix {
