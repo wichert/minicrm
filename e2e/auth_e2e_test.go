@@ -290,6 +290,10 @@ func (m *e2eMemStore) ListThreads(_ context.Context, _ sqlc.ListThreadsFilter) (
 	return nil, nil
 }
 
+func (m *e2eMemStore) ListCustomerHistory(_ context.Context, _ []string, _ string, _ uuid.UUID, _ int) ([]sqlc.Thread, error) {
+	return nil, nil
+}
+
 func (m *e2eMemStore) GetThreadByID(_ context.Context, _ uuid.UUID) (sqlc.Thread, error) {
 	return sqlc.Thread{}, pgx.ErrNoRows
 }

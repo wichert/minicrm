@@ -50,6 +50,7 @@ func defaultAppBranding() AppBranding {
 // HandlerStore defines the persistence operations required by the web Server handlers.
 type HandlerStore interface {
 	ListThreads(ctx context.Context, f sqlc.ListThreadsFilter) ([]sqlc.Thread, error)
+	ListCustomerHistory(ctx context.Context, accounts []string, email string, exclude uuid.UUID, limit int) ([]sqlc.Thread, error)
 	GetThreadByID(ctx context.Context, id uuid.UUID) (sqlc.Thread, error)
 	ListEmailsByThread(ctx context.Context, threadID uuid.UUID) ([]sqlc.Email, error)
 	GetEmailByID(ctx context.Context, id uuid.UUID) (sqlc.Email, error)
@@ -658,12 +659,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 
 	var history []views.ThreadSummaryItem
 	if strings.TrimSpace(thread.CustomerEmail) != "" && len(user.AllowedAccounts) > 0 {
-		previous, historyErr := s.store.ListThreads(ctx, sqlc.ListThreadsFilter{
-			AllowedAccounts: user.AllowedAccounts,
-			CustomerEmail:   thread.CustomerEmail,
-			ExcludeThreadID: &thread.ID,
-			Limit:           100,
-		})
+		previous, historyErr := s.store.ListCustomerHistory(ctx, user.AllowedAccounts, thread.CustomerEmail, thread.ID, 100)
 		if historyErr != nil {
 			s.renderError(w, r, http.StatusInternalServerError, "Thread unavailable", "We could not load previous conversations.")
 			return

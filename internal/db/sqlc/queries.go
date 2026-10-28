@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -416,6 +417,32 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		list = append(list, t)
 	}
 	return list, rows.Err()
+}
+
+// ListCustomerHistory returns only the metadata displayed in the customer history panel.
+func (q *Queries) ListCustomerHistory(ctx context.Context, accounts []string, email string, exclude uuid.UUID, limit int) ([]Thread, error) {
+	if len(accounts) == 0 || strings.TrimSpace(email) == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := q.db.Query(ctx, `SELECT id, account_id, subject_display, status, customer_email, last_message_at
+		FROM threads WHERE account_id = ANY($1::text[]) AND customer_email = $2::citext AND id <> $3
+		ORDER BY last_message_at DESC, id DESC LIMIT $4`, accounts, email, exclude, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []Thread
+	for rows.Next() {
+		var thread Thread
+		if err := rows.Scan(&thread.ID, &thread.AccountID, &thread.SubjectDisplay, &thread.Status, &thread.CustomerEmail, &thread.LastMessageAt); err != nil {
+			return nil, err
+		}
+		result = append(result, thread)
+	}
+	return result, rows.Err()
 }
 
 // UpdateThreadStatus updates the status of a thread.

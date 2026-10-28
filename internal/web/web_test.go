@@ -236,6 +236,10 @@ func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) 
 	return out, nil
 }
 
+func (s *testWebStore) ListCustomerHistory(ctx context.Context, accounts []string, email string, exclude uuid.UUID, limit int) ([]sqlc.Thread, error) {
+	return s.ListThreads(ctx, sqlc.ListThreadsFilter{AllowedAccounts: accounts, CustomerEmail: email, ExcludeThreadID: &exclude, Limit: limit})
+}
+
 func (s *testWebStore) GetThreadByID(_ context.Context, id uuid.UUID) (sqlc.Thread, error) {
 	t, ok := s.threads[id]
 	if !ok {
