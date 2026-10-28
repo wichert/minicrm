@@ -311,6 +311,9 @@ input,
 select,
 textarea {
   font: inherit;
+  /* Reset the weight inherited from bold wrappers such as .field and .inline-field:
+     typed text should render at the body's normal weight, not the label's. */
+  font-weight: 400;
   color: inherit;
   max-width: 100%;
   padding: 0.45rem 0.6rem;
@@ -862,6 +865,8 @@ p.card.empty-state {
   margin-top: 0.5rem;
   background: white;
   white-space: pre-wrap;
+  /* .field labels are bold; the edited body text stays at normal weight. */
+  font-weight: 400;
 }
 .reply-editor:focus-visible { outline: 2px solid #315bd6; outline-offset: 2px; }
 .reply-editor p { margin: 0; }
