@@ -243,6 +243,8 @@ go run ./cmd/minicrm
 
 ## Development & Testing
 
+The reply editor is a restricted ProseMirror build checked into `internal/web/static/editor.js`, so the Go/Docker build does not require Node. After editing `frontend/editor.js`, regenerate it with `cd frontend && npm ci && npm run build`. The minified bundle is approximately 198 KiB (62 KiB gzip); the plain-text textarea remains available without JavaScript.
+
 ```bash
 # Run unit, integration, and self-contained E2E tests with race detector
 go test -v -race ./...

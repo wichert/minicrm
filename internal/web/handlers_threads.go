@@ -54,7 +54,7 @@ type HandlerStore interface {
 	ListCustomerHistory(ctx context.Context, accounts []string, email string, exclude uuid.UUID, limit int) ([]sqlc.Thread, error)
 	GetThreadByID(ctx context.Context, id uuid.UUID) (sqlc.Thread, error)
 	GetReplyDraft(ctx context.Context, threadID uuid.UUID) (sqlc.ReplyDraft, error)
-	SaveReplyDraft(ctx context.Context, threadID uuid.UUID, expected uuid.UUID, body, session string, discard bool, actor *uuid.UUID) (sqlc.ReplyDraft, error)
+	SaveReplyDraft(ctx context.Context, threadID uuid.UUID, expected uuid.UUID, body, formatting, session string, discard bool, actor *uuid.UUID) (sqlc.ReplyDraft, error)
 	ListEmailsByThread(ctx context.Context, threadID uuid.UUID) ([]sqlc.Email, error)
 	GetEmailByID(ctx context.Context, id uuid.UUID) (sqlc.Email, error)
 	ListAttachmentsByEmail(ctx context.Context, emailID uuid.UUID) ([]sqlc.Attachment, error)
@@ -689,6 +689,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		replyDraft = draft.Body
 	}
 	if status != http.StatusOK && len(replyErrors) > 0 {
+		draft.Formatting = r.FormValue("body_formatting")
 		if submittedRevision, err := uuid.Parse(r.FormValue("draft_revision")); err == nil {
 			draft.Revision = submittedRevision
 		}
@@ -724,6 +725,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		ReplyAllowed:       replyAllowed,
 		ReplyDraft:         replyDraft,
 		DraftRevision:      draft.Revision.String(),
+		DraftFormatting:    draft.Formatting,
 		PreviousThreads:    history,
 		Errors:             headerErrors,
 		ReplyErrors:        replyErrors,
@@ -984,6 +986,7 @@ func (s *Server) HandleReplyThread(w http.ResponseWriter, r *http.Request) {
 		ThreadID:      threadID,
 		SenderUserID:  user.ID,
 		BodyText:      bodyText,
+		Formatting:    r.FormValue("body_formatting"),
 		Attachments:   uploaded,
 		DraftRevision: &revision,
 	}); err != nil {

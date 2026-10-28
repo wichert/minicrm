@@ -31,6 +31,7 @@ type ComposeReplyParams struct {
 	ThreadID      uuid.UUID
 	SenderUserID  uuid.UUID
 	BodyText      string
+	Formatting    string
 	Attachments   []OutgoingAttachmentInput
 	DraftRevision *uuid.UUID
 }
@@ -222,6 +223,14 @@ func (w *OutboxWorker) ComposeAndQueueReply(ctx context.Context, p ComposeReplyP
 }
 
 func (w *OutboxWorker) composeAndQueueReply(ctx context.Context, p ComposeReplyParams) (sqlc.Email, error) {
+	var bodyHTML string
+	if p.Formatting != "" {
+		var err error
+		p.BodyText, bodyHTML, err = FormatReplyDocument(p.Formatting)
+		if err != nil {
+			return sqlc.Email{}, err
+		}
+	}
 	if strings.TrimSpace(p.BodyText) == "" {
 		return sqlc.Email{}, errors.New("reply body must not be empty")
 	}
@@ -301,6 +310,7 @@ func (w *OutboxWorker) composeAndQueueReply(ctx context.Context, p ComposeReplyP
 		Subject:           subject,
 		SubjectNormalized: normSubject,
 		BodyText:          p.BodyText,
+		BodyHTMLSanitized: SanitizeEmailHTML(bodyHTML),
 		RawHeaders:        map[string]string{},
 		SentAt:            now,
 		ReceivedAt:        now,
@@ -549,6 +559,9 @@ func (w *OutboxWorker) buildGoMailMessage(ctx context.Context, emailRec sqlc.Ema
 		m.SetGenHeader(gomail.HeaderReferences, strings.Join(formatted, " "))
 	}
 	m.SetBodyString(gomail.TypeTextPlain, emailRec.BodyText)
+	if emailRec.BodyHTMLSanitized != "" {
+		m.AddAlternativeString(gomail.TypeTextHTML, emailRec.BodyHTMLSanitized)
+	}
 
 	for _, att := range atts {
 		f, err := w.attachments.Open(ctx, att.StorageRelPath)

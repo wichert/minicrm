@@ -21,6 +21,8 @@ When an email is ingested, `mail.SanitizeEmailHTML` sanitizes the raw HTML part 
   - Remote `http://` and `https://` `<img src="...">` attributes are rewritten to `data-blocked-src="..."` prior to sanitization so opening an email never triggers external tracking requests. The conversation shows a per-message warning and explicit load button; loading may disclose the open to the sender.
   - Upon consent, `/emails/{id}/images/{index}` resolves only URLs already stored in that authorized email. It permits only HTTP(S) ports 80/443, rejects non-public DNS answers and connects directly to a vetted address (no proxy or DNS rebinding), refuses redirects, times out, caps responses at 5 MiB, sniffs and allows only PNG/JPEG/GIF/WebP, and sends `no-store` plus restrictive headers. SVG, arbitrary URL parameters, private/loopback/link-local targets and cross-account access are rejected. Images stay in the existing sandboxed frame.
 
+Formatted replies use a restricted ProseMirror document (paragraphs, text, hard breaks, bold and italic). The server validates the node types, escapes text, derives both MIME alternatives, and sanitizes the generated HTML before storage and isolated rendering. It never trusts editor-supplied HTML.
+
 ---
 
 ## 2. Layer 2: `<iframe sandbox>` Script Isolation (`internal/web/views/views.go`)
