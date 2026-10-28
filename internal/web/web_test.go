@@ -668,6 +668,8 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 			srv.HandleBulkSpam(w, r)
 		case r.URL.Path == "/threads/bulk-assign" && r.Method == http.MethodPost:
 			srv.HandleBulkAssign(w, r)
+		case r.URL.Path == "/threads/bulk-complete" && r.Method == http.MethodPost:
+			srv.HandleBulkComplete(w, r)
 		case r.URL.Path == "/settings":
 			if r.Method == http.MethodPost {
 				srv.HandleUpdateSettings(w, r)
@@ -1304,14 +1306,50 @@ func TestPreviousConversationsRespectEmailAndAccountAccess(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads/"+current.String(), nil))
 	body := rec.Body.String()
-	for _, want := range []string{"Previous conversations", "Other conversations from this email address", "Visible prior", "Visible cross-account", `target="_blank" rel="noopener"`} {
+	for _, want := range []string{
+		"<summary>2 earlier conversations</summary>",
+		"Other conversations from this email address",
+		"Visible prior",
+		"Visible cross-account",
+		`class="previous-conversation-row"`,
+		`target="_blank" rel="noopener"`,
+		`title="Opens in a new tab so your reply stays here."`,
+		`class="badge badge-completed">Completed<`,
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("history missing %q", want)
 		}
 	}
-	for _, hidden := range []string{"Hidden private", "Hidden other customer"} {
+	for _, hidden := range []string{"Hidden private", "Hidden other customer", "No other conversations found.", "Links open in a new tab so your reply stays here."} {
 		if strings.Contains(body, hidden) {
 			t.Errorf("history exposed %q", hidden)
+		}
+	}
+
+	// Single-account user sees 1 earlier conversation and no account badge in the history row.
+	singleRec := httptest.NewRecorder()
+	router.ServeHTTP(singleRec, httptest.NewRequest(http.MethodGet, "/threads/"+current.String()+"?as=single", nil))
+	singleBody := singleRec.Body.String()
+	for _, want := range []string{"<summary>1 earlier conversation</summary>", "Other conversations from this email address", "Visible prior"} {
+		if !strings.Contains(singleBody, want) {
+			t.Errorf("single-account history missing %q", want)
+		}
+	}
+	if strings.Contains(singleBody, "Visible cross-account") || strings.Contains(singleBody, "badge-account") {
+		t.Errorf("single-account history exposed cross-account or account badge: %s", singleBody)
+	}
+
+	// A thread with no other accessible conversations hides the history disclosure completely.
+	solo := uuid.New()
+	store.threads[solo] = sqlc.Thread{ID: solo, AccountID: "support", SubjectDisplay: "First time caller", CustomerEmail: "solo@example.com", Status: sqlc.ThreadStatusNew, LastMessageAt: now}
+	secretPrior := uuid.New()
+	store.threads[secretPrior] = sqlc.Thread{ID: secretPrior, AccountID: "secret", SubjectDisplay: "Secret prior", CustomerEmail: "solo@example.com", Status: sqlc.ThreadStatusCompleted, LastMessageAt: now}
+	soloRec := httptest.NewRecorder()
+	router.ServeHTTP(soloRec, httptest.NewRequest(http.MethodGet, "/threads/"+solo.String(), nil))
+	soloBody := soloRec.Body.String()
+	for _, forbidden := range []string{"previous-conversations", "Other conversations from this email address", "No other conversations found.", "earlier conversation", "Secret prior"} {
+		if strings.Contains(soloBody, forbidden) {
+			t.Errorf("empty history must not contain %q", forbidden)
 		}
 	}
 }
@@ -1583,17 +1621,175 @@ func TestBulkAssignMixedAccountAccess(t *testing.T) {
 	if !strings.Contains(rec2.Body.String(), "1 assigned; 2 failed.") || !strings.Contains(rec2.Body.String(), sales.String()+": assignee lacks account access") {
 		t.Fatalf("summary missing: %s", rec2.Body.String())
 	}
+
+	// Empty bulk spam, bulk complete, and empty/unassigned bulk assign redirect with a flash rather than a 400 body.
+	for _, tc := range []struct {
+		endpoint string
+		form     url.Values
+		want     string
+	}{
+		{"/threads/bulk-spam", url.Values{"return_to": {page}}, "Select at least one conversation."},
+		{"/threads/bulk-complete", url.Values{"return_to": {page}}, "Select at least one conversation."},
+		{"/threads/bulk-assign", url.Values{"assignee_id": {assignee.ID.String()}, "return_to": {page}}, "Select at least one conversation."},
+		{"/threads/bulk-assign", url.Values{"thread_id": {support.String()}, "return_to": {page}}, "Choose an assignee."},
+	} {
+		postReq := httptest.NewRequest(http.MethodPost, tc.endpoint, strings.NewReader(tc.form.Encode()))
+		postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		postRec := httptest.NewRecorder()
+		router.ServeHTTP(postRec, postReq)
+		if postRec.Code != http.StatusSeeOther || postRec.Header().Get("Location") != page {
+			t.Fatalf("%s redirect: got %d %q", tc.endpoint, postRec.Code, postRec.Header().Get("Location"))
+		}
+		followReq := httptest.NewRequest(http.MethodGet, page, nil)
+		for _, cookie := range postRec.Result().Cookies() {
+			followReq.AddCookie(cookie)
+		}
+		followRec := httptest.NewRecorder()
+		router.ServeHTTP(followRec, followReq)
+		if !strings.Contains(followRec.Body.String(), tc.want) {
+			t.Fatalf("%s expected flash %q, got %s", tc.endpoint, tc.want, followRec.Body.String())
+		}
+	}
+
+	// Completed and Spam tabs must not render bulk assign or spam actions.
+	spamID := uuid.New()
+	store.threads[spamID] = sqlc.Thread{ID: spamID, AccountID: "support", Status: sqlc.ThreadStatusSpam, SubjectDisplay: "Spam item", LastMessageAt: time.Now()}
+	for _, status := range []string{"completed", "spam"} {
+		tabRec := httptest.NewRecorder()
+		router.ServeHTTP(tabRec, httptest.NewRequest(http.MethodGet, "/threads?status="+status, nil))
+		tabBody := tabRec.Body.String()
+		if strings.Contains(tabBody, `id="bulk-spam-form"`) || strings.Contains(tabBody, `formaction="/threads/bulk-assign"`) || strings.Contains(tabBody, `formaction="/threads/bulk-complete"`) || strings.Contains(tabBody, `Mark selected as spam`) {
+			t.Fatalf("%s tab must not render bulk actions: %s", status, tabBody)
+		}
+	}
+}
+
+func TestQueueCompleteRowAndBulkComplete(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	rowNewID, bulkNewID, bulkInProgressID, spamID, completedID, privateID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	for _, entry := range []struct {
+		id      uuid.UUID
+		account string
+		status  sqlc.ThreadStatus
+		subject string
+	}{
+		{rowNewID, "support", sqlc.ThreadStatusNew, "Row complete item"},
+		{bulkNewID, "support", sqlc.ThreadStatusNew, "Bulk new item"},
+		{bulkInProgressID, "sales", sqlc.ThreadStatusInProgress, "Bulk progress item"},
+		{spamID, "support", sqlc.ThreadStatusSpam, "Spam item"},
+		{completedID, "support", sqlc.ThreadStatusCompleted, "Already done"},
+		{privateID, "secret", sqlc.ThreadStatusNew, "Secret item"},
+	} {
+		store.threads[entry.id] = sqlc.Thread{ID: entry.id, AccountID: entry.account, Status: entry.status, SubjectDisplay: entry.subject, LastMessageAt: time.Now()}
+		uid, inbox := int64(77), "INBOX"
+		em := sqlc.Email{ID: uuid.New(), ThreadID: entry.id, AccountID: entry.account, Direction: "inbound", IMAPUID: &uid, IMAPMailbox: &inbox}
+		store.emails[em.ID] = em
+	}
+
+	page := "/threads?status=open&q=item"
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, page, nil))
+	listBody := listRec.Body.String()
+	for _, want := range []string{
+		`data-row-menu`,
+		`aria-label="Actions for Row complete item"`,
+		`aria-label="Complete Row complete item"`,
+		`aria-label="Mark Row complete item as spam"`,
+		`aria-label="Complete Bulk new item"`,
+		`aria-label="Complete Bulk progress item"`,
+		`formaction="/threads/bulk-complete"`,
+		`>Complete selected<`,
+	} {
+		if !strings.Contains(listBody, want) {
+			t.Fatalf("queue missing %q: %s", want, listBody)
+		}
+	}
+	if strings.Index(listBody, `<th scope="col">Thread</th>`) > strings.Index(listBody, `<th scope="col">Account</th>`) {
+		t.Fatalf("expected Thread column before Account column in inbox header: %s", listBody)
+	}
+
+	// Row complete on a new thread uses CompleteFromNew, records 2 thread_events, queues 1 move_to_archive, and redirects to return_to.
+	rowForm := url.Values{"status": {"completed"}, "complete_from_new": {"1"}, "return_to": {page}}
+	rowReq := httptest.NewRequest(http.MethodPost, "/threads/"+rowNewID.String()+"/transition", strings.NewReader(rowForm.Encode()))
+	rowReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rowRec := httptest.NewRecorder()
+	router.ServeHTTP(rowRec, rowReq)
+	if rowRec.Code != http.StatusSeeOther || rowRec.Header().Get("Location") != page {
+		t.Fatalf("row complete redirect: got %d %q", rowRec.Code, rowRec.Header().Get("Location"))
+	}
+	if store.threads[rowNewID].Status != sqlc.ThreadStatusCompleted {
+		t.Fatalf("expected rowNewID completed, got %s", store.threads[rowNewID].Status)
+	}
+	var rowEvents []sqlc.ThreadEvent
+	for _, ev := range store.threadEvents {
+		if ev.ThreadID == rowNewID && ev.EventType == "status_changed" {
+			rowEvents = append(rowEvents, ev)
+		}
+	}
+	if len(rowEvents) != 2 || !strings.Contains(string(rowEvents[0].OldValue), `"new"`) || !strings.Contains(string(rowEvents[0].NewValue), `"in_progress"`) ||
+		!strings.Contains(string(rowEvents[1].OldValue), `"in_progress"`) || !strings.Contains(string(rowEvents[1].NewValue), `"completed"`) {
+		t.Fatalf("expected 2 composite status_changed events for rowNewID, got %+v", rowEvents)
+	}
+	var rowArchiveJobs int
+	for _, job := range store.jobs {
+		if job.AccountID == "support" && job.JobType == "move_to_archive" {
+			rowArchiveJobs++
+		}
+	}
+	if rowArchiveJobs != 1 {
+		t.Fatalf("expected 1 move_to_archive job for rowNewID, got %d", rowArchiveJobs)
+	}
+
+	// Bulk complete handles new (CompleteFromNew), in_progress (Transition), and rejects spam, completed, and inaccessible threads.
+	bulkForm := url.Values{
+		"thread_id": {bulkNewID.String(), bulkInProgressID.String(), spamID.String(), completedID.String(), privateID.String()},
+		"return_to": {page},
+	}
+	bulkReq := httptest.NewRequest(http.MethodPost, "/threads/bulk-complete", strings.NewReader(bulkForm.Encode()))
+	bulkReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	bulkRec := httptest.NewRecorder()
+	router.ServeHTTP(bulkRec, bulkReq)
+	if bulkRec.Code != http.StatusSeeOther || bulkRec.Header().Get("Location") != page {
+		t.Fatalf("bulk complete redirect: got %d %q", bulkRec.Code, bulkRec.Header().Get("Location"))
+	}
+	if store.threads[bulkNewID].Status != sqlc.ThreadStatusCompleted || store.threads[bulkInProgressID].Status != sqlc.ThreadStatusCompleted {
+		t.Fatalf("expected bulk open threads completed, got new=%s in_progress=%s", store.threads[bulkNewID].Status, store.threads[bulkInProgressID].Status)
+	}
+	if store.threads[spamID].Status != sqlc.ThreadStatusSpam || store.threads[privateID].Status != sqlc.ThreadStatusNew {
+		t.Fatalf("unexpected mutation on spam/private threads: spam=%s private=%s", store.threads[spamID].Status, store.threads[privateID].Status)
+	}
+	follow := httptest.NewRequest(http.MethodGet, page, nil)
+	for _, cookie := range bulkRec.Result().Cookies() {
+		follow.AddCookie(cookie)
+	}
+	followRec := httptest.NewRecorder()
+	router.ServeHTTP(followRec, follow)
+	followBody := followRec.Body.String()
+	if !strings.Contains(followBody, "2 completed and queued for Archive; 3 failed.") || !strings.Contains(followBody, privateID.String()+": unavailable") {
+		t.Fatalf("unexpected bulk complete summary: %s", followBody)
+	}
 }
 
 func TestInboxAssignToMePreservesPageAndEnforcesAccess(t *testing.T) {
 	_, store, router, user, _ := buildAccountTestServer(t)
 	id := uuid.New()
+	completedID := uuid.New()
+	spamID := uuid.New()
 	store.threads[id] = sqlc.Thread{ID: id, AccountID: "support", SubjectDisplay: "Needs attention", Status: sqlc.ThreadStatusNew, LastMessageAt: time.Now().UTC()}
+	store.threads[completedID] = sqlc.Thread{ID: completedID, AccountID: "support", SubjectDisplay: "Done item", Status: sqlc.ThreadStatusCompleted, LastMessageAt: time.Now().UTC()}
+	store.threads[spamID] = sqlc.Thread{ID: spamID, AccountID: "support", SubjectDisplay: "Junk item", Status: sqlc.ThreadStatusSpam, LastMessageAt: time.Now().UTC()}
 	page := "/threads?status=new&q=attention"
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, page, nil))
 	if !strings.Contains(rec.Body.String(), `aria-label="Assign Needs attention to me"`) {
 		t.Fatal("missing queue assignment control")
+	}
+	for _, status := range []string{"completed", "spam"} {
+		statusRec := httptest.NewRecorder()
+		router.ServeHTTP(statusRec, httptest.NewRequest(http.MethodGet, "/threads?status="+status, nil))
+		if strings.Contains(statusRec.Body.String(), `>Assign to me<`) {
+			t.Fatalf("%s list must not offer Assign to me: %s", status, statusRec.Body.String())
+		}
 	}
 	form := url.Values{"assignee_id": {user.ID.String()}, "return_to": {page}}
 	req := httptest.NewRequest(http.MethodPost, "/threads/"+id.String()+"/assign", strings.NewReader(form.Encode()))

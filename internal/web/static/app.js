@@ -87,15 +87,60 @@ document.addEventListener("DOMContentLoaded", function () {
     var checks = Array.from(document.querySelectorAll("[data-select-thread]"));
     var selectAll = Array.from(document.querySelectorAll("[data-select-all], [data-select-all-mobile]"));
     var count = bulkForm.querySelector("[data-selected-count]");
+    var assigneeSelect = bulkForm.querySelector("[data-bulk-assignee]");
+    var bulkButtons = Array.from(bulkForm.querySelectorAll("[data-bulk-action]"));
+    var completeButton = bulkForm.querySelector('[data-bulk-action="complete"]');
+    var spamButton = bulkForm.querySelector('[data-bulk-action="spam"]');
+    function setBulkControlDisabled(control, disabled) {
+      if (!control) {
+        return;
+      }
+      control.disabled = disabled;
+      control.setAttribute("aria-disabled", disabled ? "true" : "false");
+    }
     function refreshSelection() {
       var selected = checks.filter(function (check) { return check.checked; });
-      var accounts = Array.from(new Set(selected.map(function (check) { return check.dataset.account; }))).filter(Boolean);
-      count.textContent = selected.length + " selected on this page";
+      var openSelected = selected.filter(function (check) {
+        var st = check.dataset.status;
+        return !st || st === "new" || st === "in_progress";
+      });
+      var accounts = Array.from(new Set(openSelected.map(function (check) { return check.dataset.account; }))).filter(Boolean);
+      var hasOpen = openSelected.length > 0;
+      bulkForm.dataset.hasSelection = selected.length > 0 ? "true" : "false";
+      count.textContent = selected.length > 0
+        ? selected.length + " selected on this page"
+        : "Select conversations to assign, complete, or mark as spam.";
+      setBulkControlDisabled(assigneeSelect, !hasOpen);
+      bulkButtons.forEach(function (button) {
+        setBulkControlDisabled(button, !hasOpen);
+      });
       selectAll.forEach(function (control) { control.checked = selected.length === checks.length && checks.length > 0; control.indeterminate = selected.length > 0 && selected.length < checks.length; });
-      bulkForm.dataset.confirm = "Mark " + selected.length + " selected conversation(s) on this page as spam" + (accounts.length ? " (accounts: " + accounts.join(", ") + ")" : "") + "? Moves to Junk will be queued.";
+      var accountSuffix = accounts.length ? " (accounts: " + accounts.join(", ") + ")" : "";
+      var spamMsg = "Mark " + openSelected.length + " selected conversation(s) on this page as spam" + accountSuffix + "? Moves to Junk will be queued.";
+      var completeMsg = "Mark " + openSelected.length + " selected conversation(s) on this page as completed" + accountSuffix + "? Moves to Archive will be queued.";
+      bulkForm.dataset.confirm = spamMsg;
+      if (completeButton) {
+        completeButton.dataset.confirm = completeMsg;
+        completeButton.dataset.confirmAction = "Complete selected";
+      }
+      if (spamButton) {
+        spamButton.dataset.confirm = spamMsg;
+        spamButton.dataset.confirmAction = "Mark as spam";
+      }
     }
     checks.forEach(function (check) { check.addEventListener("change", refreshSelection); });
     selectAll.forEach(function (control) { control.addEventListener("change", function () { checks.forEach(function (check) { check.checked = control.checked; }); refreshSelection(); }); });
+    bulkForm.addEventListener("submit", function (event) {
+      var selected = checks.filter(function (check) { return check.checked; });
+      var openSelected = selected.filter(function (check) {
+        var st = check.dataset.status;
+        return !st || st === "new" || st === "in_progress";
+      });
+      if (openSelected.length === 0) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    });
     refreshSelection();
   }
 
@@ -118,17 +163,22 @@ document.addEventListener("DOMContentLoaded", function () {
 
     document.querySelectorAll("form[data-confirm]").forEach(function (form) {
       form.addEventListener("submit", function (event) {
-        if (form.dataset.confirmed === "true") {
+        if (event.defaultPrevented || form.dataset.confirmed === "true") {
           return;
         }
         if (form === bulkForm && event.submitter && !event.submitter.hasAttribute("data-confirm-submit")) {
           return;
         }
+        var trigger = event.submitter || form.querySelector("button[type=submit]") || document.activeElement;
+        if (trigger && (trigger.disabled || trigger.getAttribute("aria-disabled") === "true")) {
+          event.preventDefault();
+          return;
+        }
         event.preventDefault();
         pendingForm = form;
-        pendingTrigger = event.submitter || form.querySelector("button[type=submit]") || document.activeElement;
-        message.textContent = form.getAttribute("data-confirm");
-        accept.textContent = form.getAttribute("data-confirm-action") || "Confirm";
+        pendingTrigger = trigger;
+        message.textContent = (trigger && trigger.getAttribute("data-confirm")) || form.getAttribute("data-confirm");
+        accept.textContent = (trigger && trigger.getAttribute("data-confirm-action")) || form.getAttribute("data-confirm-action") || "Confirm";
         dialog.showModal();
       });
     });
@@ -323,7 +373,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   document.querySelectorAll("tr[data-row-href]").forEach(function (row) {
     row.addEventListener("click", function (event) {
-      if (event.target.closest("a, button, input, select, label")) {
+      if (event.target.closest("a, button, input, select, label, summary, details")) {
         return;
       }
       if (window.getSelection && String(window.getSelection())) {
@@ -332,6 +382,44 @@ document.addEventListener("DOMContentLoaded", function () {
       window.location.href = row.getAttribute("data-row-href");
     });
   });
+
+  var rowMenus = Array.from(document.querySelectorAll("details[data-row-menu]"));
+  if (rowMenus.length) {
+    rowMenus.forEach(function (menu) {
+      menu.addEventListener("toggle", function () {
+        if (!menu.open) {
+          return;
+        }
+        rowMenus.forEach(function (other) {
+          if (other !== menu && other.open) {
+            other.open = false;
+          }
+        });
+      });
+    });
+    document.addEventListener("click", function (event) {
+      rowMenus.forEach(function (menu) {
+        if (menu.open && !menu.contains(event.target)) {
+          menu.open = false;
+        }
+      });
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape") {
+        return;
+      }
+      rowMenus.forEach(function (menu) {
+        if (!menu.open) {
+          return;
+        }
+        var summary = menu.querySelector("summary");
+        menu.open = false;
+        if (summary) {
+          summary.focus();
+        }
+      });
+    });
+  }
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
