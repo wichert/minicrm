@@ -57,6 +57,7 @@ func NewRouter(srv *Server, authSvc *auth.Service, sessions *scs.SessionManager)
 
 		authed.Get("/threads", srv.HandleListThreads)
 		authed.Post("/threads/bulk-spam", srv.HandleBulkSpam)
+		authed.Post("/threads/bulk-assign", srv.HandleBulkAssign)
 		authed.Get("/threads/{id}", srv.HandleViewThread)
 		authed.Get("/threads/{id}/draft", srv.HandleDraft)
 		authed.Put("/threads/{id}/draft", srv.HandleDraft)

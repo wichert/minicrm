@@ -3,6 +3,7 @@ package e2e_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -152,6 +153,59 @@ func TestEndToEndBulkSpam(t *testing.T) {
 	}
 }
 
+func TestEndToEndSharedDraftConflict(t *testing.T) {
+	baseURL := startSelfContainedE2EServers(t)
+	clients := make([]*http.Client, 2)
+	for i := range clients {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[i] = &http.Client{Jar: jar, Timeout: 15 * time.Second}
+		resp, err := clients[i].Get(baseURL + "/threads")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+	endpoint := baseURL + "/threads/" + e2eBulkThreadID.String() + "/draft"
+	save := func(client *http.Client, body string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPut, endpoint, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	resp := save(clients[0], `{"revision":"00000000-0000-0000-0000-000000000000","body":"first operator"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("save: %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	resp, err := clients[1].Get(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var draft sqlc.ReplyDraft
+	if err := json.NewDecoder(resp.Body).Decode(&draft); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if draft.Body != "first operator" {
+		t.Fatalf("draft not restored: %+v", draft)
+	}
+	resp = save(clients[1], `{"revision":"00000000-0000-0000-0000-000000000000","body":"stale overwrite"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected conflict, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+}
+
 func startSelfContainedE2EServers(t *testing.T) string {
 	t.Helper()
 
@@ -220,6 +274,7 @@ var e2eBulkThreadID = uuid.MustParse("d9000000-0000-4000-8000-000000000001")
 
 type e2eMemStore struct {
 	threads         map[uuid.UUID]sqlc.Thread
+	drafts          map[uuid.UUID]sqlc.ReplyDraft
 	users           map[uuid.UUID]sqlc.User
 	settings        *sqlc.SystemSettings
 	accountSettings map[string]sqlc.AccountSettings
@@ -227,7 +282,7 @@ type e2eMemStore struct {
 }
 
 func newE2EMemStore() *e2eMemStore {
-	return &e2eMemStore{users: make(map[uuid.UUID]sqlc.User), threads: make(map[uuid.UUID]sqlc.Thread)}
+	return &e2eMemStore{users: make(map[uuid.UUID]sqlc.User), threads: make(map[uuid.UUID]sqlc.Thread), drafts: make(map[uuid.UUID]sqlc.ReplyDraft)}
 }
 
 func (m *e2eMemStore) GetUserByID(_ context.Context, id uuid.UUID) (sqlc.User, error) {
@@ -345,12 +400,21 @@ func (m *e2eMemStore) GetThreadByID(_ context.Context, id uuid.UUID) (sqlc.Threa
 	return thread, nil
 }
 
-func (m *e2eMemStore) GetReplyDraft(_ context.Context, _ uuid.UUID) (sqlc.ReplyDraft, error) {
-	return sqlc.ReplyDraft{}, pgx.ErrNoRows
+func (m *e2eMemStore) GetReplyDraft(_ context.Context, id uuid.UUID) (sqlc.ReplyDraft, error) {
+	draft, ok := m.drafts[id]
+	if !ok {
+		return sqlc.ReplyDraft{}, pgx.ErrNoRows
+	}
+	return draft, nil
 }
 
-func (m *e2eMemStore) SaveReplyDraft(_ context.Context, _, _ uuid.UUID, _, _, _ string, _ bool, _ *uuid.UUID) (sqlc.ReplyDraft, error) {
-	return sqlc.ReplyDraft{}, pgx.ErrNoRows
+func (m *e2eMemStore) SaveReplyDraft(_ context.Context, id, revision uuid.UUID, body, formatting, session string, discard bool, _ *uuid.UUID) (sqlc.ReplyDraft, error) {
+	if m.drafts[id].Revision != revision {
+		return sqlc.ReplyDraft{}, sqlc.ErrDraftConflict
+	}
+	draft := sqlc.ReplyDraft{ThreadID: id, AccountID: m.threads[id].AccountID, Revision: uuid.New(), Body: body, Formatting: formatting, SessionID: session, Discarded: discard, OccurredAt: time.Now()}
+	m.drafts[id] = draft
+	return draft, nil
 }
 
 func (m *e2eMemStore) UpdateThreadStatus(_ context.Context, id uuid.UUID, status sqlc.ThreadStatus) error {

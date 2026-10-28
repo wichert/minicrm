@@ -666,6 +666,8 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 			srv.HandleListThreads(w, r)
 		case r.URL.Path == "/threads/bulk-spam" && r.Method == http.MethodPost:
 			srv.HandleBulkSpam(w, r)
+		case r.URL.Path == "/threads/bulk-assign" && r.Method == http.MethodPost:
+			srv.HandleBulkAssign(w, r)
 		case r.URL.Path == "/settings":
 			if r.Method == http.MethodPost {
 				srv.HandleUpdateSettings(w, r)
@@ -1543,6 +1545,72 @@ func TestBulkSpamRevalidatesAndPreservesFilter(t *testing.T) {
 	router.ServeHTTP(rec2, follow)
 	if !strings.Contains(rec2.Body.String(), "2 marked as spam and queued for Junk; 3 failed.") || !strings.Contains(rec2.Body.String(), privateID.String()+": unavailable") {
 		t.Fatalf("summary missing: %s", rec2.Body.String())
+	}
+}
+
+func TestBulkAssignMixedAccountAccess(t *testing.T) {
+	_, store, router, _, assignee := buildAccountTestServer(t)
+	support, sales, completed := uuid.New(), uuid.New(), uuid.New()
+	for _, item := range []struct {
+		id      uuid.UUID
+		account string
+		status  sqlc.ThreadStatus
+	}{
+		{support, "support", sqlc.ThreadStatusNew}, {sales, "sales", sqlc.ThreadStatusInProgress}, {completed, "support", sqlc.ThreadStatusCompleted},
+	} {
+		store.threads[item.id] = sqlc.Thread{ID: item.id, AccountID: item.account, Status: item.status, SubjectDisplay: "Example", LastMessageAt: time.Now()}
+	}
+	page := "/threads?status=open&q=Example"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, page, nil))
+	if !strings.Contains(rec.Body.String(), `formaction="/threads/bulk-assign"`) {
+		t.Fatal("missing bulk assignment control")
+	}
+	form := url.Values{"thread_id": {support.String(), sales.String(), completed.String()}, "assignee_id": {assignee.ID.String()}, "return_to": {page}}
+	req := httptest.NewRequest(http.MethodPost, "/threads/bulk-assign", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != page || store.threads[support].AssigneeID == nil || *store.threads[support].AssigneeID != assignee.ID || store.threads[sales].AssigneeID != nil || store.threads[completed].AssigneeID != nil {
+		t.Fatalf("unexpected assignment: %d %+v", rec.Code, store.threads)
+	}
+	follow := httptest.NewRequest(http.MethodGet, page, nil)
+	for _, cookie := range rec.Result().Cookies() {
+		follow.AddCookie(cookie)
+	}
+	rec2 := httptest.NewRecorder()
+	router.ServeHTTP(rec2, follow)
+	if !strings.Contains(rec2.Body.String(), "1 assigned; 2 failed.") || !strings.Contains(rec2.Body.String(), sales.String()+": assignee lacks account access") {
+		t.Fatalf("summary missing: %s", rec2.Body.String())
+	}
+}
+
+func TestInboxAssignToMePreservesPageAndEnforcesAccess(t *testing.T) {
+	_, store, router, user, _ := buildAccountTestServer(t)
+	id := uuid.New()
+	store.threads[id] = sqlc.Thread{ID: id, AccountID: "support", SubjectDisplay: "Needs attention", Status: sqlc.ThreadStatusNew, LastMessageAt: time.Now().UTC()}
+	page := "/threads?status=new&q=attention"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, page, nil))
+	if !strings.Contains(rec.Body.String(), `aria-label="Assign Needs attention to me"`) {
+		t.Fatal("missing queue assignment control")
+	}
+	form := url.Values{"assignee_id": {user.ID.String()}, "return_to": {page}}
+	req := httptest.NewRequest(http.MethodPost, "/threads/"+id.String()+"/assign", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != page || store.threads[id].AssigneeID == nil || *store.threads[id].AssigneeID != user.ID {
+		t.Fatalf("assignment failed: %d location=%s thread=%+v", rec.Code, rec.Header().Get("Location"), store.threads[id])
+	}
+	privateID := uuid.New()
+	store.threads[privateID] = sqlc.Thread{ID: privateID, AccountID: "secret", Status: sqlc.ThreadStatusNew}
+	req = httptest.NewRequest(http.MethodPost, "/threads/"+privateID.String()+"/assign", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || store.threads[privateID].AssigneeID != nil {
+		t.Fatal("private assignment was not rejected")
 	}
 }
 

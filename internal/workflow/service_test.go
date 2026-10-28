@@ -21,6 +21,7 @@ type fakeWorkflowStore struct {
 	threadEvents []sqlc.ThreadEvent
 	auditLogs    []sqlc.AuditLog
 	failEnqueue  bool
+	failAudit    bool
 }
 
 func newFakeWorkflowStore() *fakeWorkflowStore {
@@ -127,6 +128,9 @@ func (f *fakeWorkflowStore) InsertAuditLog(_ context.Context, entry sqlc.AuditLo
 }
 
 func (f *fakeWorkflowStore) InsertThreadEvent(_ context.Context, ev sqlc.ThreadEvent) error {
+	if f.failAudit {
+		return errors.New("audit failed")
+	}
 	f.threadEvents = append(f.threadEvents, ev)
 	return nil
 }
@@ -302,6 +306,30 @@ func TestWorkflowReopenAndMerge(t *testing.T) {
 	}
 	if len(store.emails[completedID]) != 2 {
 		t.Fatalf("expected 2 emails in reopened thread, got %d", len(store.emails[completedID]))
+	}
+}
+
+func TestReassignRejectsClosedAndRollsBackAuditFailure(t *testing.T) {
+	store := newFakeWorkflowStore()
+	thread, user := uuid.New(), uuid.New()
+	store.users[user] = sqlc.User{ID: user, IsActive: true, AllowedAccounts: []string{"support"}}
+	svc := workflow.NewService(store, audit.NewLogger(store, nil), nil)
+	for _, status := range []sqlc.ThreadStatus{sqlc.ThreadStatusCompleted, sqlc.ThreadStatusSpam} {
+		store.threads[thread] = sqlc.Thread{ID: thread, AccountID: "support", Status: status}
+		if err := svc.Reassign(context.Background(), thread, user, nil); !errors.Is(err, workflow.ErrInvalidTransition) {
+			t.Fatalf("%s assignment: %v", status, err)
+		}
+		if store.threads[thread].AssigneeID != nil || len(store.threadEvents) != 0 {
+			t.Fatal("closed thread changed")
+		}
+	}
+	store.threads[thread] = sqlc.Thread{ID: thread, AccountID: "support", Status: sqlc.ThreadStatusNew}
+	store.failAudit = true
+	if err := svc.Reassign(context.Background(), thread, user, nil); err == nil {
+		t.Fatal("expected audit failure")
+	}
+	if store.threads[thread].AssigneeID != nil || len(store.threadEvents) != 0 {
+		t.Fatal("assignment was not rolled back")
 	}
 }
 
