@@ -207,6 +207,12 @@ func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) 
 		if len(f.AllowedAccounts) > 0 && !allowed {
 			continue
 		}
+		if f.CustomerEmail != "" && !strings.EqualFold(t.CustomerEmail, f.CustomerEmail) {
+			continue
+		}
+		if f.ExcludeThreadID != nil && t.ID == *f.ExcludeThreadID {
+			continue
+		}
 		if f.Search != "" && !strings.Contains(strings.ToLower(t.SubjectDisplay), strings.ToLower(f.Search)) &&
 			!strings.Contains(strings.ToLower(t.CustomerEmail), strings.ToLower(f.Search)) &&
 			!strings.Contains(strings.ToLower(t.CustomerName), strings.ToLower(f.Search)) {
@@ -228,6 +234,10 @@ func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) 
 		out = out[:f.Limit]
 	}
 	return out, nil
+}
+
+func (s *testWebStore) ListCustomerHistory(ctx context.Context, accounts []string, email string, exclude uuid.UUID, limit int) ([]sqlc.Thread, error) {
+	return s.ListThreads(ctx, sqlc.ListThreadsFilter{AllowedAccounts: accounts, CustomerEmail: email, ExcludeThreadID: &exclude, Limit: limit})
 }
 
 func (s *testWebStore) GetThreadByID(_ context.Context, id uuid.UUID) (sqlc.Thread, error) {
@@ -1130,6 +1140,35 @@ func TestInboxStatusTabsKeepOverflowAndKeyboardAffordances(t *testing.T) {
 	for _, want := range []string{`@media (max-width: 768px)`, `.tab-strip[data-overflow-end="true"]`, `:focus-visible`} {
 		if !strings.Contains(string(css), want) {
 			t.Errorf("tab styles are missing %q", want)
+		}
+	}
+}
+
+func TestPreviousConversationsRespectEmailAndAccountAccess(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	now := time.Now().UTC()
+	current := uuid.New()
+	store.threads[current] = sqlc.Thread{ID: current, AccountID: "support", SubjectDisplay: "Current case", CustomerEmail: "customer@example.com", Status: sqlc.ThreadStatusNew, LastMessageAt: now}
+	for _, item := range []struct{ account, email, subject string }{
+		{"support", "CUSTOMER@example.com", "Visible prior"},
+		{"sales", "customer@example.com", "Visible cross-account"},
+		{"secret", "customer@example.com", "Hidden private"},
+		{"support", "someone@example.com", "Hidden other customer"},
+	} {
+		id := uuid.New()
+		store.threads[id] = sqlc.Thread{ID: id, AccountID: item.account, CustomerEmail: item.email, SubjectDisplay: item.subject, Status: sqlc.ThreadStatusCompleted, LastMessageAt: now}
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads/"+current.String(), nil))
+	body := rec.Body.String()
+	for _, want := range []string{"Previous conversations", "Other conversations from this email address", "Visible prior", "Visible cross-account", `target="_blank" rel="noopener"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("history missing %q", want)
+		}
+	}
+	for _, hidden := range []string{"Hidden private", "Hidden other customer"} {
+		if strings.Contains(body, hidden) {
+			t.Errorf("history exposed %q", hidden)
 		}
 	}
 }

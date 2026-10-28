@@ -114,6 +114,7 @@ type ThreadDetailViewData struct {
 	AccountFromAddress string
 	ReplyAllowed       bool
 	ReplyDraft         string
+	PreviousThreads    []ThreadSummaryItem
 	// Errors are transition, assignment, or merge errors rendered in the thread header card.
 	Errors []string
 	// ReplyErrors are reply-composition errors rendered next to the reply field only.
@@ -876,6 +877,21 @@ const threadDetailBody = `
       </ul>
     </div>
   </div>
+
+  <details class="previous-conversations">
+    <summary>Previous conversations</summary>
+    <p class="helper">Other conversations from this email address</p>
+    {{if .PreviousThreads}}
+    <ul>
+      {{range .PreviousThreads}}
+      <li><a href="/threads/{{.Thread.ID}}" target="_blank" rel="noopener">{{.Thread.SubjectDisplay}}</a>
+        <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
+        <span>{{.FormattedTime}}</span> <span class="badge badge-account">{{.AccountName}}</span></li>
+      {{end}}
+    </ul>
+    <p class="helper">Links open in a new tab so your reply stays here.</p>
+    {{else}}<p class="helper">No other conversations found.</p>{{end}}
+  </details>
 
   {{if .ReopensThread}}
   <div class="banner banner-reopen">
