@@ -171,6 +171,7 @@ func run(logger *slog.Logger) error {
 
 	webSrv := web.NewServer(queries, authSvc, wfSvc, outboxWorker, attStore, auditLogger, sessions, webAccounts).
 		WithInboxPageSize(cfg.InboxPageSize).
+		WithHealthCheck(pool.Ping).
 		WithBranding(web.AppBranding{
 			Name:        cfg.AppName,
 			ShortName:   cfg.AppShortName,

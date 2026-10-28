@@ -180,6 +180,7 @@ Edit `docker/seed/dev-seed.yaml` to change the demo. Attachment bytes live in `d
 
 **Useful endpoints and notes:**
 
+- Health probe: <http://localhost:8080/healthz> returns `200` with `{"status":"ok","checks":{"database":"ok"}}` when the process can reach PostgreSQL, and `503` when the probe fails. It is unauthenticated, so container orchestrators and load balancers can use it for readiness checks; the `seed` service waits for it via `depends_on: minicrm: condition: service_healthy`.
 - Mailpit web UI: <http://localhost:8025> — inspect replies sent by MiniCRM through SMTP.
 - Dovecot serves implicit TLS on `localhost:1993` and STARTTLS on `localhost:1143`. Inside the compose network MiniCRM uses `mail:993`; the published ports are only for debugging with a mail client.
 - The OIDC issuer is `http://dev-oidc.localhost:9000`. Browsers resolve `*.localhost` to loopback, while the compose network aliases the name to the `dev-oidc` container, so the same issuer URL works for both the browser and MiniCRM.

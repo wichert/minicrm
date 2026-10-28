@@ -65,6 +65,8 @@ Sanitized email HTML is **never** injected directly into the main MiniCRM DOM. I
 | `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | `max-age=63072000; includeSubDomains; preload` |
 | `Cache-Control` | `no-store, max-age=0` (dynamic/authenticated routes); `public, max-age=3600, must-revalidate` (`/static/*`); `no-cache` (`/manifest.webmanifest`, `/sw.js`) | `private, no-store, max-age=0` |
 
+The unauthenticated `/healthz` probe intentionally exempts itself from the `no-store, max-age=0` default and sends `Cache-Control: no-store` directly. It never reveals configuration, account IDs, or user data: the body only contains `{"status":"ok"|"unavailable","checks":{"database":"ok"|<error string>}}`. The raw driver error is included because health checks are typically only reachable from the orchestrator network; if MiniCRM is exposed directly to untrusted clients, terminate `/healthz` at the ingress instead.
+
 In addition, `/emails/{id}/body` embeds a `<meta http-equiv="Content-Security-Policy" ...>` tag inside the HTML `<head>` as a secondary enforcement layer. The root-scoped PWA Service Worker (`/sw.js`) precaches only public static shell assets (`/static/*`) and never intercepts or caches `/auth/*`, `/emails/*`, `/attachments/*`, or authenticated HTML responses.
 
 ---
