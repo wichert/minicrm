@@ -47,7 +47,36 @@ func runSeed(logger *slog.Logger, configPath string, timeout time.Duration) erro
 	return run(ctx, logger, configPath)
 }
 
+// configPlaceholders holds values for the configuration variables that the application
+// requires but the seed CLI never uses. config.Load validates the complete application
+// configuration, so seeding a stack only needs the database and mail-account variables;
+// the compose seed service deliberately passes nothing else.
+var configPlaceholders = map[string]string{
+	"MINICRM_BOOTSTRAP_ADMIN_EMAIL": "seed@minicrm.invalid",
+	"MINICRM_OIDC_ISSUER_URL":       "http://seed.invalid",
+	"MINICRM_OIDC_CLIENT_ID":        "seed",
+	"MINICRM_OIDC_CLIENT_SECRET":    "seed",
+	"MINICRM_OIDC_REDIRECT_URL":     "http://seed.invalid/auth/callback",
+}
+
+// applyConfigPlaceholders fills in unused required configuration variables that are not
+// set in the environment, leaving operator-supplied values untouched.
+func applyConfigPlaceholders() error {
+	for key, value := range configPlaceholders {
+		if _, ok := os.LookupEnv(key); ok {
+			continue
+		}
+		if err := os.Setenv(key, value); err != nil {
+			return fmt.Errorf("set placeholder %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
 func run(ctx context.Context, logger *slog.Logger, configPath string) error {
+	if err := applyConfigPlaceholders(); err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
