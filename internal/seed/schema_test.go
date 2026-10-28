@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/wichert/minicrm/internal/db/migrations"
 )
 
 // A missing schema is transient: the wait loop keeps probing until migrations appear.
@@ -67,5 +71,33 @@ func TestWaitForSchemaHonoursContext(t *testing.T) {
 func TestSchemaExistsRequiresAPool(t *testing.T) {
 	if err := SchemaExists(context.Background(), nil); err == nil {
 		t.Fatal("expected an error for a nil pool")
+	}
+}
+
+// RequiredSchemaVersion must track the newest embedded migration, otherwise the seed CLI
+// would accept a database that is missing columns it relies on.
+func TestRequiredSchemaVersionMatchesNewestMigration(t *testing.T) {
+	entries, err := migrations.FS.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read embedded migrations: %v", err)
+	}
+	highest := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		prefix, _, ok := strings.Cut(name, "_")
+		if !ok {
+			t.Fatalf("unexpected migration filename %q", name)
+		}
+		n, err := strconv.Atoi(prefix)
+		if err != nil {
+			t.Fatalf("parse migration version from %q: %v", name, err)
+		}
+		highest = max(highest, n)
+	}
+	if highest != RequiredSchemaVersion {
+		t.Fatalf("RequiredSchemaVersion = %d, but the newest migration is %d", RequiredSchemaVersion, highest)
 	}
 }

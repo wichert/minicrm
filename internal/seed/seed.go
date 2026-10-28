@@ -407,7 +407,7 @@ func countPendingJobs(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		return 0, errors.New("database pool is required to drain imap jobs")
 	}
 	var n int
-	err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM imap_jobs WHERE status = 'pending' AND run_after <= NOW()`).Scan(&n)
+	err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM imap_jobs WHERE status = 'pending' AND next_run_at <= NOW()`).Scan(&n)
 	return n, err
 }
 
@@ -452,6 +452,11 @@ func accountsByID(accounts []config.MailAccountConfig) map[string]config.MailAcc
 	}
 	return out
 }
+
+// RequiredSchemaVersion is the newest goose migration the seed CLI depends on. Bump it
+// whenever the seeding code starts relying on a new migration, so a half-migrated database
+// is rejected instead of failing later with a confusing SQL error.
+const RequiredSchemaVersion = 8
 
 // ErrSchemaMissing reports that the application schema has not been created yet. It is
 // transient: the seed CLI waits for miniCRM to finish its startup migrations.
@@ -521,8 +526,8 @@ func SchemaExists(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := pool.QueryRow(ctx, `SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read goose version: %w", err)
 	}
-	if version < 6 {
-		return fmt.Errorf("database schema version %d is older than 6; start minicrm to finish migrations before seeding", version)
+	if version < RequiredSchemaVersion {
+		return fmt.Errorf("database schema version %d is older than %d; start minicrm to finish migrations before seeding", version, RequiredSchemaVersion)
 	}
 	return nil
 }
