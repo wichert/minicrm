@@ -76,6 +76,21 @@ func newTestWebStore() *testWebStore {
 	}
 }
 
+func (s *testWebStore) InTransaction(_ context.Context, fn func(workflow.Store, audit.Store) error) error {
+	clone := *s
+	clone.threads = make(map[uuid.UUID]sqlc.Thread, len(s.threads))
+	for id, thread := range s.threads {
+		clone.threads[id] = thread
+	}
+	clone.threadEvents = append([]sqlc.ThreadEvent(nil), s.threadEvents...)
+	clone.jobs = append([]sqlc.IMAPJob(nil), s.jobs...)
+	if err := fn(&clone, &clone); err != nil {
+		return err
+	}
+	s.threads, s.threadEvents, s.jobs = clone.threads, clone.threadEvents, clone.jobs
+	return nil
+}
+
 func (s *testWebStore) GetAccountSettings(_ context.Context, accountID string) (sqlc.AccountSettings, error) {
 	a, ok := s.accountSettings[accountID]
 	if !ok {
@@ -654,6 +669,40 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 		}
 	})))
 	return srv, store, router, multiUser, singleUser
+}
+
+func TestCompleteFromNewHTTP(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	id := uuid.New()
+	store.threads[id] = sqlc.Thread{ID: id, AccountID: "support", Status: sqlc.ThreadStatusNew, CustomerEmail: "customer@example.com"}
+	request := func(query string, form url.Values) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/threads/"+id.String()+"/transition"+query, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request("", url.Values{"status": {"spam"}, "complete_from_new": {"1"}}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid flag: %d", rec.Code)
+	}
+	thread := store.threads[id]
+	thread.AccountID = "sales"
+	store.threads[id] = thread
+	if rec := request("?as=single", url.Values{"status": {"completed"}, "complete_from_new": {"1"}}); rec.Code != http.StatusNotFound {
+		t.Fatalf("account isolation: %d", rec.Code)
+	}
+	thread.AccountID = "support"
+	store.threads[id] = thread
+	if rec := request("", url.Values{"status": {"completed"}, "complete_from_new": {"1"}}); rec.Code != http.StatusSeeOther {
+		t.Fatalf("completion: %d %s", rec.Code, rec.Body.String())
+	}
+	if store.threads[id].Status != sqlc.ThreadStatusCompleted || len(store.threadEvents) != 2 {
+		t.Fatalf("unexpected result: %+v events=%d", store.threads[id], len(store.threadEvents))
+	}
+	if rec := request("", url.Values{"status": {"completed"}, "complete_from_new": {"1"}}); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("wrong source status: %d", rec.Code)
+	}
 }
 
 func TestAccountIsolationAndConditionalAccountsUI(t *testing.T) {

@@ -294,7 +294,7 @@ func (q *Queries) ListThreadEvents(ctx context.Context, threadID uuid.UUID) ([]T
 		       COALESCE(old_value, 'null'::jsonb), COALESCE(new_value, 'null'::jsonb), occurred_at
 		FROM thread_events
 		WHERE thread_id = $1
-		ORDER BY occurred_at ASC`
+		ORDER BY occurred_at ASC, event_order ASC`
 	rows, err := q.db.Query(ctx, query, threadID)
 	if err != nil {
 		return nil, err
