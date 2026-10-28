@@ -62,9 +62,9 @@ type InboxViewData struct {
 	ShowAccountUI bool
 	AccountFilter string
 	Accounts      []AccountOption
-	// Truncated is true when the store returned exactly the query limit.
-	Truncated bool
-	Limit     int
+	Search        string
+	NextURL       string
+	RefreshURL    string
 }
 
 // EmailItemView holds an email, its formatted timestamp, and its attachments.
@@ -807,21 +807,25 @@ const inboxTablePartial = `
 const inboxBody = `
 <div class="page-heading page-heading-row">
   <h1>Threads</h1>
-  <a class="btn btn-secondary btn-small" href="/threads?status={{.StatusFilter}}&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}">Refresh</a>
+  <a class="btn btn-secondary btn-small" href="{{.RefreshURL}}">Refresh</a>
 </div>
 <div class="toolbar">
   <div class="tab-strip" data-tab-strip>
   <nav class="tabs" aria-label="Thread status">
-    <a class="tab" href="/threads?status=open&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "open"}} aria-current="true"{{end}}>Open</a>
-    <a class="tab" href="/threads?status=new&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "new"}} aria-current="true"{{end}}>New</a>
-    <a class="tab" href="/threads?status=in_progress&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "in_progress"}} aria-current="true"{{end}}>In progress</a>
-    <a class="tab" href="/threads?status=completed&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "completed"}} aria-current="true"{{end}}>Completed</a>
-    <a class="tab" href="/threads?status=spam&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "spam"}} aria-current="true"{{end}}>Spam</a>
-    <a class="tab" href="/threads?status=all&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}"{{if eq .StatusFilter "all"}} aria-current="true"{{end}}>All</a>
+    <a class="tab" href="/threads?status=open&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "open"}} aria-current="true"{{end}}>Open</a>
+    <a class="tab" href="/threads?status=new&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "new"}} aria-current="true"{{end}}>New</a>
+    <a class="tab" href="/threads?status=in_progress&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "in_progress"}} aria-current="true"{{end}}>In progress</a>
+    <a class="tab" href="/threads?status=completed&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "completed"}} aria-current="true"{{end}}>Completed</a>
+    <a class="tab" href="/threads?status=spam&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "spam"}} aria-current="true"{{end}}>Spam</a>
+    <a class="tab" href="/threads?status=all&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "all"}} aria-current="true"{{end}}>All</a>
   </nav>
   </div>
   <form method="get" action="/threads" class="filter-inline">
     <input type="hidden" name="status" value="{{.StatusFilter}}">
+    <label class="inline-field">Customer or subject
+      <input type="search" name="q" value="{{.Search}}">
+    </label>
+    <button type="submit" class="btn btn-secondary">Search</button>
     <label class="inline-field">Assignee
       <select name="assignee" data-hx-get="/threads">
         <option value="" {{if eq .AssigneeFilter ""}}selected{{end}}>Anyone</option>
@@ -846,9 +850,11 @@ const inboxBody = `
   </form>
 </div>
 <p class="results-count">
-  Showing {{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}{{if .Truncated}} (first {{.Limit}}; narrow the filters to see more){{end}}
+  Showing {{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}{{if .NextURL}}; more results available{{end}}
 </p>
-` + inboxTablePartial
+` + inboxTablePartial + `
+{{if .NextURL}}<p><a class="btn btn-secondary" href="{{.NextURL}}">Older threads</a></p>{{end}}
+`
 
 const threadDetailBody = `
 <div class="thread-top-bar">

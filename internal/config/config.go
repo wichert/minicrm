@@ -60,6 +60,7 @@ type Config struct {
 	BootstrapAdminMail string `env:"MINICRM_BOOTSTRAP_ADMIN_EMAIL,required"`
 	BootstrapAdminName string `env:"MINICRM_BOOTSTRAP_ADMIN_NAME" envDefault:"Admin"`
 	DisplayTimezone    string `env:"MINICRM_DISPLAY_TIMEZONE" envDefault:"UTC"`
+	InboxPageSize      int    `env:"MINICRM_INBOX_PAGE_SIZE" envDefault:"100"`
 	MailDomain         string `env:"MINICRM_MAIL_DOMAIN" envDefault:"minicrm.local"`
 	CookieSecure       bool   `env:"MINICRM_COOKIE_SECURE" envDefault:"true"`
 
@@ -135,6 +136,9 @@ func loadAccounts() ([]MailAccountConfig, error) {
 
 // Validate checks semantic constraints on Config values.
 func (c *Config) Validate() error {
+	if c.InboxPageSize < 1 || c.InboxPageSize > 500 {
+		return errors.New("MINICRM_INBOX_PAGE_SIZE must be between 1 and 500")
+	}
 	if strings.TrimSpace(c.AppName) == "" {
 		return errors.New("MINICRM_APP_NAME must not be empty")
 	}
