@@ -195,6 +195,10 @@ func TestComposeReplySMTPSendAndIMAPSentAppend(t *testing.T) {
 }
 
 func TestReplyFormattingEscapesAndRejectsUnsupportedNodes(t *testing.T) {
+	blankText, blankHTML, blankErr := mail.FormatReplyDocument(`{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"first"}]},{"type":"paragraph"},{"type":"paragraph"},{"type":"paragraph","content":[{"type":"text","text":"last"}]}]}`)
+	if blankErr != nil || blankText != "first\n\n\nlast" || blankHTML != "<p>first</p><p><br></p><p><br></p><p>last</p>" {
+		t.Fatalf("blank paragraphs: %q %q %v", blankText, blankHTML, blankErr)
+	}
 	text, html, err := mail.FormatReplyDocument(`{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"<script>alert(1)</script>","marks":[{"type":"strong"},{"type":"em"}]}]}]}`)
 	if err != nil || text != "<script>alert(1)</script>" || !strings.Contains(html, "&lt;script&gt;") || strings.Contains(html, "<script>") {
 		t.Fatalf("unsafe conversion: %q %q %v", text, html, err)

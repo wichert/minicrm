@@ -3,6 +3,7 @@ import {EditorState} from "prosemirror-state";
 import {EditorView} from "prosemirror-view";
 import {toggleMark, baseKeymap} from "prosemirror-commands";
 import {keymap} from "prosemirror-keymap";
+import {history, undo, redo} from "prosemirror-history";
 
 const schema = new Schema({
   nodes: {
@@ -37,7 +38,7 @@ document.addEventListener("DOMContentLoaded", () => {
     catch (_) { doc = textDocument(field.value); formatting.value = ""; }
     if (formatting.value && plainText(doc).trim() !== field.value.trim()) formatting.value = "";
     if (!formatting.value) doc = textDocument(field.value);
-    const plugins = [keymap({"Mod-b": toggleMark(schema.marks.strong), "Mod-i": toggleMark(schema.marks.em)}), keymap(baseKeymap)];
+    const plugins = [history(), keymap({"Mod-z": undo, "Shift-Mod-z": redo, "Mod-y": redo, "Mod-b": toggleMark(schema.marks.strong), "Mod-i": toggleMark(schema.marks.em)}), keymap(baseKeymap)];
     function updateButtons() {
       for (const [button, mark] of [[bold, schema.marks.strong], [italic, schema.marks.em]]) {
         const {from, to, empty, $from} = view.state.selection;

@@ -36,6 +36,9 @@ func FormatReplyDocument(data string) (string, string, error) {
 			text.WriteByte('\n')
 		}
 		markup.WriteString("<p>")
+		if len(p.Content) == 0 {
+			markup.WriteString("<br>")
+		}
 		for _, node := range p.Content {
 			switch node.Type {
 			case "hard_break":

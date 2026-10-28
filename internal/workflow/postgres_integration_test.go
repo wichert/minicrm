@@ -89,7 +89,7 @@ func TestPostgresCompleteFromNewOrderingAndConcurrency(t *testing.T) {
 	if err := svc.Transition(ctx, id, sqlc.ThreadStatusSpam, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.SaveReplyDraft(ctx, id, uuid.Nil, "stale", "session", false, nil); !errors.Is(err, sqlc.ErrDraftConflict) {
+	if _, err := q.SaveReplyDraft(ctx, id, uuid.Nil, "stale", "", "session", false, nil); !errors.Is(err, sqlc.ErrDraftConflict) {
 		t.Fatalf("stale revision accepted: %v", err)
 	}
 
@@ -101,7 +101,7 @@ func TestPostgresCompleteFromNewOrderingAndConcurrency(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE threads SET reopens_thread_id=$1 WHERE id=$2`, target, source); err != nil {
 		t.Fatal(err)
 	}
-	original, err := q.SaveReplyDraft(ctx, source, uuid.Nil, "draft to preserve", "session", false, nil)
+	original, err := q.SaveReplyDraft(ctx, source, uuid.Nil, "draft to preserve", "", "session", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,10 +122,10 @@ func TestPostgresCompleteFromNewOrderingAndConcurrency(t *testing.T) {
 
 	// Distinct active drafts must never overwrite one another during merge.
 	target, source = newThread(), newThread()
-	if _, err := q.SaveReplyDraft(ctx, target, uuid.Nil, "target draft", "session", false, nil); err != nil {
+	if _, err := q.SaveReplyDraft(ctx, target, uuid.Nil, "target draft", "", "session", false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.SaveReplyDraft(ctx, source, uuid.Nil, "source draft", "session", false, nil); err != nil {
+	if _, err := q.SaveReplyDraft(ctx, source, uuid.Nil, "source draft", "", "session", false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE threads SET status='completed' WHERE id=$1`, target); err != nil {
