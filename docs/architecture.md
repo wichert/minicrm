@@ -81,6 +81,7 @@ Mail accounts are configured with numbered `MINICRM_ACCOUNT_<N>_*` environment v
 | **MIME & HTML** | `github.com/emersion/go-message` + `github.com/microcosm-cc/bluemonday` | RFC 5322 multipart parsing and strict allowlist HTML sanitization. |
 | **SMTP** | `github.com/wneessen/go-mail` | Outbound SMTP delivery with basic `username + password` authentication and RFC 5322 serialization. |
 | **Authentication** | `github.com/coreos/go-oidc/v3` + `golang.org/x/oauth2` + `github.com/alexedwards/scs/v2` | OIDC Authorization Code flow with PKCE and PostgreSQL-backed HTTP-only sessions. |
+| **Health** | `net/http` (`/healthz`) | Unauthenticated liveness/readiness probe; `cmd/minicrm` plugs in `pgxpool.Pool.Ping` via `web.Server.WithHealthCheck` |
 | **Logging** | `log/slog` | Structured JSON logging of all application events, data reads (`data_access`), and mutations (`data_change`). |
 
 ---
@@ -107,5 +108,5 @@ internal/
   workflow/                     # Thread state machine, Archive/Junk move queueing, Reopen & Merge
   mail/                         # MIME parser, bluemonday sanitizer, IMAP sync/action workers, SMTP outbox worker
   storage/                      # Content-addressed SHA-256 local disk attachment store
-  web/                          # chi router, security headers, handlers, embedded static assets, SSR views
+  web/                          # chi router, security headers, /healthz probe, handlers, embedded static assets, SSR views
 ```

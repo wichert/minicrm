@@ -93,6 +93,7 @@ type Server struct {
 	accounts    []AccountConfig
 	branding    AppBranding
 	pageSize    int
+	healthCheck HealthCheck
 }
 
 // NewServer constructs a web Server.
@@ -125,6 +126,16 @@ func (s *Server) WithInboxPageSize(size int) *Server {
 	if size > 0 && size <= 500 {
 		s.pageSize = size
 	}
+	return s
+}
+
+// WithHealthCheck registers the dependency probe used by the /healthz endpoint.
+//
+// Production deployments (container orchestrators, load balancers) use the endpoint to
+// decide whether the process may serve traffic, so the probe should verify that the
+// process can actually reach its backing services.
+func (s *Server) WithHealthCheck(check HealthCheck) *Server {
+	s.healthCheck = check
 	return s
 }
 

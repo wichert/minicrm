@@ -33,6 +33,9 @@ func NewRouter(srv *Server, authSvc *auth.Service, sessions *scs.SessionManager)
 	r.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/static/favicon.svg", http.StatusMovedPermanently)
 	})
+	// Unauthenticated health probe for container orchestrators and load balancers.
+	r.Get("/healthz", srv.HandleHealth)
+
 	// Public PWA manifest and root-scoped Service Worker
 	r.Get("/manifest.webmanifest", srv.HandleManifest)
 	r.Get("/sw.js", func(w http.ResponseWriter, _ *http.Request) {

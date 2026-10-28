@@ -453,6 +453,51 @@ func accountsByID(accounts []config.MailAccountConfig) map[string]config.MailAcc
 	return out
 }
 
+// ErrSchemaMissing reports that the application schema has not been created yet. It is
+// transient: the seed CLI waits for miniCRM to finish its startup migrations.
+var ErrSchemaMissing = errors.New("database schema is missing; run minicrm so migrations apply before seeding")
+
+// SchemaRetryInterval is how long WaitForSchema sleeps between schema probes.
+const SchemaRetryInterval = 500 * time.Millisecond
+
+// WaitForSchema blocks until the application schema exists or ctx expires.
+//
+// Only a missing schema is retried: the compose seed service starts as soon as the miniCRM
+// container has started, which is before its startup migrations have committed. A schema
+// that exists but is too old, or a probe that fails outright, is a real configuration or
+// ordering error and is returned immediately.
+func WaitForSchema(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+	return waitForSchema(ctx, func(ctx context.Context) error { return SchemaExists(ctx, pool) }, logger)
+}
+
+// waitForSchema is the retry loop behind WaitForSchema with an injectable probe.
+func waitForSchema(ctx context.Context, probe func(context.Context) error, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	for attempt := 1; ; attempt++ {
+		err := probe(ctx)
+		if err == nil {
+			if attempt > 1 {
+				logger.InfoContext(ctx, "seed_schema_ready", slog.Int("attempts", attempt))
+			}
+			return nil
+		}
+		if !errors.Is(err, ErrSchemaMissing) {
+			return err
+		}
+		logger.InfoContext(ctx, "seed_waiting_for_schema",
+			slog.Int("attempt", attempt),
+			slog.Duration("retry_in", SchemaRetryInterval),
+		)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for schema: %w (last error: %w)", ctx.Err(), err)
+		case <-time.After(SchemaRetryInterval):
+		}
+	}
+}
+
 // SchemaExists reports whether goose has applied migrations. The seed CLI never migrates.
 func SchemaExists(ctx context.Context, pool *pgxpool.Pool) error {
 	if pool == nil {
@@ -470,7 +515,7 @@ func SchemaExists(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("check schema: %w", err)
 	}
 	if !ready {
-		return errors.New("database schema is missing; run minicrm so migrations apply before seeding")
+		return ErrSchemaMissing
 	}
 	var version int64
 	if err := pool.QueryRow(ctx, `SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version`).Scan(&version); err != nil {

@@ -102,6 +102,12 @@ func run(ctx context.Context, logger *slog.Logger, configPath string) error {
 		return err
 	}
 
+	// The compose seed service starts before miniCRM has finished its startup migrations, so
+	// wait for the schema instead of failing on the first probe.
+	if err := seed.WaitForSchema(ctx, pool, logger); err != nil {
+		return err
+	}
+
 	_, err = seed.Run(ctx, seed.Options{
 		File:        doc,
 		Accounts:    cfg.Accounts,

@@ -194,6 +194,12 @@ services:
         condition: service_started
       dev-oidc:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
 
   seed:
     <<: *app
@@ -232,8 +238,11 @@ services:
       - attachments:/data/attachments
       - ./docker/seed:/seed:ro
     depends_on:
+      # miniCRM applies the database migrations the seed CLI relies on, so wait until it
+      # reports healthy on /healthz rather than merely having started. The seed CLI also
+      # retries a missing schema, which covers slower first-boot migrations.
       minicrm:
-        condition: service_started
+        condition: service_healthy
       mail:
         condition: service_healthy
 
