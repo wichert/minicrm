@@ -92,6 +92,11 @@ func (s *fakeIMAPServer) SearchByMessageID(_ context.Context, mailbox, messageID
 	return out, nil
 }
 
+func (s *fakeIMAPServer) FindExactMessageID(ctx context.Context, mailbox, messageID string) ([]mail.RawIMAPMessage, error) {
+	matches, err := s.SearchByMessageID(ctx, mailbox, messageID, 2)
+	return matches, err
+}
+
 func (s *fakeIMAPServer) MoveMessage(_ context.Context, sourceMailbox string, _, uid int64, targetMailbox string) error {
 	raw, ok := s.mailboxes[sourceMailbox][uid]
 	if !ok {
@@ -415,6 +420,52 @@ func TestRestoreFromJunkUsesUniqueMessageID(t *testing.T) {
 		if !ambiguous && (processed != 1 || store.jobs[0].Status != "completed" || len(srv.mailboxes["INBOX"]) != 1) {
 			t.Fatalf("recovery failed: %+v", store.jobs)
 		}
+	}
+}
+
+func TestRecoveryUsesCurrentFolderAndReconcilesMovedMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name, job, source, stored string
+		destination, ambiguous    bool
+	}{
+		{"changed junk folder", "restore_from_junk", "OldJunk", "OldJunk", false, false},
+		{"recovery lost response", "restore_from_junk", "OldJunk", "OldJunk", true, false},
+		{"uidless move lost response", "move_to_junk", "INBOX", "INBOX", true, false},
+		{"ambiguous destination", "restore_from_junk", "OldJunk", "OldJunk", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, store := newFakeIMAPServer(), newMemCRMStore()
+			srv.mailboxes[tc.source] = make(map[int64][]byte)
+			id, configured, target := uuid.New(), "NewJunk", "INBOX"
+			if tc.job == "move_to_junk" {
+				target = "Junk"
+			}
+			store.emails[id] = sqlc.Email{ID: id, AccountID: "support", MessageID: "retry@example.com", IMAPMailbox: &tc.stored}
+			raw := []byte("Message-ID: <retry@example.com>\r\n\r\nbody")
+			location := tc.source
+			if tc.destination {
+				location = target
+			}
+			srv.mailboxes[location][1] = raw
+			if tc.ambiguous {
+				srv.mailboxes[location][2] = raw
+			}
+			_, _ = store.EnqueueIMAPJob(context.Background(), sqlc.IMAPJob{AccountID: "support", JobType: tc.job, EmailID: id, SourceMailbox: &configured, TargetMailbox: target, MaxAttempts: 1})
+			worker := mail.NewIMAPActionWorker(store, nil, func(context.Context, string) (mail.IMAPClient, error) { return srv, nil }, nil, nil)
+			processed, err := worker.ProcessPending(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.ambiguous {
+				if processed != 0 || store.jobs[0].Status != "failed" {
+					t.Fatalf("ambiguous match accepted: %+v", store.jobs)
+				}
+				return
+			}
+			if processed != 1 || store.jobs[0].Status != "completed" || len(srv.mailboxes[target]) != 1 {
+				t.Fatalf("not reconciled: %+v", store.jobs)
+			}
+		})
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"os"
-	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -56,37 +55,32 @@ func TestIMAPJobsOrderedAcrossWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var wg sync.WaitGroup
-	results := make(chan sqlc.IMAPJob, 2)
-	errs := make(chan error, 2)
-	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			job, e := q.ClaimNextIMAPJob(ctx)
-			if e != nil {
-				errs <- e
-			} else {
-				results <- job
-			}
-		}()
+	job, _, tx, err := q.BeginIMAPJob(ctx)
+	if err != nil || job.ID != first.ID {
+		t.Fatalf("first job: %+v %v", job, err)
 	}
-	wg.Wait()
-	close(results)
-	close(errs)
-	for job := range results {
-		if job.ID != first.ID {
-			t.Fatalf("later job claimed: %s", job.ID)
-		}
+	if _, _, _, err := q.BeginIMAPJob(ctx); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("concurrent worker claimed job: %v", err)
 	}
-	if len(errs) != 1 || !errors.Is(<-errs, pgx.ErrNoRows) {
-		t.Fatal("second worker did not wait")
-	}
-	if err := q.CompleteIMAPJob(ctx, first.ID, emailID, "Junk"); err != nil {
+	// Simulate a dead worker: PostgreSQL releases its row lock and rolls back the claim.
+	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	job, err := q.ClaimNextIMAPJob(ctx)
+	job, bound, tx, err := q.BeginIMAPJob(ctx)
+	if err != nil || job.ID != first.ID {
+		t.Fatalf("abandoned job not reclaimed: %+v %v", job, err)
+	}
+	if err := bound.CompleteIMAPJob(ctx, first.ID, emailID, "Junk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	job, _, tx, err = q.BeginIMAPJob(ctx)
 	if err != nil || job.ID != second.ID {
 		t.Fatalf("restore not runnable: %+v %v", job, err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

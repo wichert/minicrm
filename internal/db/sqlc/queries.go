@@ -709,14 +709,31 @@ func (q *Queries) EnqueueIMAPJob(ctx context.Context, job IMAPJob) (IMAPJob, err
 	return job, err
 }
 
-// ClaimNextIMAPJob claims the next runnable pending job using FOR UPDATE SKIP LOCKED.
+// BeginIMAPJob holds the claim row lock until the action has finished. A dead
+// worker's transaction is rolled back by PostgreSQL, releasing the claim.
+func (q *Queries) BeginIMAPJob(ctx context.Context) (IMAPJob, *Queries, pgx.Tx, error) {
+	tx, err := q.Begin(ctx)
+	if err != nil {
+		return IMAPJob{}, nil, nil, err
+	}
+	bound := q.WithTx(tx)
+	job, err := bound.ClaimNextIMAPJob(ctx)
+	if err != nil {
+		_ = tx.Rollback(context.Background())
+		return IMAPJob{}, nil, nil, err
+	}
+	return job, bound, tx, nil
+}
+
+// ClaimNextIMAPJob claims the next runnable job using FOR UPDATE SKIP LOCKED.
+// Call inside a transaction held for the entire external action.
 func (q *Queries) ClaimNextIMAPJob(ctx context.Context) (IMAPJob, error) {
 	const query = `
 		UPDATE imap_jobs
 		SET status = 'processing', attempts = attempts + 1
 		WHERE id = (
 			SELECT j.id FROM imap_jobs j
-			WHERE j.status = 'pending' AND j.next_run_at <= now()
+			WHERE (j.status = 'processing' OR (j.status = 'pending' AND j.next_run_at <= now()))
 			  AND NOT EXISTS (
 			    SELECT 1 FROM imap_jobs earlier
 			    WHERE earlier.email_id = j.email_id AND earlier.account_id = j.account_id

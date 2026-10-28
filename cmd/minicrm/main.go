@@ -125,8 +125,8 @@ func run(logger *slog.Logger) error {
 	syncWorkers := make([]*mail.IMAPSyncWorker, 0, len(cfg.Accounts))
 	for _, acct := range cfg.Accounts {
 		acct := acct
-		dialer := func(_ context.Context) (mail.IMAPClient, error) {
-			return mail.DialIMAP(acct.IMAPHost, acct.IMAPPort, acct.IMAPUsername, acct.IMAPPassword, acct.IMAPImplicitTLS)
+		dialer := func(ctx context.Context) (mail.IMAPClient, error) {
+			return mail.DialIMAPContext(ctx, acct.IMAPHost, acct.IMAPPort, acct.IMAPUsername, acct.IMAPPassword, acct.IMAPImplicitTLS)
 		}
 		accountDialers[acct.ID] = dialer
 		endpoint := mail.IMAPEndpoint{Host: acct.IMAPHost, Port: acct.IMAPPort, Username: acct.IMAPUsername}

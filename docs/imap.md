@@ -110,12 +110,14 @@ All IMAP folder mutations triggered by user actions are decoupled from HTTP requ
 | `append_to_sent` | Outbound reply delivered via SMTP | `APPEND "Sent" (\Seen) {<size>}` | Sets `emails.imap_mailbox = 'Sent'`, `imap_jobs.status = 'completed'`. |
 
 ### Retry & Backoff
-- If an IMAP job encounters a transient network or server error, `FailIMAPJob` increments `attempts` and reschedules the job with exponential backoff (`next_run_at = now() + 2^attempts seconds`, up to `max_attempts = 10`).
+- A transaction holds the claim row lock for the external action, preventing concurrent jobs for the same email; on worker death PostgreSQL rolls it back and releases the claim. Actions have a two-minute timeout, and a lost connection closes the active IMAP client.
+- If an IMAP job encounters a transient network or server error, `FailIMAPJob` reschedules the job with exponential backoff (`next_run_at = now() + 2^attempts seconds`, up to `max_attempts = 10`).
+- Folder moves use the email's current mailbox and bounded, header-only exact Message-ID checks. If a move's result is uncertain, a unique destination match reconciles it; ambiguous matches fail safely. IMAP APPEND is not transactional and may still be duplicated if its outcome is uncertain.
 
 ### Why Deleting Emails from `Archive` is Safe
 - **One-way `INBOX` sync**: `IMAPSyncWorker` only reads from `INBOX`. It never inspects `Archive`, `Junk`, or `Sent` for deletions or expunges.
 - **Complete local persistence**: Every email's headers, plain-text body, sanitized HTML body, and attachments are stored in PostgreSQL and on local disk as soon as the message is ingested from `INBOX`.
-- **Missing UID tolerance**: If an email was already moved or deleted externally on the IMAP server before a `move_to_archive` or `move_to_junk` job runs (`ErrMessageNotFound` or `UIDVALIDITY` mismatch), `IMAPActionWorker` treats the missing UID as a benign no-op and marks the job `completed`.
+- **Missing message tolerance**: If a `move_to_archive` or `move_to_junk` job has a recorded UID but finds no matching message in either source or destination, it treats external deletion as a benign no-op. Recovery and UID-less moves fail safely when the message cannot be located.
 - Therefore, operators or mail retention policies can freely delete or purge emails from the IMAP `Archive` folder without breaking thread history, attachment downloads, or the **Reopen & Merge** workflow.
 
 ---
