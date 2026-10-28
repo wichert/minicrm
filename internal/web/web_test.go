@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/wichert/minicrm/internal/audit"
@@ -702,6 +703,29 @@ func TestCompleteFromNewHTTP(t *testing.T) {
 	}
 	if rec := request("", url.Values{"status": {"completed"}, "complete_from_new": {"1"}}); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("wrong source status: %d", rec.Code)
+	}
+}
+
+func TestRemoteImageAccessAndNotice(t *testing.T) {
+	srv, store, router, _, singleUser := buildAccountTestServer(t)
+	threadID, emailID := uuid.New(), uuid.New()
+	store.threads[threadID] = sqlc.Thread{ID: threadID, AccountID: "sales", Status: sqlc.ThreadStatusNew, LastMessageAt: time.Now()}
+	store.emails[emailID] = sqlc.Email{ID: emailID, ThreadID: threadID, AccountID: "sales", BodyHTMLSanitized: `<img data-blocked-src="https://example.com/pixel">`}
+	page := httptest.NewRecorder()
+	router.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String(), nil))
+	if !strings.Contains(page.Body.String(), "Remote images blocked for your privacy") || !strings.Contains(page.Body.String(), "Load images for this message") {
+		t.Fatal("missing image consent notice")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/emails/"+emailID.String()+"/images/0", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), singleUser))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", emailID.String())
+	rctx.URLParams.Add("index", "0")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+	srv.HandleRemoteImage(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("inaccessible image: %d", rec.Code)
 	}
 }
 

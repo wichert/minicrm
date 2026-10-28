@@ -69,12 +69,13 @@ type InboxViewData struct {
 
 // EmailItemView holds an email, its formatted timestamp, and its attachments.
 type EmailItemView struct {
-	Email         sqlc.Email
-	FormattedSent string
-	FullSent      string
-	Snippet       string
-	Attachments   []sqlc.Attachment
-	IsLatest      bool
+	Email           sqlc.Email
+	FormattedSent   string
+	FullSent        string
+	Snippet         string
+	Attachments     []sqlc.Attachment
+	HasRemoteImages bool
+	IsLatest        bool
 }
 
 // EventItemView holds a formatted thread audit event sentence.
@@ -982,6 +983,12 @@ const threadDetailBody = `
     {{if .Attachments}}<span class="attachment-chip" title="{{len .Attachments}} attachment(s)">&#128206; {{len .Attachments}}</span>{{end}}
     <time class="muted message-time" title="{{.FullSent}}">{{.FormattedSent}}</time>
   </summary>
+  {{if .HasRemoteImages}}
+  <div class="remote-image-notice">
+    <p>Remote images blocked for your privacy. Loading them may tell the sender you opened this message.</p>
+    <button type="button" class="btn btn-secondary btn-small" data-load-images data-image-prefix="/emails/{{.Email.ID}}/images/">Load images for this message</button>
+  </div>
+  {{end}}
   <iframe
     class="email-frame"
     src="/emails/{{.Email.ID}}/body"

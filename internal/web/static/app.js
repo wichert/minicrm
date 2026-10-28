@@ -173,6 +173,32 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
+  document.querySelectorAll("[data-load-images]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var frame = button.closest(".message").querySelector(".email-frame");
+      try {
+        var doc = frame.contentDocument;
+        if (!doc || !doc.body || doc.readyState !== "complete" || doc.URL === "about:blank") {
+          button.textContent = "Message is still loading; try again";
+          return;
+        }
+        var images = doc.querySelectorAll("img[data-blocked-src]");
+        if (!images.length) {
+          button.textContent = "No blocked images found; try again";
+          return;
+        }
+        images.forEach(function (image, index) {
+          image.src = button.dataset.imagePrefix + index;
+          image.removeAttribute("data-blocked-src");
+        });
+        button.disabled = true;
+        button.textContent = "Images requested";
+      } catch (_err) {
+        button.textContent = "Could not load images";
+      }
+    });
+  });
+
   document.querySelectorAll(".email-frame").forEach(function (frame) {
     frame.addEventListener("load", function () {
       observeEmailFrame(frame);
