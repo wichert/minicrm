@@ -280,9 +280,21 @@ func (s *Service) enqueueFolderMoveJobs(ctx context.Context, threadID uuid.UUID,
 // The target user must be active and have access to the thread's mail account; otherwise
 // ErrAssigneeNoAccountAccess is returned.
 func (s *Service) Reassign(ctx context.Context, threadID, newAssigneeID uuid.UUID, actorID *uuid.UUID) error {
+	if atomicStore, ok := s.store.(AtomicStore); ok {
+		return atomicStore.InTransaction(ctx, func(store Store, auditStore audit.Store) error {
+			return NewService(store, s.audit.WithStore(auditStore), nil).reassign(ctx, threadID, newAssigneeID, actorID)
+		})
+	}
+	return s.reassign(ctx, threadID, newAssigneeID, actorID)
+}
+
+func (s *Service) reassign(ctx context.Context, threadID, newAssigneeID uuid.UUID, actorID *uuid.UUID) error {
 	thread, err := s.store.GetThreadByID(ctx, threadID)
 	if err != nil {
 		return fmt.Errorf("load thread: %w", err)
+	}
+	if thread.Status != sqlc.ThreadStatusNew && thread.Status != sqlc.ThreadStatusInProgress {
+		return fmt.Errorf("%w: cannot assign a %s thread", ErrInvalidTransition, thread.Status)
 	}
 	targetUser, err := s.store.GetUserByID(ctx, newAssigneeID)
 	if err != nil {

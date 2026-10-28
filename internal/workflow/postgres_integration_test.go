@@ -141,6 +141,33 @@ func TestPostgresCompleteFromNewOrderingAndConcurrency(t *testing.T) {
 		t.Fatalf("source deleted on failed merge: %v", err)
 	}
 
+	assignee := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO users(id,email,display_name,allowed_accounts) VALUES ($1,$2,'Agent',ARRAY['support'])`, assignee, assignee.String()+"@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the thread row while closing it; a concurrent reassign must wait and
+	// validate the committed state rather than act on its earlier snapshot.
+	id = newThread()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE threads SET status='spam' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() { result <- svc.Reassign(ctx, id, assignee, nil) }()
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; !errors.Is(err, workflow.ErrInvalidTransition) {
+		t.Fatalf("closed thread reassigned: %v", err)
+	}
+	closed, err := q.GetThreadByID(ctx, id)
+	if err != nil || closed.AssigneeID != nil {
+		t.Fatalf("unexpected closed assignment: %+v %v", closed, err)
+	}
+
 	for i := 0; i < 20; i++ {
 		id = newThread()
 		var wg sync.WaitGroup
