@@ -507,7 +507,7 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 			LatestSnippet:   views.ExtractEmailSnippet(th.LatestBodyText, th.LatestBodyHTML, 130),
 			LatestDirection: th.LatestDirection,
 			MessageCount:    th.MessageCount,
-			CanAssignToMe:   (th.Status == sqlc.ThreadStatusNew || th.Status == sqlc.ThreadStatusInProgress) && (th.AssigneeID == nil || *th.AssigneeID != user.ID),
+			CanAssignToMe:   (th.Status == sqlc.ThreadStatusNew || th.Status == sqlc.ThreadStatusInProgress) && th.AssigneeID == nil,
 		})
 	}
 
@@ -674,8 +674,10 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 				continue
 			}
 			history = append(history, views.ThreadSummaryItem{
-				Thread: previousThread, AccountName: s.accountName(previousThread.AccountID),
+				Thread:        previousThread,
+				AccountName:   s.accountName(previousThread.AccountID),
 				FormattedTime: views.FormatTimestamp(previousThread.LastMessageAt, displayTZ),
+				FullTime:      views.FormatTimestampFull(previousThread.LastMessageAt, displayTZ),
 			})
 		}
 		s.audit.LogDataAccess(ctx, "thread_history", thread.ID.String())
@@ -847,8 +849,15 @@ func (s *Server) HandleTransitionThread(w http.ResponseWriter, r *http.Request) 
 		s.setFlash(r, flashKindSuccess, "Thread restored to In progress; recovery from Junk has been queued.")
 	case targetStatus == sqlc.ThreadStatusSpam:
 		s.setFlash(r, flashKindSuccess, "Thread marked as spam; moves to Junk have been queued.")
+	case targetStatus == sqlc.ThreadStatusCompleted:
+		s.setFlash(r, flashKindSuccess, "Thread marked as Completed; moves to Archive have been queued.")
 	default:
 		s.setFlash(r, flashKindSuccess, fmt.Sprintf("Thread marked as %s.", views.FormatStatus(targetStatus)))
+	}
+	if returnTo := sanitizeInboxBackURL(r.FormValue("return_to"), r.Host); returnTo != "" {
+		// #nosec G710 -- sanitizeInboxBackURL permits only the local /threads path.
+		http.Redirect(w, r, returnTo, http.StatusSeeOther)
+		return
 	}
 	redirectToThread(w, r, threadID)
 }

@@ -773,41 +773,71 @@ const inboxTablePartial = `
   <table class="threads-table">
     <thead>
       <tr>
-        <th scope="col"><label><input type="checkbox" data-select-all> Select all on page</label></th>
-        {{if .ShowAccountUI}}<th scope="col">Account</th>{{end}}
+        {{if and (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="select-cell"><label class="select-label"><input type="checkbox" data-select-all aria-label="Select all on page"></label></th>{{end}}
         <th scope="col">Thread</th>
         <th scope="col">Customer</th>
         <th scope="col">Status</th>
         <th scope="col">Assignee</th>
+        {{if .ShowAccountUI}}<th scope="col">Account</th>{{end}}
         <th scope="col">Age</th>
+        {{if and (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th>{{end}}
       </tr>
     </thead>
     <tbody>
       {{range .Threads}}
       <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}" data-row-href="/threads/{{.Thread.ID}}">
-        <td class="select-cell"><label><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>
-        {{if $.ShowAccountUI}}<td class="account-cell"><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
+        {{if and (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}<td class="select-cell"><label class="select-label"><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-status="{{.Thread.Status}}" data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>{{end}}
         <td class="thread-cell">
           <a class="thread-link" href="/threads/{{.Thread.ID}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
           <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
         </td>
         <td class="customer-cell">
-          <span class="customer-name">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else}}Unknown customer{{end}}</span>
-          <span class="customer-email" title="{{.Thread.CustomerEmail}}">{{.Thread.CustomerEmail}}</span>
+          {{if .Thread.CustomerName}}
+          <span class="customer-name">{{.Thread.CustomerName}}</span>
+          {{if .Thread.CustomerEmail}}<span class="customer-email" title="{{.Thread.CustomerEmail}}">{{.Thread.CustomerEmail}}</span>{{end}}
+          {{else}}
+          <span class="customer-name"{{if .Thread.CustomerEmail}} title="{{.Thread.CustomerEmail}}"{{end}}>{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}</span>
+          {{end}}
         </td>
-        <td class="status-cell"><span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span></td>
-        <td class="assignee-cell">{{if .AssigneeName}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}
-          {{if .CanAssignToMe}}<form method="post" action="/threads/{{.Thread.ID}}/assign" class="inline-form">
-            <input type="hidden" name="assignee_id" value="{{$.CurrentUser.ID}}">
-            <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
-            <button type="submit" class="btn btn-secondary btn-small" aria-label="Assign {{.Thread.SubjectDisplay}} to me">Assign to me</button>
-          </form>{{end}}
+        <td class="status-cell">
+          <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
         </td>
+        <td class="assignee-cell">{{if .AssigneeName}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}</td>
+        {{if $.ShowAccountUI}}<td class="account-cell"><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
         <td class="nowrap age-cell">
           {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="First message received {{.FullTime}}">{{.WaitLabel}}</span>
           {{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}
           <span class="muted age-date">{{.FormattedTime}}</span>
         </td>
+        {{if and (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}
+        <td class="actions-cell">
+          {{if or (eq .Thread.Status "new") (eq .Thread.Status "in_progress")}}
+          <details class="row-menu" data-row-menu>
+            <summary class="row-menu-trigger" aria-label="Actions for {{.Thread.SubjectDisplay}}" title="Actions">
+              <span aria-hidden="true">&#8943;</span>
+            </summary>
+            <div class="row-menu-popover">
+              {{if .CanAssignToMe}}<form method="post" action="/threads/{{.Thread.ID}}/assign" class="row-menu-form">
+                <input type="hidden" name="assignee_id" value="{{$.CurrentUser.ID}}">
+                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                <button type="submit" class="row-menu-item" aria-label="Assign {{.Thread.SubjectDisplay}} to me">Assign to me</button>
+              </form>{{end}}
+              <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as completed and move its messages to Archive?" data-confirm-action="Complete thread">
+                <input type="hidden" name="status" value="completed">
+                {{if eq .Thread.Status "new"}}<input type="hidden" name="complete_from_new" value="1">{{end}}
+                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                <button type="submit" class="row-menu-item" aria-label="Complete {{.Thread.SubjectDisplay}}">Complete</button>
+              </form>
+              <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as spam and move its messages to Junk?" data-confirm-action="Mark as spam">
+                <input type="hidden" name="status" value="spam">
+                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                <button type="submit" class="row-menu-item row-menu-item-danger" aria-label="Mark {{.Thread.SubjectDisplay}} as spam">Mark as spam</button>
+              </form>
+            </div>
+          </details>
+          {{end}}
+        </td>
+        {{end}}
       </tr>
       {{end}}
     </tbody>
@@ -863,19 +893,22 @@ const inboxBody = `
     <noscript><button type="submit" class="btn btn-secondary">Filter</button></noscript>
   </form>
 </div>
-{{if .Threads}}
-<form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
+{{if and .Threads (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}
+<form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-has-selection="false" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
   <input type="hidden" name="return_to" value="{{.RefreshURL}}">
   <label class="mobile-select-all"><input type="checkbox" data-select-all-mobile> Select all on page</label>
-  <span data-selected-count aria-live="polite">0 selected</span>
-  <label class="inline-field">Assign selected to
-    <select name="assignee_id" aria-label="Assignee for selected conversations">
-      <option value="">Choose assignee</option>
-      {{range .Users}}<option value="{{.ID}}">{{.DisplayName}}</option>{{end}}
-    </select>
-  </label>
-  <button type="submit" formaction="/threads/bulk-assign" class="btn btn-secondary btn-small">Assign selected</button>
-  <button type="submit" class="btn btn-danger btn-small" data-confirm-submit>Mark selected as spam</button>
+  <span data-selected-count aria-live="polite">Select conversations to assign, complete, or mark as spam.</span>
+  <div class="bulk-actions-controls">
+    <label class="inline-field">Assign selected to
+      <select name="assignee_id" aria-label="Assignee for selected conversations" data-bulk-assignee disabled aria-disabled="true">
+        <option value="">Choose assignee</option>
+        {{range .Users}}<option value="{{.ID}}">{{.DisplayName}}</option>{{end}}
+      </select>
+    </label>
+    <button type="submit" formaction="/threads/bulk-assign" class="btn btn-secondary btn-small" data-bulk-action="assign" disabled aria-disabled="true">Assign selected</button>
+    <button type="submit" formaction="/threads/bulk-complete" class="btn btn-secondary btn-small" data-bulk-action="complete" data-confirm="Mark selected conversations as completed and queue moves to Archive?" data-confirm-action="Complete selected" data-confirm-submit disabled aria-disabled="true">Complete selected</button>
+    <button type="submit" class="btn btn-danger btn-small" data-bulk-action="spam" data-confirm-submit disabled aria-disabled="true">Mark selected as spam</button>
+  </div>
 </form>
 {{end}}
 <p class="results-count">
@@ -906,20 +939,24 @@ const threadDetailBody = `
     </div>
   </div>
 
+  {{if .PreviousThreads}}
   <details class="previous-conversations">
-    <summary>Previous conversations</summary>
+    <summary>{{len .PreviousThreads}} earlier conversation{{if ne (len .PreviousThreads) 1}}s{{end}}</summary>
     <p class="helper">Other conversations from this email address</p>
-    {{if .PreviousThreads}}
-    <ul>
+    <ul class="previous-conversations-list">
       {{range .PreviousThreads}}
-      <li><a href="/threads/{{.Thread.ID}}" target="_blank" rel="noopener">{{.Thread.SubjectDisplay}}</a>
-        <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
-        <span>{{.FormattedTime}}</span> <span class="badge badge-account">{{.AccountName}}</span></li>
+      <li class="previous-conversation-row">
+        <a class="previous-conversation-link" href="/threads/{{.Thread.ID}}" target="_blank" rel="noopener" title="Opens in a new tab so your reply stays here.">{{.Thread.SubjectDisplay}}</a>
+        <span class="previous-conversation-meta">
+          <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
+          <time class="muted previous-conversation-time" title="{{.FullTime}}">{{.FormattedTime}}</time>
+          {{if $.ShowAccountUI}}<span class="badge badge-account">{{.AccountName}}</span>{{end}}
+        </span>
+      </li>
       {{end}}
     </ul>
-    <p class="helper">Links open in a new tab so your reply stays here.</p>
-    {{else}}<p class="helper">No other conversations found.</p>{{end}}
   </details>
+  {{end}}
 
   {{if .ReopensThread}}
   <div class="banner banner-reopen">
