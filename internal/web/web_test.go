@@ -664,6 +664,8 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 		switch {
 		case r.URL.Path == "/threads":
 			srv.HandleListThreads(w, r)
+		case r.URL.Path == "/threads/bulk-spam" && r.Method == http.MethodPost:
+			srv.HandleBulkSpam(w, r)
 		case r.URL.Path == "/settings":
 			if r.Method == http.MethodPost {
 				srv.HandleUpdateSettings(w, r)
@@ -1498,6 +1500,49 @@ func TestSettingsEndpointsAcceptMultipartForm(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("multipart precreate user must create the submitted user, got %+v", store.users)
+	}
+}
+
+func TestBulkSpamRevalidatesAndPreservesFilter(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	newID, progressID, spamID, completedID, privateID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	for _, entry := range []struct {
+		id      uuid.UUID
+		account string
+		status  sqlc.ThreadStatus
+	}{
+		{newID, "support", sqlc.ThreadStatusNew}, {progressID, "support", sqlc.ThreadStatusInProgress}, {spamID, "support", sqlc.ThreadStatusSpam}, {completedID, "support", sqlc.ThreadStatusCompleted}, {privateID, "sales", sqlc.ThreadStatusNew},
+	} {
+		store.threads[entry.id] = sqlc.Thread{ID: entry.id, AccountID: entry.account, Status: entry.status, SubjectDisplay: "Example", LastMessageAt: time.Now()}
+		uid, inbox := int64(42), "INBOX"
+		em := sqlc.Email{ID: uuid.New(), ThreadID: entry.id, AccountID: entry.account, Direction: "inbound", IMAPUID: &uid, IMAPMailbox: &inbox}
+		store.emails[em.ID] = em
+	}
+	page := "/threads?status=new&q=Example"
+	form := url.Values{"thread_id": {newID.String(), progressID.String(), spamID.String(), completedID.String(), privateID.String()}, "return_to": {page}}
+	req := httptest.NewRequest(http.MethodPost, "/threads/bulk-spam?as=single", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != page {
+		t.Fatalf("redirect: %d %s", rec.Code, rec.Header().Get("Location"))
+	}
+	if store.threads[newID].Status != sqlc.ThreadStatusSpam || store.threads[progressID].Status != sqlc.ThreadStatusSpam || store.threads[privateID].Status != sqlc.ThreadStatusNew || len(store.jobs) != 2 || len(store.threadEvents) != 2 {
+		t.Fatalf("unexpected transitions: jobs=%+v events=%+v", store.jobs, store.threadEvents)
+	}
+	for _, job := range store.jobs {
+		if job.AccountID != "support" || job.JobType != "move_to_junk" {
+			t.Fatalf("wrong job: %+v", job)
+		}
+	}
+	follow := httptest.NewRequest(http.MethodGet, page+"&as=single", nil)
+	for _, cookie := range rec.Result().Cookies() {
+		follow.AddCookie(cookie)
+	}
+	rec2 := httptest.NewRecorder()
+	router.ServeHTTP(rec2, follow)
+	if !strings.Contains(rec2.Body.String(), "2 marked as spam and queued for Junk; 3 failed.") || !strings.Contains(rec2.Body.String(), privateID.String()+": unavailable") {
+		t.Fatalf("summary missing: %s", rec2.Body.String())
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -117,6 +118,40 @@ func TestEndToEndOIDCAuthenticationWithDevIDM(t *testing.T) {
 	}
 }
 
+func TestEndToEndBulkSpam(t *testing.T) {
+	baseURL := startSelfContainedE2EServers(t)
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar, Timeout: 15 * time.Second}
+	resp, err := client.Get(baseURL + "/threads")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), e2eBulkThreadID.String()) {
+		t.Fatal("missing inbox selection fixture")
+	}
+	form := url.Values{"thread_id": {e2eBulkThreadID.String()}, "return_to": {"/threads?status=open"}}
+	resp, err = client.PostForm(baseURL+"/threads/bulk-spam", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "1 marked as spam and queued for Junk; 0 failed.") {
+		t.Fatalf("bulk failed: %d %s", resp.StatusCode, body)
+	}
+}
+
 func startSelfContainedE2EServers(t *testing.T) string {
 	t.Helper()
 
@@ -136,6 +171,7 @@ func startSelfContainedE2EServers(t *testing.T) string {
 	idm.SetIssuerURL(idmSrv.URL)
 
 	store := newE2EMemStore()
+	store.threads[e2eBulkThreadID] = sqlc.Thread{ID: e2eBulkThreadID, AccountID: "support", Status: sqlc.ThreadStatusNew, SubjectDisplay: "Bulk e2e fixture", LastMessageAt: time.Now()}
 	auditLogger := audit.NewLogger(store, nil)
 	attStore, err := storage.NewStore(t.TempDir(), nil)
 	if err != nil {
@@ -180,7 +216,10 @@ func startSelfContainedE2EServers(t *testing.T) string {
 	return crmSrv.URL
 }
 
+var e2eBulkThreadID = uuid.MustParse("d9000000-0000-4000-8000-000000000001")
+
 type e2eMemStore struct {
+	threads         map[uuid.UUID]sqlc.Thread
 	users           map[uuid.UUID]sqlc.User
 	settings        *sqlc.SystemSettings
 	accountSettings map[string]sqlc.AccountSettings
@@ -188,7 +227,7 @@ type e2eMemStore struct {
 }
 
 func newE2EMemStore() *e2eMemStore {
-	return &e2eMemStore{users: make(map[uuid.UUID]sqlc.User)}
+	return &e2eMemStore{users: make(map[uuid.UUID]sqlc.User), threads: make(map[uuid.UUID]sqlc.Thread)}
 }
 
 func (m *e2eMemStore) GetUserByID(_ context.Context, id uuid.UUID) (sqlc.User, error) {
@@ -287,15 +326,23 @@ func (m *e2eMemStore) UpsertSystemSettings(_ context.Context, s sqlc.SystemSetti
 }
 
 func (m *e2eMemStore) ListThreads(_ context.Context, _ sqlc.ListThreadsFilter) ([]sqlc.Thread, error) {
-	return nil, nil
+	var out []sqlc.Thread
+	for _, thread := range m.threads {
+		out = append(out, thread)
+	}
+	return out, nil
 }
 
 func (m *e2eMemStore) ListCustomerHistory(_ context.Context, _ []string, _ string, _ uuid.UUID, _ int) ([]sqlc.Thread, error) {
 	return nil, nil
 }
 
-func (m *e2eMemStore) GetThreadByID(_ context.Context, _ uuid.UUID) (sqlc.Thread, error) {
-	return sqlc.Thread{}, pgx.ErrNoRows
+func (m *e2eMemStore) GetThreadByID(_ context.Context, id uuid.UUID) (sqlc.Thread, error) {
+	thread, ok := m.threads[id]
+	if !ok {
+		return sqlc.Thread{}, pgx.ErrNoRows
+	}
+	return thread, nil
 }
 
 func (m *e2eMemStore) GetReplyDraft(_ context.Context, _ uuid.UUID) (sqlc.ReplyDraft, error) {
@@ -306,7 +353,10 @@ func (m *e2eMemStore) SaveReplyDraft(_ context.Context, _, _ uuid.UUID, _, _, _ 
 	return sqlc.ReplyDraft{}, pgx.ErrNoRows
 }
 
-func (m *e2eMemStore) UpdateThreadStatus(_ context.Context, _ uuid.UUID, _ sqlc.ThreadStatus) error {
+func (m *e2eMemStore) UpdateThreadStatus(_ context.Context, id uuid.UUID, status sqlc.ThreadStatus) error {
+	thread := m.threads[id]
+	thread.Status = status
+	m.threads[id] = thread
 	return nil
 }
 

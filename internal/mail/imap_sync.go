@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/mail"
 	"sort"
 	"strings"
 	"time"
@@ -47,6 +48,8 @@ type IMAPClient interface {
 	// SearchByMessageID returns the messages in mailbox whose Message-ID header contains messageID
 	// (normalized, without angle brackets), at most limit of them.
 	SearchByMessageID(ctx context.Context, mailbox, messageID string, limit int) ([]RawIMAPMessage, error)
+	// FindExactMessageID returns up to two exact matches using bounded header-only fetches.
+	FindExactMessageID(ctx context.Context, mailbox, messageID string) ([]RawIMAPMessage, error)
 	MoveMessage(ctx context.Context, sourceMailbox string, uidValidity, uid int64, targetMailbox string) error
 	AppendMessage(ctx context.Context, targetMailbox string, rawRFC822 []byte) error
 	Close() error
@@ -80,6 +83,11 @@ func (e IMAPEndpoint) LogAttrs() []any {
 
 // DialIMAP connects and authenticates to the IMAP server using basic username + password.
 func DialIMAP(host string, port int, username, password string, implicitTLS bool) (*GoIMAPClient, error) {
+	return DialIMAPContext(context.Background(), host, port, username, password, implicitTLS)
+}
+
+// DialIMAPContext bounds network establishment and authentication by ctx.
+func DialIMAPContext(ctx context.Context, host string, port int, username, password string, implicitTLS bool) (*GoIMAPClient, error) {
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	var (
 		c   *imapclient.Client
@@ -97,9 +105,15 @@ func DialIMAP(host string, port int, username, password string, implicitTLS bool
 	if err != nil {
 		return nil, fmt.Errorf("dial imap server %s (user %q): %w", addr, username, err)
 	}
+	stopClose := context.AfterFunc(ctx, func() { _ = c.Close() })
+	defer stopClose()
 	if err := c.Login(username, password).Wait(); err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("imap login to server %s as user %q: %w", addr, username, err)
+	}
+	if err := ctx.Err(); err != nil {
+		_ = c.Close()
+		return nil, err
 	}
 	return &GoIMAPClient{client: c}, nil
 }
@@ -278,6 +292,68 @@ func (g *GoIMAPClient) SearchByMessageID(ctx context.Context, mailbox, messageID
 		uids = uids[:limit]
 	}
 	return g.FetchMessagesByUID(ctx, mailbox, uids)
+}
+
+// FindExactMessageID searches server-side, then fetches only Message-ID headers in
+// small batches. Large or incomplete headers fail closed instead of hiding ambiguity.
+func (g *GoIMAPClient) FindExactMessageID(ctx context.Context, mailbox, messageID string) ([]RawIMAPMessage, error) {
+	if messageID == "" {
+		return nil, errors.New("empty message ID")
+	}
+	uidVal, err := g.SelectMailbox(ctx, mailbox)
+	if err != nil {
+		return nil, err
+	}
+	data, err := g.client.UIDSearch(&imap.SearchCriteria{Header: []imap.SearchCriteriaHeaderField{{Key: "Message-ID", Value: messageID}}}, nil).Wait()
+	if err != nil {
+		return nil, fmt.Errorf("imap search message-id: %w", err)
+	}
+	uids := data.AllUIDs()
+	const batchSize = 32
+	const maxHeader = 8192
+	var exact []RawIMAPMessage
+	for start := 0; start < len(uids); start += batchSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+batchSize, len(uids))
+		var set imap.UIDSet
+		set.AddNum(uids[start:end]...)
+		section := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"Message-ID"}, Peek: true, Partial: &imap.SectionPartial{Size: maxHeader + 1}}
+		cmd := g.client.Fetch(set, &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{section}})
+		for msg := cmd.Next(); msg != nil; msg = cmd.Next() {
+			var uid imap.UID
+			var header []byte
+			var readErr error
+			for item := msg.Next(); item != nil; item = msg.Next() {
+				switch value := item.(type) {
+				case imapclient.FetchItemDataUID:
+					uid = value.UID
+				case imapclient.FetchItemDataBodySection:
+					header, readErr = io.ReadAll(io.LimitReader(value.Literal, maxHeader+1))
+				}
+			}
+			if readErr != nil || len(header) > maxHeader {
+				_ = cmd.Close()
+				return nil, errors.New("invalid or oversized Message-ID header")
+			}
+			parsed, parseErr := mail.ReadMessage(strings.NewReader(string(header)))
+			if parseErr != nil {
+				_ = cmd.Close()
+				return nil, fmt.Errorf("parse Message-ID header: %w", parseErr)
+			}
+			if threading.NormalizeMessageID(parsed.Header.Get("Message-ID")) == messageID {
+				exact = append(exact, RawIMAPMessage{UID: int64(uid), UIDValidity: uidVal})
+			}
+		}
+		if err := cmd.Close(); err != nil {
+			return nil, err
+		}
+		if len(exact) > 1 {
+			return exact[:2], nil
+		}
+	}
+	return exact, nil
 }
 
 // resolveMailboxName returns the real server-side name for the configured folder name and

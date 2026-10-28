@@ -33,10 +33,10 @@ requests. Releases are automated: see [`docs/release.md`](./docs/release.md).
 When modifying MiniCRM, preserve the following invariants (documented in full in [`docs/architecture.md`](./docs/architecture.md)):
 
 1. **Strict Workflow State Machine (`internal/workflow/service.go`)**:
-   - Only `new -> in_progress`, `new -> spam`, and `in_progress -> completed` are permitted as direct transitions.
+   - Only `new -> in_progress`, `new -> spam`, `in_progress -> completed`, and `in_progress -> spam` are permitted as direct transitions. `spam -> in_progress` is permitted only through the explicit audited `RecoverSpam` operation, which queues IMAP recovery.
    - Replies to `completed` threads must create a new thread (`status = 'new'`) with `reopens_thread_id` set; reopening (`completed -> in_progress`) happens only via explicit `ReopenAndMerge`.
 2. **IMAP Folder Lifecycle (`internal/mail/`)**:
-   - `new -> spam` enqueues `move_to_junk` (`INBOX -> Junk`).
+   - `new -> spam` and `in_progress -> spam` enqueue `move_to_junk` (`INBOX -> Junk`). Explicit spam recovery queues account-scoped `restore_from_junk` jobs after preceding jobs for each message; ambiguous Message-ID matches must never be moved.
    - `in_progress -> completed` enqueues `move_to_archive` (`INBOX -> Archive`). Deleting messages from `Archive` on the IMAP server must never break MiniCRM.
    - Outbound replies sent via SMTP must be stored in PostgreSQL and queued via `append_to_sent` (`APPEND` to `Sent`).
    - The `Sent` folder is synchronized after `INBOX` (attach-only; never creates threads, never reopens `completed` threads); MiniCRM's own replies are de-duplicated by `Message-ID`, which SMTP servers must preserve.

@@ -698,8 +698,8 @@ func (q *Queries) EnqueueIMAPJob(ctx context.Context, job IMAPJob) (IMAPJob, err
 	const query = `
 		INSERT INTO imap_jobs (
 			account_id, job_type, email_id, source_mailbox, target_mailbox,
-			imap_uidvalidity, imap_uid, raw_rfc822_path, max_attempts, status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
+			imap_uidvalidity, imap_uid, raw_rfc822_path, max_attempts, status, enqueued_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', clock_timestamp())
 		RETURNING id, enqueued_at`
 	err := q.db.QueryRow(ctx, query,
 		job.AccountID, job.JobType, job.EmailID, job.SourceMailbox, job.TargetMailbox,
@@ -709,15 +709,38 @@ func (q *Queries) EnqueueIMAPJob(ctx context.Context, job IMAPJob) (IMAPJob, err
 	return job, err
 }
 
-// ClaimNextIMAPJob claims the next runnable pending job using FOR UPDATE SKIP LOCKED.
+// BeginIMAPJob holds the claim row lock until the action has finished. A dead
+// worker's transaction is rolled back by PostgreSQL, releasing the claim.
+func (q *Queries) BeginIMAPJob(ctx context.Context) (IMAPJob, *Queries, pgx.Tx, error) {
+	tx, err := q.Begin(ctx)
+	if err != nil {
+		return IMAPJob{}, nil, nil, err
+	}
+	bound := q.WithTx(tx)
+	job, err := bound.ClaimNextIMAPJob(ctx)
+	if err != nil {
+		_ = tx.Rollback(context.Background())
+		return IMAPJob{}, nil, nil, err
+	}
+	return job, bound, tx, nil
+}
+
+// ClaimNextIMAPJob claims the next runnable job using FOR UPDATE SKIP LOCKED.
+// Call inside a transaction held for the entire external action.
 func (q *Queries) ClaimNextIMAPJob(ctx context.Context) (IMAPJob, error) {
 	const query = `
 		UPDATE imap_jobs
 		SET status = 'processing', attempts = attempts + 1
 		WHERE id = (
-			SELECT id FROM imap_jobs
-			WHERE status = 'pending' AND next_run_at <= now()
-			ORDER BY enqueued_at ASC
+			SELECT j.id FROM imap_jobs j
+			WHERE (j.status = 'processing' OR (j.status = 'pending' AND j.next_run_at <= now()))
+			  AND NOT EXISTS (
+			    SELECT 1 FROM imap_jobs earlier
+			    WHERE earlier.email_id = j.email_id AND earlier.account_id = j.account_id
+			      AND earlier.status IN ('pending', 'processing')
+			      AND (earlier.enqueued_at, earlier.id) < (j.enqueued_at, j.id)
+			  )
+			ORDER BY j.enqueued_at ASC, j.id ASC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
@@ -733,12 +756,18 @@ func (q *Queries) ClaimNextIMAPJob(ctx context.Context) (IMAPJob, error) {
 	return j, err
 }
 
+// RestoreIMAPEmail returns account-scoped message metadata for ordered folder moves.
+func (q *Queries) RestoreIMAPEmail(ctx context.Context, accountID string, emailID uuid.UUID) (Email, error) {
+	var e Email
+	err := q.db.QueryRow(ctx, `SELECT message_id, imap_mailbox, imap_uidvalidity, imap_uid FROM emails WHERE id=$1 AND account_id=$2`, emailID, accountID).Scan(&e.MessageID, &e.IMAPMailbox, &e.IMAPUIDValidity, &e.IMAPUID)
+	return e, err
+}
+
 // CompleteIMAPJob marks an IMAP job as completed and updates the email's imap_mailbox.
 func (q *Queries) CompleteIMAPJob(ctx context.Context, jobID, emailID uuid.UUID, newMailbox string) error {
-	if _, err := q.db.Exec(ctx, `UPDATE imap_jobs SET status = 'completed', last_error = NULL WHERE id = $1`, jobID); err != nil {
-		return err
-	}
-	_, err := q.db.Exec(ctx, `UPDATE emails SET imap_mailbox = $2, imap_uid = NULL WHERE id = $1`, emailID, newMailbox)
+	_, err := q.db.Exec(ctx, `WITH finished AS (
+		UPDATE imap_jobs SET status = 'completed', last_error = NULL WHERE id = $1 AND email_id = $2 RETURNING email_id
+	) UPDATE emails SET imap_mailbox = $3, imap_uid = NULL WHERE id IN (SELECT email_id FROM finished)`, jobID, emailID, newMailbox)
 	return err
 }
 

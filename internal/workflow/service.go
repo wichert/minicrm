@@ -92,7 +92,7 @@ func IsValidTransition(from, to sqlc.ThreadStatus) bool {
 	case sqlc.ThreadStatusNew:
 		return to == sqlc.ThreadStatusInProgress || to == sqlc.ThreadStatusSpam
 	case sqlc.ThreadStatusInProgress:
-		return to == sqlc.ThreadStatusCompleted
+		return to == sqlc.ThreadStatusCompleted || to == sqlc.ThreadStatusSpam
 	default:
 		return false
 	}
@@ -173,6 +173,53 @@ func (s *Service) CompleteFromNew(ctx context.Context, threadID uuid.UUID, actor
 	return err
 }
 
+// RecoverSpam atomically returns a spam thread to in-progress and queues restoration.
+// Jobs are ordered per email so an already-running junk move finishes first.
+func (s *Service) RecoverSpam(ctx context.Context, threadID uuid.UUID, actorID *uuid.UUID) error {
+	atomicStore, ok := s.store.(AtomicStore)
+	if !ok {
+		return errors.New("workflow store does not support transactions")
+	}
+	err := atomicStore.InTransaction(ctx, func(store Store, auditStore audit.Store) error {
+		thread, err := store.GetThreadByID(ctx, threadID)
+		if err != nil {
+			return err
+		}
+		if thread.Status != sqlc.ThreadStatusSpam {
+			return fmt.Errorf("%w: %s -> in_progress", ErrInvalidTransition, thread.Status)
+		}
+		settings, err := store.GetSystemSettings(ctx)
+		if err != nil {
+			return err
+		}
+		emails, err := store.ListEmailsByThread(ctx, threadID)
+		if err != nil {
+			return err
+		}
+		if err := store.UpdateThreadStatus(ctx, threadID, sqlc.ThreadStatusInProgress); err != nil {
+			return err
+		}
+		logger := s.audit.WithStore(auditStore)
+		if err := logger.LogThreadEvent(ctx, audit.ThreadEventParams{ThreadID: threadID, ActorUserID: actorID, EventType: "status_changed", OldValue: map[string]string{"status": "spam"}, NewValue: map[string]string{"status": "in_progress", "reason": "not_spam"}}); err != nil {
+			return err
+		}
+		for _, em := range emails {
+			if em.Direction != "inbound" {
+				continue
+			}
+			source := settings.IMAPJunkMailbox
+			if _, err := store.EnqueueIMAPJob(ctx, sqlc.IMAPJob{AccountID: em.AccountID, JobType: "restore_from_junk", EmailID: em.ID, SourceMailbox: &source, TargetMailbox: settings.IMAPInboxMailbox, MaxAttempts: 10}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		s.wakeJobs()
+	}
+	return err
+}
+
 func (s *Service) wakeJobs() {
 	if s.jobWakeCh != nil {
 		select {
@@ -201,10 +248,7 @@ func (s *Service) enqueueFolderMoveJobs(ctx context.Context, threadID uuid.UUID,
 
 	enqueued := 0
 	for _, em := range emails {
-		if em.Direction != "inbound" || em.IMAPUID == nil || em.IMAPMailbox == nil {
-			continue
-		}
-		if *em.IMAPMailbox == targetMailbox {
+		if em.Direction != "inbound" || em.IMAPMailbox == nil || (em.IMAPUID == nil && em.MessageID == "") {
 			continue
 		}
 		_, err := s.store.EnqueueIMAPJob(ctx, sqlc.IMAPJob{

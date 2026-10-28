@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,17 +84,44 @@ func (w *IMAPActionWorker) Run(ctx context.Context) {
 func (w *IMAPActionWorker) ProcessPending(ctx context.Context) (int, error) {
 	processed := 0
 	for {
-		job, err := w.store.ClaimNextIMAPJob(ctx)
+		store := w.store
+		var tx pgx.Tx
+		var job sqlc.IMAPJob
+		var err error
+		if transactional, ok := w.store.(interface {
+			BeginIMAPJob(context.Context) (sqlc.IMAPJob, *sqlc.Queries, pgx.Tx, error)
+		}); ok {
+			var bound *sqlc.Queries
+			job, bound, tx, err = transactional.BeginIMAPJob(ctx)
+			if err == nil {
+				store = bound
+			}
+		} else {
+			job, err = store.ClaimNextIMAPJob(ctx)
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			return processed, nil
 		}
 		if err != nil {
 			return processed, fmt.Errorf("claim next imap job: %w", err)
 		}
-		if err := w.executeJob(ctx, job); err != nil {
+		jobCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		executeErr := w.executeJob(jobCtx, store, job)
+		cancel()
+		if err := executeErr; err != nil {
 			backoff := time.Duration(1<<min(job.Attempts, 8)) * time.Second
 			nextRun := time.Now().UTC().Add(backoff)
-			_ = w.store.FailIMAPJob(ctx, job.ID, job.Attempts, job.MaxAttempts, err.Error(), nextRun)
+			if failErr := store.FailIMAPJob(ctx, job.ID, job.Attempts, job.MaxAttempts, err.Error(), nextRun); failErr != nil {
+				if tx != nil {
+					_ = tx.Rollback(context.Background())
+				}
+				return processed, fmt.Errorf("reschedule imap job: %w", failErr)
+			}
+			if tx != nil {
+				if commitErr := tx.Commit(ctx); commitErr != nil {
+					return processed, fmt.Errorf("commit imap job failure: %w", commitErr)
+				}
+			}
 			attrs := []any{
 				slog.String("job_id", job.ID.String()),
 				slog.String("job_type", job.JobType),
@@ -104,11 +132,16 @@ func (w *IMAPActionWorker) ProcessPending(ctx context.Context) (int, error) {
 			w.logger.WarnContext(ctx, "imap_job_failed", attrs...)
 			continue
 		}
+		if tx != nil {
+			if err := tx.Commit(ctx); err != nil {
+				return processed, fmt.Errorf("commit imap job: %w", err)
+			}
+		}
 		processed++
 	}
 }
 
-func (w *IMAPActionWorker) executeJob(ctx context.Context, job sqlc.IMAPJob) error {
+func (w *IMAPActionWorker) executeJob(ctx context.Context, store ActionJobStore, job sqlc.IMAPJob) error {
 	if job.AccountID == "" {
 		return fmt.Errorf("job %s has no account id", job.ID)
 	}
@@ -116,39 +149,78 @@ func (w *IMAPActionWorker) executeJob(ctx context.Context, job sqlc.IMAPJob) err
 	if err != nil {
 		return fmt.Errorf("dial imap for job %s (account %s): %w", job.ID, job.AccountID, err)
 	}
-	defer func() { _ = client.Close() }()
+	stopClose := context.AfterFunc(ctx, func() { _ = client.Close() })
+	defer func() { stopClose(); _ = client.Close() }()
 
 	switch job.JobType {
-	case "move_to_archive", "move_to_junk":
-		if job.SourceMailbox == nil || job.IMAPUID == nil {
-			// Already moved or missing UID; complete as benign no-op.
-			return w.store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
+	case "move_to_archive", "move_to_junk", "restore_from_junk":
+		located, ok := store.(interface {
+			RestoreIMAPEmail(context.Context, string, uuid.UUID) (sqlc.Email, error)
+		})
+		if !ok {
+			return errors.New("IMAP store does not support locating messages")
 		}
-		var uidVal int64
-		if job.IMAPUIDValidity != nil {
-			uidVal = *job.IMAPUIDValidity
-		}
-		err := client.MoveMessage(ctx, *job.SourceMailbox, uidVal, *job.IMAPUID, job.TargetMailbox)
-		if err != nil && !errors.Is(err, ErrMessageNotFound) {
+		em, err := located.RestoreIMAPEmail(ctx, job.AccountID, job.EmailID)
+		if err != nil {
 			return err
 		}
-		if err := w.store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox); err != nil {
+		if em.IMAPMailbox == nil {
+			return store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
+		}
+		if strings.EqualFold(*em.IMAPMailbox, job.TargetMailbox) {
+			return store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
+		}
+		source, exists, err := client.ResolveMailbox(ctx, *em.IMAPMailbox)
+		if err != nil {
 			return err
 		}
-		w.logger.InfoContext(ctx, "data_change",
-			slog.String("event_category", "data_change"),
-			slog.String("operation", "update"),
-			slog.String("resource_type", "imap_message_folder"),
-			slog.String("account_id", job.AccountID),
-			slog.String("email_id", job.EmailID.String()),
-			slog.String("job_type", job.JobType),
-			slog.String("target_mailbox", job.TargetMailbox),
-		)
+		if !exists {
+			return errors.New("source folder unavailable")
+		}
+		// Resolve by exact Message-ID even with a saved UID: after a lost MOVE
+		// response the original UID can no longer establish the message's location.
+		matches, err := client.FindExactMessageID(ctx, source, em.MessageID)
+		if err != nil {
+			return err
+		}
+		if len(matches) > 1 {
+			return errors.New("cannot safely move message: ambiguous source")
+		}
+		if len(matches) == 0 {
+			target, found, err := client.ResolveMailbox(ctx, job.TargetMailbox)
+			if err != nil {
+				return err
+			}
+			if found {
+				dest, err := client.FindExactMessageID(ctx, target, em.MessageID)
+				if err != nil {
+					return err
+				}
+				if len(dest) > 1 {
+					return errors.New("cannot safely reconcile message: ambiguous destination")
+				}
+				if len(dest) == 1 {
+					return store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
+				}
+			}
+			// A message deleted externally remains a benign no-op for ordinary moves.
+			if job.JobType != "restore_from_junk" && em.IMAPUID != nil {
+				return store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
+			}
+			return errors.New("cannot safely move message: no exact match in source or destination")
+		}
+		if err := client.MoveMessage(ctx, source, matches[0].UIDValidity, matches[0].UID, job.TargetMailbox); err != nil {
+			return err
+		}
+		if err := store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox); err != nil {
+			return err
+		}
+		w.logger.InfoContext(ctx, "data_change", slog.String("event_category", "data_change"), slog.String("operation", "update"), slog.String("resource_type", "imap_message_folder"), slog.String("account_id", job.AccountID), slog.String("email_id", job.EmailID.String()), slog.String("job_type", job.JobType), slog.String("target_mailbox", job.TargetMailbox))
 		return nil
 
 	case "append_to_sent":
 		if job.RawRFC822Path == nil || *job.RawRFC822Path == "" {
-			return w.store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
+			return store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox)
 		}
 		f, err := w.attachments.Open(ctx, *job.RawRFC822Path)
 		if err != nil {
@@ -162,7 +234,7 @@ func (w *IMAPActionWorker) executeJob(ctx context.Context, job sqlc.IMAPJob) err
 		if err := client.AppendMessage(ctx, job.TargetMailbox, rawBytes); err != nil {
 			return err
 		}
-		if err := w.store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox); err != nil {
+		if err := store.CompleteIMAPJob(ctx, job.ID, job.EmailID, job.TargetMailbox); err != nil {
 			return err
 		}
 		w.logger.InfoContext(ctx, "data_change",

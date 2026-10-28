@@ -1195,6 +1195,10 @@ h3 {
 
 /* ---------- Inbox rows ---------- */
 
+.bulk-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin: 0.75rem 0; }
+.mobile-select-all { display: none; }
+.select-cell label { display: inline-flex; padding: 0.5rem; }
+
 .threads-table {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1756,6 +1760,9 @@ details.message:not([open]) > .message-header {
   .threads-table tr.thread-row-new {
     box-shadow: inset 3px 0 0 var(--primary);
   }
+
+  .mobile-select-all { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .threads-table td.select-cell { order: 0; flex: 0 0 auto; }
 
   .threads-table td.customer-cell {
     order: 1;
