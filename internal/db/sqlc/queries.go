@@ -19,6 +19,20 @@ type DBTX interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
+// TxBeginner starts a database transaction.
+type TxBeginner interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+// Begin starts a transaction if the underlying database supports it.
+func (q *Queries) Begin(ctx context.Context) (pgx.Tx, error) {
+	beginner, ok := q.db.(TxBeginner)
+	if !ok {
+		return nil, fmt.Errorf("database does not support transactions")
+	}
+	return beginner.Begin(ctx)
+}
+
 // Queries executes typed SQL queries against DBTX.
 type Queries struct {
 	db DBTX
@@ -280,7 +294,7 @@ func (q *Queries) ListThreadEvents(ctx context.Context, threadID uuid.UUID) ([]T
 		       COALESCE(old_value, 'null'::jsonb), COALESCE(new_value, 'null'::jsonb), occurred_at
 		FROM thread_events
 		WHERE thread_id = $1
-		ORDER BY occurred_at ASC`
+		ORDER BY occurred_at ASC, event_order ASC`
 	rows, err := q.db.Query(ctx, query, threadID)
 	if err != nil {
 		return nil, err
@@ -336,6 +350,11 @@ func (q *Queries) CreateThread(ctx context.Context, t Thread) (Thread, error) {
 // GetThreadByID fetches a thread by UUID.
 func (q *Queries) GetThreadByID(ctx context.Context, id uuid.UUID) (Thread, error) {
 	return scanThread(q.db.QueryRow(ctx, `SELECT `+threadColumns+` FROM threads WHERE id = $1`, id))
+}
+
+// LockThreadByID fetches and locks a thread for a transactional workflow operation.
+func (q *Queries) LockThreadByID(ctx context.Context, id uuid.UUID) (Thread, error) {
+	return scanThread(q.db.QueryRow(ctx, `SELECT `+threadColumns+` FROM threads WHERE id = $1 FOR UPDATE`, id))
 }
 
 // ListThreadsFilter specifies optional filters for listing threads.

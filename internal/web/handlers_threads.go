@@ -796,7 +796,16 @@ func (s *Server) HandleTransitionThread(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	targetStatus := sqlc.ThreadStatus(strings.TrimSpace(r.FormValue("status")))
-	if err := s.workflow.Transition(ctx, threadID, targetStatus, &user.ID); err != nil {
+	if r.FormValue("complete_from_new") == "1" && targetStatus != sqlc.ThreadStatusCompleted {
+		s.renderError(w, r, http.StatusBadRequest, "Invalid request", "The completion request is invalid.")
+		return
+	}
+	if r.FormValue("complete_from_new") == "1" {
+		err = s.workflow.CompleteFromNew(ctx, threadID, &user.ID)
+	} else {
+		err = s.workflow.Transition(ctx, threadID, targetStatus, &user.ID)
+	}
+	if err != nil {
 		if errors.Is(err, workflow.ErrInvalidTransition) {
 			s.renderThreadDetail(w, r, user, thread, http.StatusUnprocessableEntity,
 				[]string{"That status change is not allowed from the thread's current state."}, nil, "")
