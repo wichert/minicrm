@@ -524,6 +524,7 @@ func (s *Service) SeedBootstrapAdminAndSettings(ctx context.Context, email, name
 			IMAPJunkMailbox:        "Junk",
 			IMAPSentMailbox:        "Sent",
 			SubjectMatchWindowDays: 30,
+			AttentionAgeDays:       2,
 		})
 		if err != nil {
 			return sqlc.User{}, sqlc.SystemSettings{}, fmt.Errorf("seed system_settings: %w", err)

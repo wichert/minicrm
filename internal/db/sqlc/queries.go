@@ -135,41 +135,50 @@ func (q *Queries) UpdateUserOIDC(ctx context.Context, id uuid.UUID, oidcSub, dis
 func (q *Queries) GetSystemSettings(ctx context.Context) (SystemSettings, error) {
 	const query = `
 		SELECT id, display_timezone, imap_inbox_mailbox,
-		       imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox, subject_match_window_days
+		       imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox,
+		       subject_match_window_days, attention_age_days
 		FROM system_settings WHERE id = 1`
 	var s SystemSettings
 	err := q.db.QueryRow(ctx, query).Scan(
 		&s.ID, &s.DisplayTimezone,
 		&s.IMAPInboxMailbox, &s.IMAPArchiveMailbox, &s.IMAPJunkMailbox, &s.IMAPSentMailbox,
-		&s.SubjectMatchWindowDays,
+		&s.SubjectMatchWindowDays, &s.AttentionAgeDays,
 	)
 	return s, err
 }
 
 // UpsertSystemSettings inserts or updates the singleton system_settings row.
 func (q *Queries) UpsertSystemSettings(ctx context.Context, s SystemSettings) (SystemSettings, error) {
+	attentionDays := s.AttentionAgeDays
+	if attentionDays <= 0 {
+		attentionDays = 2
+	}
 	const query = `
 		INSERT INTO system_settings (
 			id, display_timezone, imap_inbox_mailbox,
-			imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox, subject_match_window_days
-		) VALUES (1, $1, $2, $3, $4, $5, $6)
+			imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox,
+			subject_match_window_days, attention_age_days
+		) VALUES (1, $1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (id) DO UPDATE SET
 			display_timezone = EXCLUDED.display_timezone,
 			imap_inbox_mailbox = EXCLUDED.imap_inbox_mailbox,
 			imap_archive_mailbox = EXCLUDED.imap_archive_mailbox,
 			imap_junk_mailbox = EXCLUDED.imap_junk_mailbox,
 			imap_sent_mailbox = EXCLUDED.imap_sent_mailbox,
-			subject_match_window_days = EXCLUDED.subject_match_window_days
+			subject_match_window_days = EXCLUDED.subject_match_window_days,
+			attention_age_days = EXCLUDED.attention_age_days
 		RETURNING id, display_timezone, imap_inbox_mailbox,
-		          imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox, subject_match_window_days`
+		          imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox,
+		          subject_match_window_days, attention_age_days`
 	var out SystemSettings
 	err := q.db.QueryRow(ctx, query,
 		s.DisplayTimezone, s.IMAPInboxMailbox,
-		s.IMAPArchiveMailbox, s.IMAPJunkMailbox, s.IMAPSentMailbox, s.SubjectMatchWindowDays,
+		s.IMAPArchiveMailbox, s.IMAPJunkMailbox, s.IMAPSentMailbox,
+		s.SubjectMatchWindowDays, attentionDays,
 	).Scan(
 		&out.ID, &out.DisplayTimezone,
 		&out.IMAPInboxMailbox, &out.IMAPArchiveMailbox, &out.IMAPJunkMailbox, &out.IMAPSentMailbox,
-		&out.SubjectMatchWindowDays,
+		&out.SubjectMatchWindowDays, &out.AttentionAgeDays,
 	)
 	return out, err
 }
@@ -357,10 +366,31 @@ func (q *Queries) LockThreadByID(ctx context.Context, id uuid.UUID) (Thread, err
 	return scanThread(q.db.QueryRow(ctx, `SELECT `+threadColumns+` FROM threads WHERE id = $1 FOR UPDATE`, id))
 }
 
+// ThreadCounts holds live per-tab counts for the inbox navigation strip.
+type ThreadCounts struct {
+	NeedsAttention int
+	New            int
+	Mine           int
+	InProgress     int
+	Completed      int
+	Spam           int
+	All            int
+}
+
+// CountThreadsFilter specifies account and threshold parameters for CountThreadsByTab.
+type CountThreadsFilter struct {
+	AllowedAccounts []string
+	AccountID       *string
+	UserID          uuid.UUID
+	AttentionCutoff time.Time
+}
+
 // ListThreadsFilter specifies optional filters for listing threads.
 type ListThreadsFilter struct {
 	Status          *ThreadStatus
 	OpenOnly        bool
+	NeedsAttention  bool
+	AttentionCutoff time.Time
 	AssigneeID      *uuid.UUID
 	Unassigned      bool
 	AccountID       *string
@@ -371,6 +401,36 @@ type ListThreadsFilter struct {
 	BeforeTime      *time.Time
 	BeforeID        *uuid.UUID
 	Limit           int
+}
+
+// CountThreadsByTab computes all inbox tab counts in a single aggregate query scoped to
+// the user's allowed accounts and optional account filter.
+func (q *Queries) CountThreadsByTab(ctx context.Context, f CountThreadsFilter) (ThreadCounts, error) {
+	if len(f.AllowedAccounts) == 0 {
+		return ThreadCounts{}, nil
+	}
+	const query = `
+		SELECT
+			COUNT(*) FILTER (WHERE t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $3::timestamptz)::int AS needs_attention,
+			COUNT(*) FILTER (WHERE t.status = 'new')::int AS new_count,
+			COUNT(*) FILTER (WHERE t.status IN ('new', 'in_progress') AND t.assignee_id = $4::uuid)::int AS mine_count,
+			COUNT(*) FILTER (WHERE t.status = 'in_progress')::int AS in_progress_count,
+			COUNT(*) FILTER (WHERE t.status = 'completed')::int AS completed_count,
+			COUNT(*) FILTER (WHERE t.status = 'spam')::int AS spam_count,
+			COUNT(*)::int AS all_count
+		FROM threads t
+		LEFT JOIN LATERAL (
+			SELECT MIN(e.sent_at) AS opened_at
+			FROM emails e
+			WHERE e.thread_id = t.id
+		) stats ON true
+		WHERE ($1::text IS NULL OR t.account_id = $1)
+		  AND ($2::text[] IS NULL OR t.account_id = ANY($2))`
+	var out ThreadCounts
+	err := q.db.QueryRow(ctx, query, f.AccountID, f.AllowedAccounts, f.AttentionCutoff, f.UserID).Scan(
+		&out.NeedsAttention, &out.New, &out.Mine, &out.InProgress, &out.Completed, &out.Spam, &out.All,
+	)
+	return out, err
 }
 
 // ListThreads returns threads matching the given filter ordered by last_message_at DESC,
@@ -417,9 +477,10 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		  AND ($8::timestamptz IS NULL OR (t.last_message_at, t.id) < ($8, $9::uuid))
 		  AND ($10::text = '' OR t.customer_email = $10::citext)
 		  AND ($11::uuid IS NULL OR t.id <> $11)
+		  AND (NOT $13::boolean OR (t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $14::timestamptz))
 		ORDER BY t.last_message_at DESC, t.id DESC
 		LIMIT $12`
-	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.CustomerEmail, f.ExcludeThreadID, f.Limit)
+	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.CustomerEmail, f.ExcludeThreadID, f.Limit, f.NeedsAttention, f.AttentionCutoff)
 	if err != nil {
 		return nil, err
 	}

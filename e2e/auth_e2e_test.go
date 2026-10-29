@@ -388,6 +388,10 @@ func (m *e2eMemStore) ListThreads(_ context.Context, _ sqlc.ListThreadsFilter) (
 	return out, nil
 }
 
+func (m *e2eMemStore) CountThreadsByTab(_ context.Context, _ sqlc.CountThreadsFilter) (sqlc.ThreadCounts, error) {
+	return sqlc.ThreadCounts{All: len(m.threads)}, nil
+}
+
 func (m *e2eMemStore) ListCustomerHistory(_ context.Context, _ []string, _ string, _ uuid.UUID, _ int) ([]sqlc.Thread, error) {
 	return nil, nil
 }

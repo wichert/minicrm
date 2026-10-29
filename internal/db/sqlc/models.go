@@ -57,6 +57,7 @@ type SystemSettings struct {
 	IMAPJunkMailbox        string `json:"imap_junk_mailbox"`
 	IMAPSentMailbox        string `json:"imap_sent_mailbox"`
 	SubjectMatchWindowDays int    `json:"subject_match_window_days"`
+	AttentionAgeDays       int    `json:"attention_age_days"`
 }
 
 // AccountSettings holds per-account settings, such as the default assignee.

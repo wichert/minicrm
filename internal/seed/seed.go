@@ -456,7 +456,7 @@ func accountsByID(accounts []config.MailAccountConfig) map[string]config.MailAcc
 // RequiredSchemaVersion is the newest goose migration the seed CLI depends on. Bump it
 // whenever the seeding code starts relying on a new migration, so a half-migrated database
 // is rejected instead of failing later with a confusing SQL error.
-const RequiredSchemaVersion = 8
+const RequiredSchemaVersion = 9
 
 // ErrSchemaMissing reports that the application schema has not been created yet. It is
 // transient: the seed CLI waits for miniCRM to finish its startup migrations.
