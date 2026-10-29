@@ -1501,7 +1501,7 @@ const settingsBody = `
       <tbody>
         {{range .Users}}
         <tr>
-          <td data-label="Name" class="settings-user-name"><span class="settings-user-name-text">{{.DisplayName}}</span>{{if .IsActive}}<span class="badge badge-active">Active</span>{{else}}<span class="badge badge-inactive">Inactive</span>{{end}}{{if eq .Role "admin"}}<span class="badge badge-role">{{roleLabel .Role}}</span>{{end}}</td>
+          <td data-label="Name" class="settings-user-name"><span class="settings-user-name-text">{{.DisplayName}}</span>{{if .IsActive}}<span class="badge badge-active">Active</span>{{else}}<span class="badge badge-inactive">Inactive</span>{{end}}<span class="badge badge-role">{{roleLabel .Role}}</span></td>
           <td data-label="Email" class="settings-user-email">{{.Email}}</td>
           <td data-label="Role" class="settings-user-role">{{roleLabel .Role}}</td>
           <td data-label="Account access" class="settings-user-accounts">
@@ -1549,7 +1549,7 @@ const settingsBody = `
 </form>
 
 <h2 id="settings-activity">Recent activity</h2>
-<div class="card">
+<div class="card settings-recent">
   <div class="table-wrap">
     {{template "settings_audit_table" .AuditLogs}}
   </div>

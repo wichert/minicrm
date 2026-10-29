@@ -2925,8 +2925,11 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   }
 
   /* Bounded activity: the server renders at most 10 entries; below 768px only
-     the latest 5 are shown (entries 6-10 hidden; full log on the activity page). */
-  .settings-audit-table tbody tr:nth-child(n+6) {
+     the latest 5 are shown (entries 6-10 hidden). Scoped to the settings page's
+     recent-activity card only — the full /settings/activity page shares the
+     same table partial and must show every row. */
+  #settings-activity ~ .settings-audit-table tbody tr:nth-child(n+6),
+  .settings-recent .settings-audit-table tbody tr:nth-child(n+6) {
     display: none;
   }
 

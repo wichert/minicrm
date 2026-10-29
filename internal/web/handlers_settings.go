@@ -41,7 +41,7 @@ func (s *Server) HandleGetActivity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	page, err := strconv.Atoi(r.URL.Query().Get("page"))
-	if err != nil || page < 1 {
+	if err != nil || page < 1 || page > 100000 {
 		page = 1
 	}
 
