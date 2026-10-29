@@ -676,8 +676,13 @@ document.addEventListener("DOMContentLoaded", function () {
       return "Updated " + hours + "h ago";
     }
 
+    // The split pane shows a quiet "Refresh" affordance and no age label: the
+    // list refreshes itself and a ticking "Updated just now" beside a queue the
+    // user is reading is noise, not information.
+    var statusInSplitPane = Boolean(statusEl && statusEl.closest("[data-split-list]"));
+
     function paintStatus() {
-      if (!statusEl) {
+      if (!statusEl || statusInSplitPane) {
         return;
       }
       statusEl.textContent = formatAgo(Date.now() - lastLoadedAt);

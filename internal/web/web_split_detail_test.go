@@ -16,6 +16,194 @@ import (
 	"github.com/wichert/minicrm/internal/web/static"
 )
 
+// W-rows: the split pane renders a dedicated two-line row (subject + customer,
+// then the preamble at full width with the compact age at its trailing edge).
+// The full inbox keeps the one-line row. Only markup semantics are asserted;
+// appearance is verified from screenshots in the plan's W-rows-3 step.
+func TestSplitPaneRowsRenderTwoLinePaneRowMarkup(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	otherID := uuid.New()
+	agentID := store.adminUser.ID
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Pane row thread",
+		Status: sqlc.ThreadStatusNew, AssigneeID: &agentID,
+		CustomerName: "Ann Lee", CustomerEmail: "ann@example.com",
+		LastMessageAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		OpenedAt:      time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		MessageCount:  3, HasDraft: true,
+		LatestBodyText: "Hi, we moved offices last week and the invoice address changed",
+	}
+	store.threads[otherID] = sqlc.Thread{
+		ID: otherID, AccountID: "support", SubjectDisplay: "Pane neighbour thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "no-name@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC),
+		OpenedAt:       time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC),
+		MessageCount:   1,
+		LatestBodyText: "Outbound reply text here", LatestDirection: "outbound",
+	}
+	store.emails[uuid.New()] = sqlc.Email{
+		ID: uuid.New(), ThreadID: threadID, AccountID: "support", FromAddress: "ann@example.com",
+		Subject: "Pane row thread", BodyText: "Hi, we moved offices last week and the invoice address changed",
+		SentAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+	}
+	store.emails[uuid.New()] = sqlc.Email{
+		ID: uuid.New(), ThreadID: otherID, AccountID: "support", FromAddress: "agent@example.com",
+		Subject: "Pane neighbour thread", BodyText: "Outbound reply text here",
+		SentAt: time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC),
+	}
+
+	// Split pane (detail page with list pane, status filter matching the seeded rows).
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=new", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatalf("pane/detail markers not in expected order")
+	}
+	pane := body[paneIdx:detailIdx]
+
+	// The pane row is the three-part structure: .pane-row > .pane-row-top with
+	// the subject link and customer span, then the separate .pane-row-snippet.
+	rowIdx := strings.Index(pane, `<div class="pane-row">`)
+	if rowIdx < 0 {
+		t.Fatal("pane rows must render the .pane-row two-line structure")
+	}
+	rowEnd := strings.Index(pane[rowIdx:], "</td>")
+	if rowEnd < 0 {
+		t.Fatal("malformed pane row markup")
+	}
+	row := pane[rowIdx : rowIdx+rowEnd]
+	topIdx := strings.Index(row, `<div class="pane-row-top">`)
+	if topIdx < 0 {
+		t.Fatal("pane row must open with .pane-row-top")
+	}
+	topEnd := strings.Index(row[topIdx:], "</div>")
+	if topEnd < 0 {
+		t.Fatal("malformed .pane-row-top")
+	}
+	top := row[topIdx : topIdx+topEnd]
+	if !strings.Contains(top, `<a class="thread-link" href="/threads/`+otherID.String()) &&
+		!strings.Contains(top, `<a class="thread-link" href="/threads/`+threadID.String()) {
+		t.Errorf("pane row 1 must carry the subject link: %s", top)
+	}
+	custIdx := strings.Index(top, `class="pane-customer"`)
+	if custIdx < 0 {
+		t.Fatal("pane row 1 must carry the customer span")
+	}
+	// The subject link and the customer must both sit in row 1 (before the snippet).
+	snipIdx := strings.Index(row, `class="pane-row-snippet"`)
+	if snipIdx < 0 {
+		t.Fatal("pane row must render the preamble as .pane-row-snippet")
+	}
+	if snipIdx < custIdx {
+		t.Error("the customer span must be part of row 1, before the snippet")
+	}
+	// The snippet is its own element, not a sibling inside the same line container.
+	if !strings.Contains(row, `pane-row-snippet">Hi, we moved offices`) {
+		t.Error("the preamble must render inside .pane-row-snippet, separate from the subject link")
+	}
+	if !strings.Contains(row, `class="badge"`) || !strings.Contains(row, `class="count-pill"`) {
+		t.Error("pane row 1 must keep the draft badge and the message-count pill")
+	}
+	// The compact age rides the snippet line with its full text in the title.
+	if !strings.Contains(row, `class="wait-badge wait-`) || !strings.Contains(row, `pane-age`) {
+		t.Error("pane rows must keep the age badge with the pane-age compact class")
+	}
+	ageIdx := strings.Index(row, `pane-age`)
+	titleIdx := strings.Index(row, `title="Opened `)
+	if ageIdx < 0 || titleIdx < 0 || titleIdx < ageIdx {
+		t.Error("the compact age must keep the full opened timestamp in its title")
+	}
+	// The pane drops assignee, account and the separate meta line.
+	if strings.Contains(row, `thread-meta`) || strings.Contains(row, `Unassigned`) {
+		t.Error("pane rows must not render the assignee/meta line")
+	}
+	if strings.Contains(row, "Customer Support") {
+		t.Error("pane rows must not render the account name")
+	}
+	// The selected row state survives the layout change.
+	if !strings.Contains(pane, `aria-current="true"`) || !strings.Contains(pane, `thread-row-current`) {
+		t.Error("the open thread's pane row must keep aria-current and thread-row-current")
+	}
+
+	// Customer name on row 1; the neighbour falls back to the email.
+	if !strings.Contains(pane, `pane-customer" title="ann@example.com">Ann Lee`) {
+		t.Error("pane row 1 must show the customer name with the email as title")
+	}
+	if !strings.Contains(pane, `>no-name@example.com</span>`) {
+		t.Error("a customer without a name must fall back to the email on pane row 1")
+	}
+
+	// Outbound latest message: the You: marker stays on the preamble line.
+	if !strings.Contains(pane, `<span class="snippet-you">You:</span> Outbound reply text here`) {
+		t.Error("an outbound latest message must keep the You: prefix on the pane preamble")
+	}
+
+	// A thread with no message text still renders the placeholder in the snippet.
+	emptyID := uuid.New()
+	store.threads[emptyID] = sqlc.Thread{
+		ID: emptyID, AccountID: "support", SubjectDisplay: "Pane empty thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "quiet@example.com",
+		LastMessageAt: time.Date(2026, 1, 15, 8, 0, 0, 0, time.UTC),
+		OpenedAt:      time.Date(2026, 1, 15, 8, 0, 0, 0, time.UTC),
+	}
+	req = httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=new", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail with empty-text row status = %d, want 200", rec.Code)
+	}
+	body = rec.Body.String()
+	paneIdx = strings.Index(body, `data-split-list`)
+	detailIdx = strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatalf("pane/detail markers not in expected order on second load")
+	}
+	pane = body[paneIdx:detailIdx]
+	if !strings.Contains(pane, `pane-row-snippet"><em>(No message text)</em>`) {
+		t.Error("a thread with no body text must render the placeholder inside .pane-row-snippet")
+	}
+}
+
+// The two-line pane row is pane-only: the full inbox at /threads keeps the
+// one-line row markup and must never emit the pane structure.
+func TestFullInboxDoesNotRenderPaneRow(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Inbox row thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "ann@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		OpenedAt:       time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		LatestBodyText: "Inbox snippet text",
+	}
+	store.emails[uuid.New()] = sqlc.Email{
+		ID: uuid.New(), ThreadID: threadID, AccountID: "support", FromAddress: "ann@example.com",
+		Subject: "Inbox row thread", BodyText: "Inbox snippet text",
+		SentAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `pane-row`) || strings.Contains(body, `pane-customer`) || strings.Contains(body, `pane-age`) {
+		t.Error("the full inbox must not render the pane-row markup")
+	}
+	for _, want := range []string{`class="thread-rowline"`, `class="thread-line"`, `class="thread-snippet"`, `class="thread-meta"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the full inbox must keep the one-line row markup: missing %s", want)
+		}
+	}
+}
+
 // Render-level coverage for the W4 split master-detail document. Only markup
 // semantics are asserted; no CSS-presence or computed-geometry checks.
 func TestThreadDetailRendersSplitListPane(t *testing.T) {
@@ -408,12 +596,19 @@ func TestSplitPaneTableOmitsStatusAgeAndSelectColumns(t *testing.T) {
 	if !strings.Contains(pane, `<span class="wait-badge`) {
 		t.Error("pane rows must keep the age inline in the meta line")
 	}
-	// Row menus stay reachable from the pane, but without a bulk Select entry.
-	if !strings.Contains(pane, `data-row-menu`) || !strings.Contains(pane, `Complete`) {
-		t.Error("pane rows must keep the row menu with quick actions")
+	// The pane is a reading queue: no row menu, no hover quick actions and no
+	// bulk-select entry. Acting on a thread belongs to the detail page or the
+	// full inbox (/threads), which is one click away. Scope this to the results
+	// table — the pane's "More" tab strip legitimately uses data-row-menu.
+	resultsIdx := strings.Index(pane, `data-inbox-results`)
+	if resultsIdx < 0 {
+		t.Fatal("pane must render its results region")
 	}
-	if strings.Contains(pane, `data-row-select`) {
-		t.Error("pane row menus must not offer the bulk-select entry (no bulk bar in the pane)")
+	results := pane[resultsIdx:]
+	for _, unwanted := range []string{`data-row-menu`, `data-row-select`, `row-quick-complete`, `row-quick-spam`, `class="actions-cell"`, `<th scope="col" class="actions-cell">`} {
+		if strings.Contains(results, unwanted) {
+			t.Errorf("pane rows must not render the action affordance %q", unwanted)
+		}
 	}
 }
 
@@ -475,13 +670,28 @@ func TestSplitPaneStylesAreWideOnly(t *testing.T) {
 	if !strings.Contains(sheet, ".split-list .thread-row-current td:first-child") {
 		t.Error("app.css must draw the selected row's accent on the first cell")
 	}
-	// Pane rows are two lines (the 1280px one-line rule is for the full-width inbox).
-	if !strings.Contains(sheet, ".split-list .thread-rowline {") {
-		t.Error("app.css must let the pane opt out of the one-line row rule")
+	// Pane rows use the W-rows two-line layout (the 1280px one-line rule is for
+	// the full-width inbox only; the pane gets its own .pane-row markup).
+	if !strings.Contains(sheet, ".split-list .pane-row {") ||
+		!strings.Contains(sheet, ".split-list .pane-row-top {") ||
+		!strings.Contains(sheet, ".split-list .pane-row-snippet {") {
+		t.Error("app.css must style the pane's two-line pane-row layout")
 	}
-	// The pane's actions column is slimmed to the icon it holds.
-	if !strings.Contains(sheet, ".split-list .threads-table-pane .actions-cell {") {
-		t.Error("app.css must slim the pane's actions cell")
+	// The pane must not keep the old one-line row overrides: their selectors
+	// would be dead now that the pane emits .pane-row markup instead.
+	if strings.Contains(sheet, ".split-list .thread-rowline") ||
+		strings.Contains(sheet, ".split-list .thread-line") ||
+		strings.Contains(sheet, ".split-list .thread-meta") {
+		t.Error("app.css must drop the retired .split-list one-line row overrides")
+	}
+	// The pane renders no actions cell, and no row hover highlight: a row that
+	// lit up under the cursor suggested an action surface that is not there.
+	if !strings.Contains(sheet, ".split-list .thread-row:hover") ||
+		!strings.Contains(sheet, "background: transparent;") {
+		t.Error("app.css must suppress the split pane's row hover highlight")
+	}
+	if !strings.Contains(sheet, ".split-list .row-quick-actions,") {
+		t.Error("app.css must keep the pane's quick actions hidden")
 	}
 	// The split filter row is wide-only: rendered above the split, hidden below
 	// 1280px where the pane does not exist.
@@ -497,5 +707,167 @@ func TestSplitPaneStylesAreWideOnly(t *testing.T) {
 	}
 	if !strings.Contains(sheet, ".split-list .results-count {") {
 		t.Error("app.css must drop the pane's results count")
+	}
+}
+
+// On the completed/spam tabs there is no wait badge (ThreadAgeBadge returns an
+// empty label for those statuses), so the pane's trailing age is a relative
+// age. That string is short enough to fit the pane-age badge's max-width;
+// the previous absolute timestamp ("2026-01-15 10:00") overflowed the space
+// the preamble reserves for it and drew under the snippet's last line.
+func TestSplitPaneTrailingAgeStaysCompactWithoutWaitBadge(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Completed pane thread",
+		Status:         sqlc.ThreadStatusCompleted,
+		CustomerName:   "Ann Lee",
+		LastMessageAt:  time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		OpenedAt:       time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC),
+		MessageCount:   2,
+		LatestBodyText: "Completed thread preamble text",
+	}
+	store.emails[uuid.New()] = sqlc.Email{
+		ID: uuid.New(), ThreadID: threadID, AccountID: "support", FromAddress: "ann@example.com",
+		Subject: "Completed pane thread", BodyText: "Completed thread preamble text",
+		SentAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=completed", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET completed detail status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatalf("pane/detail markers not in expected order")
+	}
+	pane := body[paneIdx:detailIdx]
+
+	if strings.Contains(pane, `class="wait-badge`) {
+		t.Error("a completed thread must not render a wait badge in the pane")
+	}
+	// The trailing age element must still be present and must be a relative
+	// age, not an absolute timestamp that overflows the reserved space.
+	ageMarker := `class="pane-age"`
+	ageIdx := strings.Index(pane, ageMarker)
+	if ageIdx < 0 {
+		t.Fatal("a completed pane row must still render a trailing age element")
+	}
+	tagEnd := strings.Index(pane[ageIdx:], ">")
+	if tagEnd < 0 {
+		t.Fatal("malformed pane-age element")
+	}
+	textEnd := strings.Index(pane[ageIdx+tagEnd:], "</time>")
+	if textEnd < 0 {
+		t.Fatal("malformed pane-age element: missing closing tag")
+	}
+	label := strings.TrimSpace(pane[ageIdx+tagEnd+1 : ageIdx+tagEnd+textEnd])
+	if label == "" {
+		t.Fatal("the pane-age element must not be empty")
+	}
+	if strings.Contains(label, ":") {
+		t.Errorf("the pane's trailing age must stay compact, got an absolute timestamp %q", label)
+	}
+	if !strings.Contains(label, "ago") && label != "Just now" {
+		t.Errorf("the pane's trailing age must be a relative age, got %q", label)
+	}
+}
+
+// The split pane's results-status line must not carry a ticking age label. The
+// eyebrow still renders so the manual "Refresh" affordance stays reachable, but
+// the live status text is left empty and app.js never paints it inside the pane
+// (a "Updated just now" beside a queue the user is reading is noise).
+func TestSplitPaneHasNoUpdatedStatusLabel(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Quiet pane thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "quiet@example.com",
+		LastMessageAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		OpenedAt:      time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		MessageCount:  1, LatestBodyText: "Quiet pane preamble",
+	}
+	store.emails[uuid.New()] = sqlc.Email{
+		ID: uuid.New(), ThreadID: threadID, AccountID: "support", FromAddress: "quiet@example.com",
+		Subject: "Quiet pane thread", BodyText: "Quiet pane preamble",
+		SentAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=new", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatalf("pane/detail markers not in expected order")
+	}
+	pane := body[paneIdx:detailIdx]
+
+	// The manual refresh control survives so the queue can be reloaded on demand.
+	if !strings.Contains(pane, `data-refresh-link`) {
+		t.Error("the pane must keep its manual refresh affordance")
+	}
+	// The live status span must exist (app.js targets it) but render no text.
+	if !strings.Contains(pane, `data-refresh-status`) {
+		t.Fatal("the pane must keep the data-refresh-status hook")
+	}
+	statusIdx := strings.Index(pane, `data-refresh-status`)
+	open := strings.Index(pane[statusIdx:], ">")
+	if open < 0 {
+		t.Fatal("malformed data-refresh-status element")
+	}
+	closeIdx := strings.Index(pane[statusIdx+open:], "</span>")
+	if closeIdx < 0 {
+		t.Fatal("malformed data-refresh-status element: missing closing tag")
+	}
+	label := strings.TrimSpace(pane[statusIdx+open+1 : statusIdx+open+closeIdx])
+	if label != "" && !strings.EqualFold(label, "Refresh") {
+		t.Errorf("the pane's status span must not carry an age label, got %q", label)
+	}
+	// And the split pane markup must not contain the phrase the auto-refresh used
+	// to paint into it.
+	if strings.Contains(pane, "Updated just now") {
+		t.Error("the pane must not render an 'Updated just now' label")
+	}
+}
+
+// The retired "Oldest open" sort is replaced by "Longest waiting": the select
+// offers only the new key and no longer mentions the old label anywhere.
+func TestSortSelectOffersLongestWaiting(t *testing.T) {
+	_, _, router, _, _ := buildAccountTestServer(t)
+
+	for _, path := range []string{"/threads?status=new", "/threads?status=new&sort=longest_waiting"} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", path, rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "Longest waiting") {
+			t.Errorf("%s: sort control must offer Longest waiting", path)
+		}
+		if strings.Contains(body, "Oldest open") || strings.Contains(body, `value="oldest_open"`) {
+			t.Errorf("%s: the retired Oldest open sort must be gone", path)
+		}
+	}
+
+	// The default stays newest, and the new key round-trips.
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new", nil))
+	if !strings.Contains(rec.Body.String(), `value="newest" selected`) {
+		t.Error("the default sort must stay Newest")
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new&sort=longest_waiting", nil))
+	if !strings.Contains(rec.Body.String(), `value="longest_waiting" selected`) {
+		t.Error("sort=longest_waiting must select the new option")
 	}
 }

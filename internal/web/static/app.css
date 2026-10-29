@@ -1615,9 +1615,18 @@ select:disabled {
   font-size: 0.86rem;
 }
 
+/* The one-line inbox snippet keeps its em-dash prefix (it reads as an inline
+   continuation of the subject) at >=900px on the full inbox. The split pane
+   renders the preamble as its own two-clamped line and the <900px stacked
+   layout and phone cards stack it as a block, so they suppress the prefix. */
 .thread-snippet::before {
   content: "— ";
   color: var(--border-strong);
+}
+
+/* The pane's preamble has its own full-width line and reads as a sentence. */
+.split-list .pane-row-snippet::before {
+  content: none;
 }
 
 .thread-meta {
@@ -1699,13 +1708,36 @@ select:disabled {
   border-top: 1px solid var(--border);
 }
 
+/* Two rows per conversation: the subject with its status/date on row 1, the
+   latest message preamble on row 2. The preamble needs the full width, so it
+   owns the second row rather than competing with the metadata. */
 .previous-conversation-row {
+  display: block;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.previous-conversation-main {
+  min-width: 0;
+}
+
+.previous-conversation-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
   gap: 0.75rem 1rem;
-  padding: 0.45rem 0;
-  border-bottom: 1px solid var(--border);
+}
+
+.previous-conversation-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.35;
 }
 
 .previous-conversation-row:last-child {
@@ -1954,10 +1986,12 @@ details.message:not([open]) > .message-header {
     order: 5;
   }
 
-  .previous-conversation-row {
+  /* The row is already a block with the preamble on its own line; on narrow
+     screens the metadata drops below the subject instead of fighting it. */
+  .previous-conversation-head {
     flex-direction: column;
     align-items: flex-start;
-    gap: 0.25rem;
+    gap: 0.2rem;
   }
 
   .previous-conversation-link {
@@ -2404,10 +2438,6 @@ details.message:not([open]) > .message-header {
     text-overflow: ellipsis;
   }
 
-  .threads-table td.thread-cell .thread-snippet::before {
-    content: none;
-  }
-
   .threads-table td.thread-cell .thread-meta {
     display: block;
     max-width: 100%;
@@ -2631,10 +2661,10 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   }
 
   /* Column budget: with the status/age/select columns gone from the pane table
-     the remaining columns are subject+snippet, the meta line and a 2.25rem
-     actions cell, so 360-520px is enough for a two-line row without ellipsizing
-     most subjects. The upper bound grows with the viewport because the detail
-     pane stays readable down to ~740px at 1280px wide. */
+     the remaining columns are the pane row and a 1.9rem actions cell, so
+     360-520px buys a two-line subject and a two-line preamble. The upper bound
+     grows with the viewport because the detail pane stays readable down to
+     ~740px at 1280px wide. */
   .split-layout {
     display: grid;
     grid-template-columns: clamp(360px, 34vw, 520px) minmax(0, 1fr);
@@ -2655,42 +2685,95 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   }
 
   /* Pane density: the bulk-select, status and age columns are not rendered (the
-     active tab implies the status and the age rides inline in the meta line), so
-     the subject and customer get the width. The actions cell overlays the row's
-     trailing edge and costs only its own icon. */
-  .split-list .threads-table-pane .actions-cell {
-    width: 1.9rem;
-    padding-left: 0;
-    padding-right: 0.15rem;
+     active tab implies the status and the compact age rides at the end of the
+     preamble), so the subject, customer and snippet get the width. The actions
+     cell overlays the row's trailing edge and costs only its own icon. */
+  /* The pane is a reading queue: no hover highlight and no action affordances.
+     A row that lights up under the cursor competes with the selected-row accent
+     and suggests an action surface that is not there — acting on a thread
+     belongs to the detail page (and the full inbox). */
+  .split-list .thread-row:hover,
+  .split-list .thread-row:focus-within {
+    background: transparent;
   }
 
-  /* Two-line rows in the pane: subject — snippet on line 1, customer ·
-     assignee · age on line 2. The one-line row rule at 1280px above is tuned
-     for the full-width inbox; in a ~400px column it squeezes the subject into a
-     few characters, so the pane opts out of it. */
-  .split-list .thread-rowline {
-    display: block;
-    white-space: normal;
+  .split-list .actions-cell,
+  .split-list .row-quick-actions,
+  .split-list .row-menu {
+    display: none;
   }
 
-  .split-list .thread-line {
+  /* W-rows: the pane row is three stacked parts — row 1 is the subject link
+     (up to two lines when it needs them) beside the customer, row 2 is the
+     message preamble at full cell width, with the compact age at its trailing
+     edge. The one-line row rule at 1280px above is tuned for the full-width
+     inbox; in a ~400px column a shared line makes the subject and the preamble
+     compete, so the pane gets its own layout instead of overriding theirs.
+     Assignee, account and the absolute date are not rendered at all in the
+     pane (they live in the detail header and in the age badge's title). */
+  .split-list .pane-row {
+    position: relative;
+    min-width: 0;
+  }
+
+  .split-list .pane-row-top {
     display: flex;
     align-items: baseline;
     gap: 0.4rem;
     min-width: 0;
   }
 
-  .split-list .thread-link {
-    white-space: nowrap;
+  .split-list .pane-row-top .thread-link {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 0 1 auto;
+    white-space: normal;
   }
 
-  .split-list .thread-meta {
-    max-width: 100%;
-    margin-top: 0.12rem;
-    text-align: left;
+  .split-list .pane-customer {
+    flex: 0 1 auto;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
+  .split-list .pane-row-snippet {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    margin: 0.15rem 0 0;
+    padding-right: 2.2rem;
+    color: var(--muted);
+    font-size: 0.86rem;
+    line-height: 1.35;
+  }
+
+  /* Compact age: label only, anchored to the end of row 2. The wait-badge
+     colours still carry the urgency (fresh/warning/urgent); only the words the
+     pane cannot afford are dropped, and the full text stays in the title.
+     Clamp to the same 3.4rem budget the snippet reserves (2.2rem padding +
+     gap) so a longer label can never overrun the preamble's last line; the
+     title keeps the untruncated text. Completed/spam tabs fall back to a
+     relative age ("3d ago"), which fits. */
+  .split-list .pane-age {
+    position: absolute;
+    right: 0.35rem;
+    bottom: 0.15rem;
+    max-width: 3.4rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0.06rem 0.4rem;
+    font-size: 0.75rem;
+    white-space: nowrap;
   }
 
   .split-list .threads-table th,
@@ -2723,7 +2806,7 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
      header would be the only visible label and carries no information the tab
      strip above does not already give. Trade-off accepted: hiding the header row
      also drops the column/row association for assistive tech in the pane, but each
-     row is self-describing (subject, snippet, then customer · assignee · age) and
+     row is self-describing (subject, customer, preamble, compact age) and
      every control in it has its own label. The full inbox keeps its visible
      headers, so the labelled version is one click away. */
   .split-list .threads-table thead {

@@ -83,7 +83,7 @@ func TestParseInboxListFiltersSortAllowList(t *testing.T) {
 	}{
 		{"", "newest"},
 		{"newest", "newest"},
-		{"oldest_open", "oldest_open"},
+		{"longest_waiting", "longest_waiting"},
 		{"Newest", "newest"},         // case-sensitive: unknown falls back
 		{"; DROP TABLE x", "newest"}, // injection attempt falls back
 		{"oldest", "newest"},
@@ -96,18 +96,18 @@ func TestParseInboxListFiltersSortAllowList(t *testing.T) {
 		}
 		// The sort select must reflect the resolved value.
 		body := rec.Body.String()
-		oldestSelected := strings.Contains(body, `value="oldest_open" selected`)
-		if tc.want == "oldest_open" && !oldestSelected {
-			t.Errorf("sort %q: oldest_open not selected in sort control", tc.raw)
+		waitingSelected := strings.Contains(body, `value="longest_waiting" selected`)
+		if tc.want == "longest_waiting" && !waitingSelected {
+			t.Errorf("sort %q: longest_waiting not selected in sort control", tc.raw)
 		}
-		if tc.want == "newest" && oldestSelected {
-			t.Errorf("sort %q: must fall back to newest, but oldest_open is selected", tc.raw)
+		if tc.want == "newest" && waitingSelected {
+			t.Errorf("sort %q: must fall back to newest, but longest_waiting is selected", tc.raw)
 		}
 	}
 }
 
 // The inbox footer must show "N threads · Load older" when more pages exist and
-// a truncation notice when the oldest_open sort fills its page.
+// a truncation notice when the longest_waiting sort fills its page.
 func TestInboxFooterAndSortTruncation(t *testing.T) {
 	testInboxPageSize = 2
 	t.Cleanup(func() { testInboxPageSize = 0 })
@@ -128,25 +128,25 @@ func TestInboxFooterAndSortTruncation(t *testing.T) {
 		t.Fatal("footer must carry the list-footer-count label")
 	}
 
-	// oldest_open has no cursor pagination: a full page is capped with a notice.
+	// longest_waiting has no cursor pagination: a full page is capped with a notice.
 	rec2 := httptest.NewRecorder()
-	router.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/threads?status=new&sort=oldest_open", nil))
+	router.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/threads?status=new&sort=longest_waiting", nil))
 	body2 := rec2.Body.String()
 	if !strings.Contains(body2, "list-truncated") {
-		t.Fatal("full oldest_open page must show the truncation notice")
+		t.Fatal("full longest_waiting page must show the truncation notice")
 	}
 	if strings.Contains(body2, "Load older</a>") {
-		t.Fatal("oldest_open must not offer cursor pagination")
+		t.Fatal("longest_waiting must not offer cursor pagination")
 	}
 	if strings.Count(body2, `class="thread-link"`) != 2 {
-		t.Fatalf("oldest_open page must be capped to the page size, got %d links", strings.Count(body2, `class="thread-link"`))
+		t.Fatalf("longest_waiting page must be capped to the page size, got %d links", strings.Count(body2, `class="thread-link"`))
 	}
 }
 
-// Exactly pageSize oldest_open results must fit the page without a truncation
-// notice: the query fetches pageSize+1 rows, so the boundary is strictly
-// greater-than (off-by-one guard).
-func TestInboxOldestOpenExactPageSizeNoTruncation(t *testing.T) {
+// Exactly pageSize longest_waiting results must fit the page without a
+// truncation notice: the query fetches pageSize+1 rows, so the boundary is
+// strictly greater-than (off-by-one guard).
+func TestInboxLongestWaitingExactPageSizeNoTruncation(t *testing.T) {
 	testInboxPageSize = 2
 	t.Cleanup(func() { testInboxPageSize = 0 })
 	_, store, router, _, _ := buildAccountTestServer(t)
@@ -157,13 +157,13 @@ func TestInboxOldestOpenExactPageSizeNoTruncation(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new&sort=oldest_open", nil))
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new&sort=longest_waiting", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	body := rec.Body.String()
 	if strings.Contains(body, "list-truncated") {
-		t.Error("exactly pageSize oldest_open results must not show the truncation notice")
+		t.Error("exactly pageSize longest_waiting results must not show the truncation notice")
 	}
 	if strings.Count(body, `class="thread-link"`) != 2 {
 		t.Errorf("expected both threads rendered, got %d", strings.Count(body, `class="thread-link"`))

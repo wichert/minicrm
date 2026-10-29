@@ -85,10 +85,10 @@ type InboxViewData struct {
 	// by account access always happens server-side (AGENTS.md invariant 5).
 	AssignableUsers map[string][]sqlc.User
 	// Sort is the allow-listed sort key of the current list ("newest" or
-	// "oldest_open"); unknown query values collapse to "newest".
+	// "longest_waiting"); unknown query values collapse to "newest".
 	Sort string
-	// SortTruncated is true when the oldest_open sort was capped at the page limit
-	// without cursor pagination; the view renders a truncation notice.
+	// SortTruncated is true when the longest_waiting sort was capped at the page
+	// limit without cursor pagination; the view renders a truncation notice.
 	SortTruncated bool
 	// TotalCount, when > 0, is the total number of matching threads known to the
 	// handler; the pagination footer shows "N Threads · Load older". Zero means
@@ -234,6 +234,20 @@ func FormatTimestamp(t time.Time, displayTimezone string) string {
 	return t.In(loc).Format("2006-01-02 15:04")
 }
 
+// FormatDateOnly converts t into the configured IANA displayTimezone and renders
+// just the calendar date (no clock time). Compact lists use it where the exact
+// time is noise and the relative ordering is already obvious from the order.
+func FormatDateOnly(t time.Time, displayTimezone string) string {
+	if t.IsZero() {
+		return ""
+	}
+	loc, err := time.LoadLocation(displayTimezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	return t.In(loc).Format("2006-01-02")
+}
+
 // FormatTimestampFull converts t into the configured IANA displayTimezone with full seconds
 // and timezone abbreviation for hover tooltips.
 func FormatTimestampFull(t time.Time, displayTimezone string) string {
@@ -318,6 +332,26 @@ func ThreadAgeBadge(status sqlc.ThreadStatus, openedAt, now time.Time, displayTi
 		return fmt.Sprintf("Open %dd", days), "warning"
 	default:
 		return fmt.Sprintf("Overdue · %dd", days), "urgent"
+	}
+}
+
+// PaneAgeLabel shortens a wait badge label for the split pane's compact age
+// element ("Today", "3d", "12d"). It reuses the exact bucketing of
+// ThreadAgeBadge — the buckets are derived from the same label so the two can
+// never disagree — and simply strips the words the pane does not have room
+// for. Labels that match no bucket (future-proofing) pass through unchanged.
+func PaneAgeLabel(waitLabel string) string {
+	switch waitLabel {
+	case "Today":
+		return "Today"
+	case "Open 1d", "Open 2d", "Open 3d", "Open 4d", "Open 5d", "Open 6d", "Open 7d":
+		return strings.TrimPrefix(waitLabel, "Open ")
+	default:
+		// "Overdue · Nd" or an unexpected label: keep the day count, drop words.
+		if days, ok := strings.CutPrefix(waitLabel, "Overdue · "); ok {
+			return days
+		}
+		return waitLabel
 	}
 }
 
@@ -729,6 +763,7 @@ var templateFuncs = template.FuncMap{
 	"isViewableAttachment": IsViewableAttachment,
 	"hasImageAttachments":  HasImageAttachments,
 	"attachmentKind":       AttachmentKindLabel,
+	"paneAgeLabel":         PaneAgeLabel,
 	"threadDetailURL":      threadDetailURL,
 }
 
@@ -896,10 +931,11 @@ const layoutFooter = `
 const inboxTablePartial = `{{define "inbox_table"}}
 {{if .Threads}}
 <div class="table-wrap">
-  {{/* PaneMode (W4 split list) drops the bulk-select, status and age columns: the
-       active tab already states the status and the age rides inline in the meta
-       line, so the narrow pane spends its width on the subject and customer.
-       The actions column stays (slimmed in app.css) so row menus are reachable. */}}
+  {{/* PaneMode (W4 split list) drops the bulk-select, status, age and actions
+       columns: the active tab already states the status, the age rides at the
+       end of the pane row, and acting on a thread belongs to the detail page or
+       the full inbox. The narrow pane spends its whole width on the subject,
+       customer and preamble. */}}
   <table class="threads-table{{if .PaneMode}} threads-table-pane{{end}}">
     <thead>
       <tr>
@@ -907,7 +943,7 @@ const inboxTablePartial = `{{define "inbox_table"}}
         <th scope="col">Thread</th>
         {{if not .PaneMode}}<th scope="col">Status</th>
         <th scope="col">Age</th>{{end}}
-        {{if and (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th>{{end}}
+        {{if and (not .PaneMode) (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th>{{end}}
       </tr>
     </thead>
     <tbody>
@@ -917,13 +953,29 @@ const inboxTablePartial = `{{define "inbox_table"}}
       <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}{{if and $.PaneMode .IsCurrent}} thread-row-current{{end}}" data-row-href="{{threadDetailURL $paneBase .Thread.ID}}"{{if and $.PaneMode .IsCurrent}} aria-current="true"{{end}}>
         {{if and (not $.PaneMode) (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}<td class="select-cell"><label class="select-label"><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-status="{{.Thread.Status}}" data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>{{end}}
         <td class="thread-cell">
+          {{if $.PaneMode}}{{/* W-rows pane row: row 1 is the subject (a link, up to
+              two lines) beside the customer, row 2 is the message preamble on its
+              own full-width line with the compact age at its trailing edge.
+              Assignee, account and the absolute date are dropped from the pane —
+              they live in the detail header, and the tab strip + filters already
+              carry status/account. The age keeps its full text in its title attribute.
+              No-JS story: this is plain HTML, no behaviour depends on it. */}}
+          <div class="pane-row">
+            <div class="pane-row-top">
+              <a class="thread-link" href="{{threadDetailURL $paneBase .Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
+              <span class="pane-customer" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}</span>
+            </div>
+            <p class="pane-row-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}{{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}} pane-age" title="Opened {{.OpenedFullTime}}">{{paneAgeLabel .WaitLabel}}</span>{{else}}<time class="pane-age" title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}</p>
+          </div>
+          {{else}}
           <div class="thread-rowline">
             <span class="thread-line">
               <a class="thread-link" href="{{threadDetailURL $paneBase .Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
               <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
             </span>
-            <span class="thread-meta" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}{{if $.ShowAccountUI}} &middot; {{.AccountName}}{{end}} &middot; {{if .AssigneeName}}{{.AssigneeName}}{{else}}Unassigned{{end}}{{if $.PaneMode}} &middot; {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="Opened {{.OpenedFullTime}}">{{.WaitLabel}}</span>{{else if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>{{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}{{end}}</span>
+            <span class="thread-meta" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}{{if $.ShowAccountUI}} &middot; {{.AccountName}}{{end}} &middot; {{if .AssigneeName}}{{.AssigneeName}}{{else}}Unassigned{{end}}{{if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>{{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}</span>
           </div>
+          {{end}}
         </td>
         {{if not $.PaneMode}}<td class="status-cell">
           <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
@@ -933,7 +985,10 @@ const inboxTablePartial = `{{define "inbox_table"}}
           {{else if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>
           {{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}
         </td>{{end}}
-        {{if and (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}
+        {{/* W-rows follow-up: the split pane is a reading queue, not an action
+             surface. Row menus and hover quick actions stay on the full inbox
+             (/threads) and on the detail page, which is one click away. */}}
+        {{if and (not $.PaneMode) (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}
         <td class="actions-cell">
           {{if or (eq .Thread.Status "new") (eq .Thread.Status "in_progress")}}
           <details class="row-menu" data-row-menu>
@@ -941,8 +996,7 @@ const inboxTablePartial = `{{define "inbox_table"}}
               <span aria-hidden="true">&#8943;</span>
             </summary>
             <div class="row-menu-popover">
-              {{/* Bulk selection stays on the full inbox; the pane has no bulk bar. */}}
-              {{if not $.PaneMode}}<button type="button" class="row-menu-item" data-row-select aria-label="Select {{.Thread.SubjectDisplay}} for bulk actions">Select</button>{{end}}
+              <button type="button" class="row-menu-item" data-row-select aria-label="Select {{.Thread.SubjectDisplay}} for bulk actions">Select</button>
               {{if eq .Thread.Status "new"}}
               <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form">
                 <input type="hidden" name="status" value="in_progress">
@@ -1066,8 +1120,8 @@ const inboxBody = `
     <label class="inline-field inline-field-compact">
       <span class="sr-only">Sort</span>
       <select name="sort" data-hx-get="/threads" aria-label="Sort threads">
-        <option value="newest" {{if ne .Sort "oldest_open"}}selected{{end}}>Newest</option>
-        <option value="oldest_open" {{if eq .Sort "oldest_open"}}selected{{end}}>Oldest open</option>
+        <option value="newest" {{if ne .Sort "longest_waiting"}}selected{{end}}>Newest</option>
+        <option value="longest_waiting" {{if eq .Sort "longest_waiting"}}selected{{end}}>Longest waiting</option>
       </select>
     </label>
     <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
@@ -1094,7 +1148,7 @@ const inboxBody = `
 </form>
 {{end}}
 {{template "inbox_table" .}}
-{{if .SortTruncated}}<p class="list-truncated">Oldest open shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
+{{if .SortTruncated}}<p class="list-truncated">Longest waiting shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
 {{if .NextURL}}<p class="list-footer"><span class="list-footer-count">{{if .TotalCount}}{{.TotalCount}} threads{{else}}More threads{{end}}</span> <a class="btn btn-secondary" href="{{.NextURL}}">Load older</a></p>{{end}}
 </div>
 `
@@ -1145,8 +1199,8 @@ const threadDetailBody = `
     <label class="inline-field inline-field-compact">
       <span class="sr-only">Sort</span>
       <select name="sort" data-hx-get="/threads" aria-label="Sort threads">
-        <option value="newest" {{if ne .List.Sort "oldest_open"}}selected{{end}}>Newest</option>
-        <option value="oldest_open" {{if eq .List.Sort "oldest_open"}}selected{{end}}>Oldest open</option>
+        <option value="newest" {{if ne .List.Sort "longest_waiting"}}selected{{end}}>Newest</option>
+        <option value="longest_waiting" {{if eq .List.Sort "longest_waiting"}}selected{{end}}>Longest waiting</option>
       </select>
     </label>
     <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
@@ -1217,8 +1271,8 @@ const threadDetailBody = `
       <label class="inline-field inline-field-compact">
         <span class="sr-only">Sort</span>
         <select name="sort" data-hx-get="/threads" aria-label="Sort threads">
-          <option value="newest" {{if ne .List.Sort "oldest_open"}}selected{{end}}>Newest</option>
-          <option value="oldest_open" {{if eq .List.Sort "oldest_open"}}selected{{end}}>Oldest open</option>
+          <option value="newest" {{if ne .List.Sort "longest_waiting"}}selected{{end}}>Newest</option>
+          <option value="longest_waiting" {{if eq .List.Sort "longest_waiting"}}selected{{end}}>Longest waiting</option>
         </select>
       </label>
       <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
@@ -1231,7 +1285,7 @@ const threadDetailBody = `
        is the whole page below 1280px. */}}
   <div data-inbox-results>
   {{template "inbox_table" .List}}
-  {{if .List.SortTruncated}}<p class="list-truncated">Oldest open shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
+  {{if .List.SortTruncated}}<p class="list-truncated">Longest waiting shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
   {{if .List.NextURL}}<p class="list-footer"><span class="list-footer-count">{{if .List.TotalCount}}{{.List.TotalCount}} threads{{else}}More threads{{end}}</span> <a class="btn btn-secondary" href="{{.List.NextURL}}">Load older</a></p>{{end}}
   </div>
   </aside>
@@ -1259,17 +1313,22 @@ const threadDetailBody = `
 
   {{if .PreviousThreads}}
   <details class="previous-conversations">
-    <summary>{{len .PreviousThreads}} earlier conversation{{if ne (len .PreviousThreads) 1}}s{{end}}</summary>
+    <summary>{{len .PreviousThreads}} other conversation{{if ne (len .PreviousThreads) 1}}s{{end}}</summary>
     <p class="helper">Other conversations from this email address</p>
     <ul class="previous-conversations-list">
       {{range .PreviousThreads}}
       <li class="previous-conversation-row">
-        <a class="previous-conversation-link" href="/threads/{{.Thread.ID}}" target="_blank" rel="noopener" title="Opens in a new tab so your reply stays here.">{{.Thread.SubjectDisplay}}</a>
-        <span class="previous-conversation-meta">
-          <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
-          <time class="muted previous-conversation-time" title="{{.FullTime}}">{{.FormattedTime}}</time>
-          {{if $.ShowAccountUI}}<span class="badge badge-account">{{.AccountName}}</span>{{end}}
-        </span>
+        <div class="previous-conversation-main">
+          <div class="previous-conversation-head">
+            <a class="previous-conversation-link" href="/threads/{{.Thread.ID}}" target="_blank" rel="noopener" title="Opens in a new tab so your reply stays here.">{{.Thread.SubjectDisplay}}</a>
+            <span class="previous-conversation-meta">
+              <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
+              <time class="muted previous-conversation-time" title="{{.FullTime}}">{{.FormattedTime}}</time>
+              {{if $.ShowAccountUI}}<span class="badge badge-account">{{.AccountName}}</span>{{end}}
+            </span>
+          </div>
+          <p class="previous-conversation-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</p>
+        </div>
       </li>
       {{end}}
     </ul>
