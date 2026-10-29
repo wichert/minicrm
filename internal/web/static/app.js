@@ -941,11 +941,149 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
+  // W4: the split-pane inbox list lives in the DOM on every thread detail page,
+  // but CSS only shows it at >=1280px. Below the breakpoint the hidden pane must
+  // not be reachable, so `inert` (or an aria-hidden/tabindex fallback) is toggled
+  // from a matchMedia listener — firing on change means an in-place resize across
+  // 1280px updates it without a reload. Pure attribute writes: CSP forbids
+  // inline styles/scripts.
+  // Scroll position of the split list survives opening another thread: the pane is
+  // re-rendered server-side on every detail load, so the offset is remembered per
+  // inbox query string (not per thread id) and restored once the pane is visible.
+  var splitListScrollKey = "minicrm:split-list-scroll:";
+
+  function splitListScrollStorageKey() {
+    // Key on the filter query only; the thread id lives in the path, so switching
+    // threads within the same queue keeps the same key.
+    return splitListScrollKey + (window.location.search || "");
+  }
+
+  function saveListScroll() {
+    var pane = document.querySelector("[data-split-list]");
+    if (!pane) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(splitListScrollStorageKey(), String(pane.scrollTop || 0));
+    } catch (err) {
+      // Private mode or a full quota: scroll restore is a nicety, never fatal.
+    }
+  }
+
+  function restoreListScroll() {
+    var pane = document.querySelector("[data-split-list]");
+    if (!pane) {
+      return;
+    }
+    // Staging rather than writing scrollTop directly: the pane may still be
+    // display:none (narrow viewport) at this point, and a hidden element cannot
+    // be scrolled. The staged value is consumed in setupSplitListScroll once the
+    // pane is actually visible.
+    try {
+      var saved = window.sessionStorage.getItem(splitListScrollStorageKey());
+      if (saved !== null) {
+        window.sessionStorage.removeItem(splitListScrollStorageKey());
+        pane.setAttribute("data-restore-scroll", saved);
+      }
+    } catch (err) {
+      // Ignore storage failures.
+    }
+  }
+
+  function setupSplitListScroll() {
+    var pane = document.querySelector("[data-split-list]");
+    if (!pane) {
+      return;
+    }
+    // Persist before leaving for a thread, and whenever the tab is hidden.
+    pane.addEventListener("click", function (event) {
+      if (event.target.closest("a[href]")) {
+        saveListScroll();
+      }
+    });
+    window.addEventListener("pagehide", saveListScroll);
+    // Restore the remembered offset once the pane is actually visible. A load
+    // that happens while the pane is hidden (narrow) leaves the flag set so a
+    // later resize to wide — the matchMedia change branch — can consume it.
+    function consumeRestoreFlag() {
+      var pending = pane.getAttribute("data-restore-scroll");
+      if (pending !== null && pane.offsetParent !== null) {
+        pane.removeAttribute("data-restore-scroll");
+        pane.scrollTop = Number(pending) || 0;
+      }
+    }
+    if (window.matchMedia) {
+      var scrollQuery = window.matchMedia("(min-width: 1280px)");
+      if (scrollQuery.matches) {
+        consumeRestoreFlag();
+      } else {
+        var onScrollQueryChange = function (event) {
+          if (event.matches) {
+            consumeRestoreFlag();
+          }
+        };
+        if (typeof scrollQuery.addEventListener === "function") {
+          scrollQuery.addEventListener("change", onScrollQueryChange);
+        } else if (typeof scrollQuery.addListener === "function") {
+          scrollQuery.addListener(onScrollQueryChange);
+        }
+      }
+    }
+  }
+
+  function setupSplitListInert() {
+    var pane = document.querySelector("[data-split-list]");
+    if (!pane || !window.matchMedia) {
+      return;
+    }
+    var query = window.matchMedia("(min-width: 1280px)");
+    function apply() {
+      if (query.matches) {
+        if (pane.inert) {
+          pane.inert = false;
+        } else {
+          pane.removeAttribute("inert");
+          pane.removeAttribute("aria-hidden");
+          pane.querySelectorAll("[data-inert-tabindex]").forEach(function (el) {
+            el.tabIndex = Number(el.getAttribute("data-inert-tabindex"));
+            el.removeAttribute("data-inert-tabindex");
+          });
+        }
+        pane.removeAttribute("data-inert-pane");
+        // Same DOM node across a resize, so scrollTop survives natively here; only
+        // a fresh document load needs its saved offset back.
+        restoreListScroll();
+      } else {
+        pane.setAttribute("data-inert-pane", "true");
+        if ("inert" in pane) {
+          pane.inert = true;
+        } else {
+          pane.setAttribute("aria-hidden", "true");
+          pane.querySelectorAll("a[href], button, input, select, textarea, summary, [tabindex]").forEach(function (el) {
+            if (!el.hasAttribute("data-inert-tabindex")) {
+              el.setAttribute("data-inert-tabindex", String(el.tabIndex));
+              el.tabIndex = -1;
+            }
+          });
+        }
+        // The back link's visibility is handled entirely by CSS (hidden >=1280px).
+      }
+    }
+    apply();
+    if (typeof query.addEventListener === "function") {
+      query.addEventListener("change", apply);
+    } else if (typeof query.addListener === "function") {
+      query.addListener(apply);
+    }
+  }
+
   setupRowLinks();
   setupRowMenus();
   setupBulkForm();
   setupInboxAutoRefresh();
   setupPullToRefresh();
+  setupSplitListScroll();
+  setupSplitListInert();
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
