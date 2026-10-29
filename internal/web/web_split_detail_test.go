@@ -871,3 +871,232 @@ func TestSortSelectOffersLongestWaiting(t *testing.T) {
 		t.Error("sort=longest_waiting must select the new option")
 	}
 }
+
+// Filter-navigation consistency (plans/filter-navigation-consistency.md): row
+// links on the filtered inbox list must carry the queue's query string onto the
+// detail URL, so the split view re-renders the same filtered queue instead of
+// falling back to the default open inbox.
+func TestListRowLinksCarryInboxQueryIntoDetailURL(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	mineID := uuid.New()
+	otherID := uuid.New()
+	store.threads[mineID] = sqlc.Thread{
+		ID: mineID, AccountID: "support", SubjectDisplay: "Queue match",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "queue@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		LatestBodyText: "Latest inbound text",
+	}
+	store.threads[otherID] = sqlc.Thread{
+		ID: otherID, AccountID: "support", SubjectDisplay: "Queue neighbour",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "neighbour@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC),
+		LatestBodyText: "Neighbour text",
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new&q=Queue", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads?status=new&q=Queue status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	// The href is HTML-escaped (& -> &amp;) but must keep the queue's filters.
+	for _, want := range []string{
+		`href="/threads/` + mineID.String() + `?status=new&amp;q=Queue"`,
+		`href="/threads/` + otherID.String() + `?status=new&amp;q=Queue"`,
+		`data-row-href="/threads/` + mineID.String() + `?status=new&amp;q=Queue"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("list row links must carry the queue query onto the detail path; missing %s", want)
+		}
+	}
+}
+
+// The split view's two filter bars (top data-split-filters and the pane's
+// sticky bar) must both submit to the open thread's path: changing a pane
+// filter re-renders detail+pane in plain HTML (no-JS included) instead of
+// navigating to the plain inbox. The carried filters must show as selected.
+func TestSplitPaneFilterFormsTargetThreadPath(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	otherID := uuid.New()
+	agentID := store.adminUser.ID
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Anchor thread",
+		Status: sqlc.ThreadStatusNew, AssigneeID: &agentID, CustomerEmail: "anchor@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		LatestBodyText: "Anchor text",
+	}
+	store.threads[otherID] = sqlc.Thread{
+		ID: otherID, AccountID: "support", SubjectDisplay: "Needle thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "needle@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC),
+		LatestBodyText: "Needle text",
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=new&sort=longest_waiting&account=support&q=needle", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail with filters status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// No GET filter form may target the plain inbox on the split page: both bars
+	// submit to the thread path so a filter change keeps the conversation open.
+	if got := strings.Count(body, `action="/threads"`); got != 0 {
+		t.Errorf("split page must not contain a filter form action=%q (count %d)", "/threads", got)
+	}
+	if got := strings.Count(body, `form method="get" action="/threads/`+threadID.String()+`"`); got != 2 {
+		t.Errorf("both split filter bars must target the thread path, found %d forms", got)
+	}
+
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatal("pane/detail markers not in expected order")
+	}
+	pane := body[paneIdx:detailIdx]
+
+	// The pane's controls show the carried filters as selected.
+	for _, want := range []string{
+		`name="q" value="needle"`,
+		`value="longest_waiting" selected`,
+		`<option value="support" selected>Customer Support</option>`,
+		`name="status" value="new"`,
+	} {
+		if !strings.Contains(pane, want) {
+			t.Errorf("pane filter bar must carry the queue filters; missing %s", want)
+		}
+	}
+	// The enhancement marker matches the form target, so a select change submits
+	// the enclosing form to the thread path (app.js submits el.form).
+	if !strings.Contains(pane, `data-hx-get="/threads/`+threadID.String()+`"`) {
+		t.Error("pane filter controls must mark data-hx-get with the thread path")
+	}
+	if strings.Contains(pane, `data-hx-get="/threads"`) {
+		t.Error("pane filter controls must not point data-hx-get at the plain inbox")
+	}
+	// Clearing the search keeps the remaining filters and stays on the split view.
+	wantClear := `class="search-clear" href="/threads/` + threadID.String() + `?account=support&amp;sort=longest_waiting&amp;status=new"`
+	if !strings.Contains(pane, wantClear) {
+		t.Errorf("pane search-clear must stay on the thread path with the remaining filters; missing %s", wantClear)
+	}
+	// The pane refresh link re-renders the split view with the same filters.
+	wantRefresh := `href="/threads/` + threadID.String() + `?status=new&amp;sort=longest_waiting&amp;account=support&amp;q=needle"`
+	if !strings.Contains(pane, wantRefresh) {
+		t.Errorf("pane refresh link must re-render the split view; missing %s", wantRefresh)
+	}
+}
+
+// Deep-link fallback: a detail URL without any filter query (bookmark, Back
+// reload, legacy ?thread= link) must populate the pane from the session's
+// last-visited inbox queue instead of the bare default open inbox.
+func TestDetailDeepLinkUsesSessionInboxFilters(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	newID := uuid.New()
+	completedID := uuid.New()
+	store.threads[newID] = sqlc.Thread{
+		ID: newID, AccountID: "support", SubjectDisplay: "Fresh thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "fresh@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		LatestBodyText: "Fresh text",
+	}
+	store.threads[completedID] = sqlc.Thread{
+		ID: completedID, AccountID: "support", SubjectDisplay: "Archived thread",
+		Status: sqlc.ThreadStatusCompleted, CustomerEmail: "archived@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC),
+		LatestBodyText: "Archived text",
+	}
+
+	// Visit a filtered queue so the handler records it as the last inbox URL.
+	first := httptest.NewRequest(http.MethodGet, "/threads?status=completed&sort=longest_waiting", nil)
+	firstRec := httptest.NewRecorder()
+	router.ServeHTTP(firstRec, first)
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("GET filtered inbox status = %d, want 200", firstRec.Code)
+	}
+
+	// Then open a thread deep link without a query, carrying the session cookie.
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+newID.String(), nil)
+	for _, cookie := range firstRec.Result().Cookies() {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET deep-linked detail status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatal("deep-linked detail must still render the split panes")
+	}
+	pane := body[paneIdx:detailIdx]
+
+	// The pane queue comes from the session's last inbox URL, not the default.
+	if !strings.Contains(pane, `href="/threads/`+completedID.String()+`?status=completed&amp;sort=longest_waiting"`) {
+		t.Errorf("deep-linked pane must show the session's completed queue with carried filters: %s", pane)
+	}
+	if strings.Contains(pane, `<a class="thread-link" href="/threads/`+newID.String()) {
+		t.Errorf("deep-linked pane must not fall back to the default open queue: %s", pane)
+	}
+	// The carried filters show in the pane's controls and hidden status field.
+	for _, want := range []string{
+		`name="status" value="completed"`,
+		`value="longest_waiting" selected`,
+	} {
+		if !strings.Contains(pane, want) {
+			t.Errorf("deep-linked pane controls must reflect the session filters; missing %s", want)
+		}
+	}
+	// The pane form still targets the thread path so filters keep the split view.
+	if !strings.Contains(pane, `form method="get" action="/threads/`+newID.String()+`"`) {
+		t.Error("deep-linked pane filter form must target the thread path")
+	}
+	// The refresh link stays on the split view with the restored queue.
+	if !strings.Contains(pane, `href="/threads/`+newID.String()+`?status=completed&amp;sort=longest_waiting"`) {
+		t.Error("deep-linked pane refresh link must carry the restored filters")
+	}
+}
+
+// The pane's "Load older" cursor link must page the pane in place: it carries
+// the next-page cursor onto the thread path instead of linking to the plain
+// inbox (which would leave the split view).
+func TestSplitPaneLoadOlderKeepsThreadPath(t *testing.T) {
+	srv, store, router, _, _ := buildAccountTestServer(t)
+	srv.WithInboxPageSize(1)
+	firstID := uuid.New()
+	secondID := uuid.New()
+	store.threads[firstID] = sqlc.Thread{
+		ID: firstID, AccountID: "support", SubjectDisplay: "Newest thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "newest@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		LatestBodyText: "Newest text",
+	}
+	store.threads[secondID] = sqlc.Thread{
+		ID: secondID, AccountID: "support", SubjectDisplay: "Older thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "older@example.com",
+		LastMessageAt:  time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC),
+		LatestBodyText: "Older text",
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads/"+firstID.String()+"?status=new", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatal("split panes not rendered")
+	}
+	pane := body[paneIdx:detailIdx]
+	if !strings.Contains(pane, `class="btn btn-secondary" href="/threads/`+firstID.String()+`?`) {
+		t.Errorf("pane Load older link must page the pane in place, got: %s", pane)
+	}
+	if strings.Contains(pane, `href="/threads?status=new&amp;`) {
+		t.Error("pane Load older link must not point at the plain inbox")
+	}
+}

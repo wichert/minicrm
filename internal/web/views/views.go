@@ -749,25 +749,27 @@ func ResolveInlineCIDImages(sanitizedHTML string, atts []sqlc.Attachment) string
 }
 
 var templateFuncs = template.FuncMap{
-	"statusLabel":          FormatStatus,
-	"statusBadgeClass":     statusBadgeClass,
-	"directionLabel":       directionLabel,
-	"directionClass":       directionClass,
-	"directionBadge":       directionBadgeClass,
-	"formatSize":           FormatFileSize,
-	"assignmentLabel":      assignmentLabel,
-	"roleLabel":            FormatRole,
-	"auditEventLabel":      FormatAuditEvent,
-	"hasAccount":           hasAccount,
-	"isImageAttachment":    IsImageAttachment,
+	"statusLabel":       FormatStatus,
+	"statusBadgeClass":  statusBadgeClass,
+	"directionLabel":    directionLabel,
+	"directionClass":    directionClass,
+	"directionBadge":    directionBadgeClass,
+	"formatSize":        FormatFileSize,
+	"assignmentLabel":   assignmentLabel,
+	"roleLabel":         FormatRole,
+	"auditEventLabel":   FormatAuditEvent,
+	"hasAccount":        hasAccount,
+	"isImageAttachment": IsImageAttachment,
+
 	"isViewableAttachment": IsViewableAttachment,
 	"hasImageAttachments":  HasImageAttachments,
 	"attachmentKind":       AttachmentKindLabel,
 	"paneAgeLabel":         PaneAgeLabel,
-	"threadDetailURL":      threadDetailURL,
+	"threadDetailURL":      ThreadDetailURL,
+	"inboxFilterForm":      inboxFilterFormArgs,
 }
 
-// threadDetailURL builds a thread detail link from a base inbox URL (whose query
+// ThreadDetailURL builds a thread detail link from a base inbox URL (whose query
 // string carries the pane's filters) and the thread id. The thread is always
 // addressed by path — /threads/{id} is the only route that renders the detail
 // (GET /threads/{id} -> HandleViewThread); addressing it as /threads?thread={id}
@@ -775,7 +777,7 @@ var templateFuncs = template.FuncMap{
 // dead links. With an empty base the link is the bare /threads/{id}; otherwise
 // the base's query string (never its path) is carried along, so opening a thread
 // from a filtered queue keeps the queue's filters.
-func threadDetailURL(base string, threadID fmt.Stringer) string {
+func ThreadDetailURL(base string, threadID fmt.Stringer) string {
 	link := "/threads/" + threadID.String()
 	query := ""
 	if i := strings.IndexByte(base, '?'); i >= 0 {
@@ -790,10 +792,38 @@ func threadDetailURL(base string, threadID fmt.Stringer) string {
 	return link + "?" + query
 }
 
+// inboxFilterFormData parameterizes the shared inbox filter form partial: the
+// three placements (full inbox, split top bar, split pane) render the same
+// controls but target different URLs. Data holds the list's filter values and
+// visibility flags; ClearSearchURL is the placement-specific "clear search"
+// link (on the split page both bars clear back to the thread path).
+type inboxFilterFormData struct {
+	Data           InboxViewData
+	Action         string
+	ClearSearchURL string
+}
+
+// inboxFilterFormArgs is a template helper that adapts the list data (passed as
+// a value on the inbox page, a pointer inside ThreadDetailViewData.List) plus
+// the placement's form action and clear-search URL into the shape the shared
+// inbox_filter_form partial renders.
+func inboxFilterFormArgs(data any, action, clearSearchURL string) inboxFilterFormData {
+	var listData InboxViewData
+	switch v := data.(type) {
+	case InboxViewData:
+		listData = v
+	case *InboxViewData:
+		if v != nil {
+			listData = *v
+		}
+	}
+	return inboxFilterFormData{Data: listData, Action: action, ClearSearchURL: clearSearchURL}
+}
+
 var (
-	inboxFullTmpl = template.Must(template.New("inbox").Funcs(templateFuncs).Parse(inboxTablePartial + layoutHeader + inboxBody + layoutFooter))
-	inboxPartTmpl = template.Must(template.New("inbox_partial").Funcs(templateFuncs).Parse(inboxTablePartial))
-	detailTmpl    = template.Must(template.New("detail").Funcs(templateFuncs).Parse(inboxTablePartial + layoutHeader + threadDetailBody + layoutFooter))
+	inboxFullTmpl = template.Must(template.New("inbox").Funcs(templateFuncs).Parse(inboxFilterForm + inboxTablePartial + layoutHeader + inboxBody + layoutFooter))
+	inboxPartTmpl = template.Must(template.New("inbox_partial").Funcs(templateFuncs).Parse(inboxFilterForm + inboxTablePartial))
+	detailTmpl    = template.Must(template.New("detail").Funcs(templateFuncs).Parse(inboxFilterForm + inboxTablePartial + layoutHeader + threadDetailBody + layoutFooter))
 	settingsTmpl  = template.Must(template.New("settings").Funcs(templateFuncs).Parse(layoutHeader + settingsAuditTablePartial + settingsBody + layoutFooter))
 	activityTmpl  = template.Must(template.New("activity").Funcs(templateFuncs).Parse(layoutHeader + settingsAuditTablePartial + activityBody + layoutFooter))
 	errorTmpl     = template.Must(template.New("error").Funcs(templateFuncs).Parse(layoutHeader + errorBody + layoutFooter))
@@ -1057,6 +1087,57 @@ const inboxTablePartial = `{{define "inbox_table"}}
 {{end}}
 `
 
+// inboxFilterForm is the shared filter bar used by all three placements: the
+// full inbox page, the split view's top bar (data-split-filters) and the split
+// pane's sticky bar. Action selects where the plain GET form submits (no-JS
+// path): the full inbox posts to /threads, the split bars post to the open
+// thread's path so applying a filter re-renders the split view in place.
+const inboxFilterForm = `{{define "inbox_filter_form"}}
+<form method="get" action="{{.Action}}" class="filter-inline">
+	<input type="hidden" name="status" value="{{.Data.StatusFilter}}">
+	<label class="inline-field search-field">
+		<span class="search-icon" aria-hidden="true">
+			<svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+		</span>
+		<span class="sr-only">Customer or subject</span>
+		<input type="search" name="q" value="{{.Data.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
+		{{if .Data.Search}}<a class="search-clear" href="{{.ClearSearchURL}}" aria-label="Clear search">&times;</a>{{end}}
+	</label>
+	{{if .Data.ShowAssigneeUI}}
+	<label class="inline-field inline-field-compact">
+		<span class="sr-only">Assignee</span>
+		<select name="assignee" data-hx-get="{{.Action}}" aria-label="Assignee">
+			<option value="" {{if eq .Data.AssigneeFilter ""}}selected{{end}}>Anyone</option>
+			<option value="me" {{if eq .Data.AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
+			<option value="unassigned" {{if eq .Data.AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
+			{{range .Data.Users}}
+			<option value="{{.ID}}" {{if eq .ID.String $.Data.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
+			{{end}}
+		</select>
+	</label>
+	{{end}}
+	{{if .Data.ShowAccountUI}}
+	<label class="inline-field inline-field-compact">
+		<span class="sr-only">Account</span>
+		<select name="account" data-hx-get="{{.Action}}" aria-label="Account">
+			<option value="">All accounts</option>
+			{{range .Data.Accounts}}
+			<option value="{{.ID}}" {{if eq .ID $.Data.AccountFilter}}selected{{end}}>{{.Name}}</option>
+			{{end}}
+		</select>
+	</label>
+	{{end}}
+	<label class="inline-field inline-field-compact">
+		<span class="sr-only">Sort</span>
+		<select name="sort" data-hx-get="{{.Action}}" aria-label="Sort threads">
+			<option value="newest" {{if ne .Data.Sort "longest_waiting"}}selected{{end}}>Newest</option>
+			<option value="longest_waiting" {{if eq .Data.Sort "longest_waiting"}}selected{{end}}>Longest waiting</option>
+		</select>
+	</label>
+	<noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
+</form>
+{{end}}`
+
 const inboxBody = `
 <h1 class="sr-only">Threads</h1>
 <div class="inbox-toolbar" data-inbox-toolbar>
@@ -1083,49 +1164,7 @@ const inboxBody = `
 </div>
 <span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
 <div class="filter-sticky">
-  <form method="get" action="/threads" class="filter-inline">
-    <input type="hidden" name="status" value="{{.StatusFilter}}">
-    <label class="inline-field search-field">
-      <span class="search-icon" aria-hidden="true">
-        <svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-      </span>
-      <span class="sr-only">Customer or subject</span>
-      <input type="search" name="q" value="{{.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
-      {{if .Search}}<a class="search-clear" href="{{.ClearSearchURL}}" aria-label="Clear search">&times;</a>{{end}}
-    </label>
-    {{if .ShowAssigneeUI}}
-    <label class="inline-field inline-field-compact">
-      <span class="sr-only">Assignee</span>
-      <select name="assignee" data-hx-get="/threads" aria-label="Assignee">
-        <option value="" {{if eq .AssigneeFilter ""}}selected{{end}}>Anyone</option>
-        <option value="me" {{if eq .AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
-        <option value="unassigned" {{if eq .AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
-        {{range .Users}}
-        <option value="{{.ID}}" {{if eq .ID.String $.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
-        {{end}}
-      </select>
-    </label>
-    {{end}}
-    {{if .ShowAccountUI}}
-    <label class="inline-field inline-field-compact">
-      <span class="sr-only">Account</span>
-      <select name="account" data-hx-get="/threads" aria-label="Account">
-        <option value="">All accounts</option>
-        {{range .Accounts}}
-        <option value="{{.ID}}" {{if eq .ID $.AccountFilter}}selected{{end}}>{{.Name}}</option>
-        {{end}}
-      </select>
-    </label>
-    {{end}}
-    <label class="inline-field inline-field-compact">
-      <span class="sr-only">Sort</span>
-      <select name="sort" data-hx-get="/threads" aria-label="Sort threads">
-        <option value="newest" {{if ne .Sort "longest_waiting"}}selected{{end}}>Newest</option>
-        <option value="longest_waiting" {{if eq .Sort "longest_waiting"}}selected{{end}}>Longest waiting</option>
-      </select>
-    </label>
-    <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
-  </form>
+  {{template "inbox_filter_form" (inboxFilterForm . "/threads" .ClearSearchURL)}}
 </div>
 <div data-inbox-results>
 {{if and .Threads (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}
@@ -1162,49 +1201,7 @@ const threadDetailBody = `
      posts back to the open thread's own path, so applying a filter re-renders the
      pane without leaving the conversation — no-JS included. */}}
 <div class="split-filters" data-split-filters>
-  <form method="get" action="/threads/{{.Thread.ID}}" class="filter-inline">
-    <input type="hidden" name="status" value="{{.List.StatusFilter}}">
-    <label class="inline-field search-field">
-      <span class="search-icon" aria-hidden="true">
-        <svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-      </span>
-      <span class="sr-only">Customer or subject</span>
-      <input type="search" name="q" value="{{.List.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
-      {{if .List.Search}}<a class="search-clear" href="/threads/{{.Thread.ID}}?status={{.List.StatusFilter}}&amp;assignee={{.List.AssigneeFilter}}&amp;account={{.List.AccountFilter}}" aria-label="Clear search">&times;</a>{{end}}
-    </label>
-    {{if .List.ShowAssigneeUI}}
-    <label class="inline-field inline-field-compact">
-      <span class="sr-only">Assignee</span>
-      <select name="assignee" data-hx-get="/threads" aria-label="Assignee">
-        <option value="" {{if eq .List.AssigneeFilter ""}}selected{{end}}>Anyone</option>
-        <option value="me" {{if eq .List.AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
-        <option value="unassigned" {{if eq .List.AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
-        {{range .List.Users}}
-        <option value="{{.ID}}" {{if eq .ID.String $.List.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
-        {{end}}
-      </select>
-    </label>
-    {{end}}
-    {{if .List.ShowAccountUI}}
-    <label class="inline-field inline-field-compact">
-      <span class="sr-only">Account</span>
-      <select name="account" data-hx-get="/threads" aria-label="Account">
-        <option value="">All accounts</option>
-        {{range .List.Accounts}}
-        <option value="{{.ID}}" {{if eq .ID $.List.AccountFilter}}selected{{end}}>{{.Name}}</option>
-        {{end}}
-      </select>
-    </label>
-    {{end}}
-    <label class="inline-field inline-field-compact">
-      <span class="sr-only">Sort</span>
-      <select name="sort" data-hx-get="/threads" aria-label="Sort threads">
-        <option value="newest" {{if ne .List.Sort "longest_waiting"}}selected{{end}}>Newest</option>
-        <option value="longest_waiting" {{if eq .List.Sort "longest_waiting"}}selected{{end}}>Longest waiting</option>
-      </select>
-    </label>
-    <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
-  </form>
+  {{template "inbox_filter_form" (inboxFilterForm .List (threadDetailURL "" .Thread.ID) .List.ClearSearchURL)}}
 </div>
 {{end}}
 <div class="split-layout{{if not .List}} split-single{{end}}" data-split-layout>
@@ -1234,49 +1231,13 @@ const threadDetailBody = `
     </div>
   </div>
   <div class="filter-sticky">
-    <form method="get" action="/threads" class="filter-inline">
-      <input type="hidden" name="status" value="{{.List.StatusFilter}}">
-      <label class="inline-field search-field">
-        <span class="search-icon" aria-hidden="true">
-          <svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-        </span>
-        <span class="sr-only">Customer or subject</span>
-        <input type="search" name="q" value="{{.List.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
-        {{if .List.Search}}<a class="search-clear" href="{{.List.ClearSearchURL}}" aria-label="Clear search">&times;</a>{{end}}
-      </label>
-      {{if .List.ShowAssigneeUI}}
-      <label class="inline-field inline-field-compact">
-        <span class="sr-only">Assignee</span>
-        <select name="assignee" data-hx-get="/threads" aria-label="Assignee">
-          <option value="" {{if eq .List.AssigneeFilter ""}}selected{{end}}>Anyone</option>
-          <option value="me" {{if eq .List.AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
-          <option value="unassigned" {{if eq .List.AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
-          {{range .List.Users}}
-          <option value="{{.ID}}" {{if eq .ID.String $.List.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
-          {{end}}
-        </select>
-      </label>
-      {{end}}
-      {{if .List.ShowAccountUI}}
-      <label class="inline-field inline-field-compact">
-        <span class="sr-only">Account</span>
-        <select name="account" data-hx-get="/threads" aria-label="Account">
-          <option value="">All accounts</option>
-          {{range .List.Accounts}}
-          <option value="{{.ID}}" {{if eq .ID $.List.AccountFilter}}selected{{end}}>{{.Name}}</option>
-          {{end}}
-        </select>
-      </label>
-      {{end}}
-      <label class="inline-field inline-field-compact">
-        <span class="sr-only">Sort</span>
-        <select name="sort" data-hx-get="/threads" aria-label="Sort threads">
-          <option value="newest" {{if ne .List.Sort "longest_waiting"}}selected{{end}}>Newest</option>
-          <option value="longest_waiting" {{if eq .List.Sort "longest_waiting"}}selected{{end}}>Longest waiting</option>
-        </select>
-      </label>
-      <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
-    </form>
+    {{/* The form submits to the open thread's path (not /threads): applying a
+         pane filter re-renders the split view with the new filter instead of
+         navigating to the plain inbox — the same behaviour as the top
+         data-split-filters bar above, and it works without JS. The handler
+         sets ClearSearchURL to a thread-path URL so clearing the search stays
+         in the split view too. */}}
+    {{template "inbox_filter_form" (inboxFilterForm .List (threadDetailURL "" .Thread.ID) .List.ClearSearchURL)}}
   </div>
   <span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
   {{/* No bulk bar in the pane: selection chrome plus a 5-button bar cannot fit a
@@ -1293,7 +1254,11 @@ const threadDetailBody = `
   <div class="split-detail" data-split-detail>
 <div class="thread-top-bar thread-detail">
   <a class="back-link" href="{{if .BackURL}}{{.BackURL}}{{else}}/threads{{end}}">&larr; Back to threads</a>
-  <a class="btn btn-secondary btn-small" href="/threads/{{.Thread.ID}}">Refresh</a>
+  {{/* Refresh re-requests this page. In the split view it reuses the pane's
+       filter-carrying thread URL (List.RefreshURL) so reloading keeps the queue
+       the user is reading; without a pane it is the bare thread path. No-JS: it
+       is a plain link either way. */}}
+  <a class="btn btn-secondary btn-small" href="{{if .List}}{{.List.RefreshURL}}{{else}}/threads/{{.Thread.ID}}{{end}}">Refresh</a>
 </div>
 <div class="card thread-header-card">
   <div class="thread-header">
