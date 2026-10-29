@@ -521,6 +521,12 @@ p.card.empty-state {
   border-color: #cbd5e1;
 }
 
+.badge-role {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+  border-color: #c7d2fe;
+}
+
 /* ---------- Flash & errors ---------- */
 
 .flash {
@@ -2754,4 +2760,191 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   .split-filters {
     display: none;
   }
+}
+
+/* ---------- W6: Settings section nav, card tables, activity ---------- */
+
+/* Sticky in-page section nav, styled like tabs. Pure anchors, no JS. */
+.settings-section-nav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 0.25rem;
+  background: var(--bg);
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.settings-section-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.settings-section-nav a {
+  flex: none;
+  display: inline-block;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.88rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.settings-section-nav a:hover {
+  border-color: var(--border-strong);
+  background: var(--primary-soft);
+}
+
+/* Anchor targets stop below the sticky nav instead of under it. */
+#settings-routing,
+#settings-folders,
+#settings-team,
+#settings-activity {
+  scroll-margin-top: 3.5rem;
+}
+
+/* Account access as chips (readable on mobile cards, compact on desktop). */
+.account-chip {
+  display: inline-block;
+  padding: 0.1rem 0.55rem;
+  margin: 0.1rem 0.25rem 0.1rem 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.settings-activity-footer {
+  margin-top: 0.75rem;
+  text-align: right;
+}
+
+.settings-activity-link {
+  font-size: 0.9rem;
+}
+
+.settings-user-name-text {
+  font-weight: 600;
+}
+
+/* Mobile (W6): transform the settings tables into stacked cards, CSS-only.
+   The markup keeps one source of truth: each td carries data-label for a
+   ::before label, and the users table also carries role/status badges inside
+   the name cell so line 1 = name + role + status without duplicating rows. */
+@media (max-width: 768px) {
+  .settings-table,
+  .settings-table tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .settings-table thead {
+    /* Column headers become per-cell data-labels on mobile. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .settings-table tr {
+    display: block;
+    width: 100%;
+    padding: 0.7rem 0.85rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .settings-table tr:last-child {
+    border-bottom: none;
+  }
+
+  .settings-table td {
+    display: block;
+    width: 100%;
+    padding: 0.1rem 0;
+    border-bottom: none;
+    box-shadow: none;
+    overflow-wrap: anywhere;
+  }
+
+  .settings-table td[data-label]::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  /* Line 1: name + role badge + status; hide the redundant per-cell labels. */
+  .settings-users-table td.settings-user-name::before,
+  .settings-users-table td.settings-user-email::before,
+  .settings-users-table td.settings-user-accounts::before {
+    display: none;
+  }
+
+  .settings-users-table td.settings-user-status::before {
+    display: none;
+  }
+
+  .settings-users-table td.settings-user-status,
+  .settings-users-table td.settings-user-role {
+    display: none; /* role badge and status badge already shown next to the name */
+  }
+
+  .settings-users-table td.settings-user-name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  /* Line 2: muted email. */
+  .settings-users-table td.settings-user-email {
+    color: var(--muted);
+    font-size: 0.88rem;
+  }
+
+  /* Line 3: account-access chips (labels hidden above). */
+  .settings-users-table td.settings-user-accounts {
+    line-height: 1.9;
+  }
+
+  /* Bounded activity: the server renders at most 10 entries; below 768px only
+     the latest 5 are shown (entries 6-10 hidden; full log on the activity page). */
+  .settings-audit-table tbody tr:nth-child(n+6) {
+    display: none;
+  }
+
+  .settings-section-nav {
+    gap: 0.4rem;
+    padding: 0.4rem 0;
+  }
+}
+
+/* Activity pagination footer */
+.activity-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.activity-page-label {
+  font-size: 0.88rem;
 }

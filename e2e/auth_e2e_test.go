@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -516,6 +517,20 @@ func (m *e2eMemStore) ListThreadEvents(_ context.Context, _ uuid.UUID) ([]sqlc.T
 
 func (m *e2eMemStore) ListAuditLogs(_ context.Context, _ int) ([]sqlc.AuditLog, error) {
 	return m.auditLogs, nil
+}
+
+func (m *e2eMemStore) ListAuditLogsPage(_ context.Context, limit, offset int) ([]sqlc.AuditLog, error) {
+	logs := make([]sqlc.AuditLog, len(m.auditLogs))
+	copy(logs, m.auditLogs)
+	sort.Slice(logs, func(i, j int) bool { return logs[i].OccurredAt.After(logs[j].OccurredAt) })
+	if offset >= len(logs) {
+		return nil, nil
+	}
+	end := offset + limit
+	if end > len(logs) {
+		end = len(logs)
+	}
+	return logs[offset:end], nil
 }
 
 func (m *e2eMemStore) EnqueueIMAPJob(_ context.Context, job sqlc.IMAPJob) (sqlc.IMAPJob, error) {

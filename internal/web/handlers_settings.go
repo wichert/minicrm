@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,37 +27,82 @@ func (s *Server) HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	s.renderSettings(w, r, user, http.StatusOK, nil, nil)
 }
 
-// renderSettings builds and renders the settings page, optionally using typed form values.
-func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user sqlc.User, status int, form *settingsForm, formErrors []string) {
+// activityPageSize is the number of audit entries per page on /settings/activity.
+const activityPageSize = 50
+
+// settingsRecentActivityLimit bounds the Recent activity table on the settings
+// page itself; entries beyond this are only visible via /settings/activity.
+// CSS additionally hides #6+ below 768px (W6 plan: latest 5 on mobile, 10 desktop).
+const settingsRecentActivityLimit = 10
+
+// HandleGetActivity renders the paginated, admin-only full activity page.
+func (s *Server) HandleGetActivity(w http.ResponseWriter, r *http.Request) {
+	user, _ := auth.UserFromContext(r.Context())
 	ctx := r.Context()
+
+	page, err := strconv.Atoi(r.URL.Query().Get("page"))
+	if err != nil || page < 1 {
+		page = 1
+	}
 
 	settings, err := s.store.GetSystemSettings(ctx)
 	if err != nil {
-		s.renderError(w, r, http.StatusInternalServerError, "Settings unavailable", "We could not load the system settings.")
+		s.renderError(w, r, http.StatusInternalServerError, "Activity unavailable", "We could not load the activity log.")
 		return
 	}
-	users, _ := s.store.ListUsers(ctx)
-	logs, _ := s.store.ListAuditLogs(ctx, 50)
-
-	accounts := make([]views.AccountOption, 0, len(s.accounts))
-	accountNames := make(map[string]string, len(s.accounts))
-	accountViews := make([]views.AccountSettingsView, 0, len(s.accounts))
-	for _, a := range s.accounts {
-		accounts = append(accounts, views.AccountOption{ID: a.ID, Name: a.Name})
-		accountNames[a.ID] = a.Name
-		view := views.AccountSettingsView{Account: views.AccountOption{ID: a.ID, Name: a.Name}}
-		if as, err := s.store.GetAccountSettings(ctx, a.ID); err == nil && as.DefaultAssigneeID != nil {
-			view.DefaultAssigneeValue = as.DefaultAssigneeID.String()
-		}
-		accountViews = append(accountViews, view)
+	logs, err := s.store.ListAuditLogsPage(ctx, activityPageSize+1, (page-1)*activityPageSize)
+	if err != nil {
+		s.renderError(w, r, http.StatusInternalServerError, "Activity unavailable", "We could not load the activity log.")
+		return
+	}
+	hasNext := len(logs) > activityPageSize
+	if hasNext {
+		logs = logs[:activityPageSize]
 	}
 
-	userNames := make(map[uuid.UUID]string, len(users))
+	userNames, err := s.userNameMap(ctx)
+	if err != nil {
+		s.renderError(w, r, http.StatusInternalServerError, "Activity unavailable", "We could not load the activity log.")
+		return
+	}
+
+	s.audit.LogDataAccess(ctx, "audit_logs", strconv.Itoa(page))
+
+	b := s.appBranding()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := views.RenderActivity(w, views.ActivityViewData{
+		Title:        "Activity",
+		AppName:      b.Name,
+		AppShortName: b.ShortName,
+		ActiveNav:    "settings",
+		CurrentUser:  user,
+		AuditLogs:    s.auditEntryViews(logs, userNames, settings.DisplayTimezone),
+		Page:         page,
+		HasPrev:      page > 1,
+		PagePrev:     page - 1,
+		HasNext:      hasNext,
+		PageNext:     page + 1,
+	}); err != nil {
+		s.renderError(w, r, http.StatusInternalServerError, "Activity unavailable", "We could not render the activity page.")
+	}
+}
+
+// userNameMap loads id -> display name for audit entry rendering.
+func (s *Server) userNameMap(ctx context.Context) (map[uuid.UUID]string, error) {
+	users, err := s.store.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[uuid.UUID]string, len(users))
 	for _, u := range users {
-		userNames[u.ID] = u.DisplayName
+		m[u.ID] = u.DisplayName
 	}
+	return m, nil
+}
 
-	auditEntries := make([]views.AuditEntryView, 0, len(logs))
+// auditEntryViews converts raw audit rows into the shared audit-entry view model.
+func (s *Server) auditEntryViews(logs []sqlc.AuditLog, userNames map[uuid.UUID]string, displayTZ string) []views.AuditEntryView {
+	entries := make([]views.AuditEntryView, 0, len(logs))
 	for _, entry := range logs {
 		actorName := "System"
 		if entry.ActorUserID != nil {
@@ -72,14 +118,47 @@ func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user sql
 		if label == "Settings updated" {
 			targetName = "System settings"
 		}
-		auditEntries = append(auditEntries, views.AuditEntryView{
-			FormattedTime: views.FormatTimestamp(entry.OccurredAt, settings.DisplayTimezone),
-			FullTime:      views.FormatTimestampFull(entry.OccurredAt, settings.DisplayTimezone),
+		entries = append(entries, views.AuditEntryView{
+			FormattedTime: views.FormatTimestamp(entry.OccurredAt, displayTZ),
+			FullTime:      views.FormatTimestampFull(entry.OccurredAt, displayTZ),
 			ActorName:     actorName,
 			TargetName:    targetName,
 			Label:         label,
 		})
 	}
+	return entries
+}
+
+// renderSettings builds and renders the settings page, optionally using typed form values.
+func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, user sqlc.User, status int, form *settingsForm, formErrors []string) {
+	ctx := r.Context()
+
+	settings, err := s.store.GetSystemSettings(ctx)
+	if err != nil {
+		s.renderError(w, r, http.StatusInternalServerError, "Settings unavailable", "We could not load the system settings.")
+		return
+	}
+	users, _ := s.store.ListUsers(ctx)
+	// Bounded render: the settings page shows at most 10 recent entries; CSS
+	// hides #6+ below 768px (W6 plan). The full log lives on /settings/activity.
+	logs, _ := s.store.ListAuditLogs(ctx, settingsRecentActivityLimit)
+
+	accounts := make([]views.AccountOption, 0, len(s.accounts))
+	accountNames := make(map[string]string, len(s.accounts))
+	accountViews := make([]views.AccountSettingsView, 0, len(s.accounts))
+	for _, a := range s.accounts {
+		accounts = append(accounts, views.AccountOption{ID: a.ID, Name: a.Name})
+		accountNames[a.ID] = a.Name
+		view := views.AccountSettingsView{Account: views.AccountOption{ID: a.ID, Name: a.Name}}
+		if as, err := s.store.GetAccountSettings(ctx, a.ID); err == nil && as.DefaultAssigneeID != nil {
+			view.DefaultAssigneeValue = as.DefaultAssigneeID.String()
+		}
+		accountViews = append(accountViews, view)
+	}
+
+	userNames, _ := s.userNameMap(ctx)
+
+	auditEntries := s.auditEntryViews(logs, userNames, settings.DisplayTimezone)
 
 	newUser := views.NewUserForm{Role: "agent"}
 	if form != nil {

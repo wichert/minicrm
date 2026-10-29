@@ -462,8 +462,30 @@ func (s *testWebStore) ListThreadEvents(_ context.Context, threadID uuid.UUID) (
 	return out, nil
 }
 
-func (s *testWebStore) ListAuditLogs(_ context.Context, _ int) ([]sqlc.AuditLog, error) {
-	return s.auditLogs, nil
+func (s *testWebStore) ListAuditLogs(_ context.Context, limit int) ([]sqlc.AuditLog, error) {
+	// Newest first, matching the SQL ordering (occurred_at DESC, id DESC).
+	logs := make([]sqlc.AuditLog, len(s.auditLogs))
+	copy(logs, s.auditLogs)
+	sort.Slice(logs, func(i, j int) bool { return logs[i].OccurredAt.After(logs[j].OccurredAt) })
+	if limit < len(logs) {
+		logs = logs[:limit]
+	}
+	return logs, nil
+}
+
+func (s *testWebStore) ListAuditLogsPage(_ context.Context, limit, offset int) ([]sqlc.AuditLog, error) {
+	// Newest first, matching the SQL ordering (occurred_at DESC, id DESC).
+	logs := make([]sqlc.AuditLog, len(s.auditLogs))
+	copy(logs, s.auditLogs)
+	sort.Slice(logs, func(i, j int) bool { return logs[i].OccurredAt.After(logs[j].OccurredAt) })
+	if offset >= len(logs) {
+		return nil, nil
+	}
+	end := offset + limit
+	if end > len(logs) {
+		end = len(logs)
+	}
+	return logs[offset:end], nil
 }
 
 func (s *testWebStore) EnqueueOutboxEmail(_ context.Context, emailID, senderUserID uuid.UUID) (sqlc.OutboxEmail, error) {
