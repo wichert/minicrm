@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -51,6 +52,7 @@ func defaultAppBranding() AppBranding {
 // HandlerStore defines the persistence operations required by the web Server handlers.
 type HandlerStore interface {
 	ListThreads(ctx context.Context, f sqlc.ListThreadsFilter) ([]sqlc.Thread, error)
+	CountThreadsByTab(ctx context.Context, f sqlc.CountThreadsFilter) (sqlc.ThreadCounts, error)
 	ListCustomerHistory(ctx context.Context, accounts []string, email string, exclude uuid.UUID, limit int) ([]sqlc.Thread, error)
 	GetThreadByID(ctx context.Context, id uuid.UUID) (sqlc.Thread, error)
 	GetReplyDraft(ctx context.Context, threadID uuid.UUID) (sqlc.ReplyDraft, error)
@@ -395,10 +397,14 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	var statusStr string
 	var statusFilter *sqlc.ThreadStatus
 	openOnly := false
+	needsAttention := false
 	switch rawStatus {
 	case "", "open":
 		statusStr = "open"
 		openOnly = true
+	case "attention":
+		statusStr = "attention"
+		needsAttention = true
 	case "all":
 		statusStr = "all"
 	case string(sqlc.ThreadStatusNew), string(sqlc.ThreadStatusInProgress), string(sqlc.ThreadStatusCompleted), string(sqlc.ThreadStatusSpam):
@@ -455,12 +461,20 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		beforeTime, beforeID = &parsedTime, &parsedID
 	}
 
+	displayTZ := s.currentDisplayTimezone(ctx)
+	attentionAgeDays := s.attentionAgeDays(ctx)
+	now := time.Now().UTC()
+	attentionCutoff := now.Add(-time.Duration(attentionAgeDays) * 24 * time.Hour)
+
 	var threads []sqlc.Thread
+	var counts sqlc.ThreadCounts
 	if len(user.AllowedAccounts) > 0 {
 		var err error
 		threads, err = s.store.ListThreads(ctx, sqlc.ListThreadsFilter{
 			Status:          statusFilter,
 			OpenOnly:        openOnly,
+			NeedsAttention:  needsAttention,
+			AttentionCutoff: attentionCutoff,
 			AssigneeID:      assigneeID,
 			Unassigned:      unassigned,
 			AccountID:       accountIDFilter,
@@ -473,6 +487,17 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not load the conversation threads. Please try again.")
 			return
+		}
+		var countErr error
+		counts, countErr = s.store.CountThreadsByTab(ctx, sqlc.CountThreadsFilter{
+			AllowedAccounts: user.AllowedAccounts,
+			AccountID:       accountIDFilter,
+			UserID:          user.ID,
+			AttentionCutoff: attentionCutoff,
+		})
+		if countErr != nil {
+			// The thread list still renders; only the tab count pills degrade to 0.
+			slog.ErrorContext(ctx, "count_threads_by_tab_failed", slog.String("error", countErr.Error()))
 		}
 	}
 	nextURL := ""
@@ -489,8 +514,6 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	for _, u := range users {
 		userNames[u.ID] = u.DisplayName
 	}
-	displayTZ := s.currentDisplayTimezone(ctx)
-	now := time.Now().UTC()
 
 	items := make([]views.ThreadSummaryItem, 0, len(threads))
 	for _, th := range threads {
@@ -502,16 +525,14 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		if waitSince.IsZero() {
 			waitSince = th.LastMessageAt
 		}
-		waitLabel, waitUrgency := "", ""
-		if th.Status == sqlc.ThreadStatusNew {
-			waitLabel, waitUrgency = views.FormatWaitDuration(waitSince, now)
-		}
+		waitLabel, waitUrgency := views.ThreadAgeBadge(th.Status, waitSince, now, displayTZ)
 		items = append(items, views.ThreadSummaryItem{
 			Thread:          th,
 			AssigneeName:    assigneeName,
 			AccountName:     s.accountName(th.AccountID),
 			FormattedTime:   views.FormatTimestamp(th.LastMessageAt, displayTZ),
 			FullTime:        views.FormatTimestampFull(th.LastMessageAt, displayTZ),
+			OpenedFullTime:  views.FormatTimestampFull(waitSince, displayTZ),
 			RelativeTime:    views.FormatRelativeTime(th.LastMessageAt, now),
 			WaitLabel:       waitLabel,
 			WaitUrgency:     waitUrgency,
@@ -541,6 +562,7 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		ActiveNav:      "threads",
 		CurrentUser:    user,
 		Threads:        items,
+		Counts:         counts,
 		StatusFilter:   statusStr,
 		AssigneeFilter: assigneeFilter,
 		Users:          assigneeFilterUsers(users, user),
@@ -664,14 +686,16 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		}
 	}
 
-	waitLabel, waitUrgency := "", ""
-	if thread.Status == sqlc.ThreadStatusNew {
-		waitSince := thread.LastMessageAt
-		if len(emails) > 0 && !emails[0].SentAt.IsZero() {
-			waitSince = emails[0].SentAt
-		}
-		waitLabel, waitUrgency = views.FormatWaitDuration(waitSince, now)
+	// GetThreadByID now returns OpenedAt (earliest email sent_at); the emails[0] fallback
+	// only covers legacy callers that select threads without opened_at.
+	waitSince := thread.OpenedAt
+	if waitSince.IsZero() && len(emails) > 0 && !emails[0].SentAt.IsZero() {
+		waitSince = emails[0].SentAt
 	}
+	if waitSince.IsZero() {
+		waitSince = thread.LastMessageAt
+	}
+	waitLabel, waitUrgency := views.ThreadAgeBadge(thread.Status, waitSince, now, displayTZ)
 
 	var history []views.ThreadSummaryItem
 	if strings.TrimSpace(thread.CustomerEmail) != "" && len(user.AllowedAccounts) > 0 {
@@ -1102,6 +1126,16 @@ func (s *Server) currentDisplayTimezone(ctx context.Context) string {
 		return "UTC"
 	}
 	return settings.DisplayTimezone
+}
+
+// attentionAgeDays returns the configured needs-attention threshold in days, falling back
+// to 2 when settings are unavailable or the stored value is out of range.
+func (s *Server) attentionAgeDays(ctx context.Context) int {
+	settings, err := s.store.GetSystemSettings(ctx)
+	if err != nil || settings.AttentionAgeDays < 1 || settings.AttentionAgeDays > 365 {
+		return 2
+	}
+	return settings.AttentionAgeDays
 }
 
 func parseBoundedForm(w http.ResponseWriter, r *http.Request, maxBytes int64) error {

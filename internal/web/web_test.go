@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -48,6 +49,9 @@ type testWebStore struct {
 	jobs            []sqlc.IMAPJob
 	accountSettings map[string]sqlc.AccountSettings
 	drafts          map[uuid.UUID]sqlc.ReplyDraft
+	// countThreadsErr, when set, makes CountThreadsByTab fail so tests can pin the
+	// handler's degraded-but-working behaviour on tab-count failures.
+	countThreadsErr error
 }
 
 func newTestWebStore() *testWebStore {
@@ -70,6 +74,7 @@ func newTestWebStore() *testWebStore {
 			IMAPJunkMailbox:        "Junk",
 			IMAPSentMailbox:        "Sent",
 			SubjectMatchWindowDays: 30,
+			AttentionAgeDays:       2,
 		},
 		threads:         make(map[uuid.UUID]sqlc.Thread),
 		emails:          make(map[uuid.UUID]sqlc.Email),
@@ -223,6 +228,68 @@ func (s *testWebStore) UpsertSystemSettings(_ context.Context, cfg sqlc.SystemSe
 	return cfg, nil
 }
 
+func (s *testWebStore) threadOpenedAt(t sqlc.Thread) time.Time {
+	if !t.OpenedAt.IsZero() {
+		return t.OpenedAt
+	}
+	var earliest time.Time
+	for _, em := range s.emails {
+		if em.ThreadID == t.ID && !em.SentAt.IsZero() {
+			if earliest.IsZero() || em.SentAt.Before(earliest) {
+				earliest = em.SentAt
+			}
+		}
+	}
+	if !earliest.IsZero() {
+		return earliest
+	}
+	return t.LastMessageAt
+}
+
+func (s *testWebStore) CountThreadsByTab(_ context.Context, f sqlc.CountThreadsFilter) (sqlc.ThreadCounts, error) {
+	if s.countThreadsErr != nil {
+		return sqlc.ThreadCounts{}, s.countThreadsErr
+	}
+	if len(f.AllowedAccounts) == 0 {
+		return sqlc.ThreadCounts{}, nil
+	}
+	var out sqlc.ThreadCounts
+	for _, t := range s.threads {
+		if f.AccountID != nil && t.AccountID != *f.AccountID {
+			continue
+		}
+		allowed := false
+		for _, id := range f.AllowedAccounts {
+			if id == t.AccountID {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			continue
+		}
+		out.All++
+		isOpen := t.Status == sqlc.ThreadStatusNew || t.Status == sqlc.ThreadStatusInProgress
+		if isOpen && !s.threadOpenedAt(t).After(f.AttentionCutoff) {
+			out.NeedsAttention++
+		}
+		if isOpen && t.AssigneeID != nil && *t.AssigneeID == f.UserID {
+			out.Mine++
+		}
+		switch t.Status {
+		case sqlc.ThreadStatusNew:
+			out.New++
+		case sqlc.ThreadStatusInProgress:
+			out.InProgress++
+		case sqlc.ThreadStatusCompleted:
+			out.Completed++
+		case sqlc.ThreadStatusSpam:
+			out.Spam++
+		}
+	}
+	return out, nil
+}
+
 func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) ([]sqlc.Thread, error) {
 	var out []sqlc.Thread
 	for _, t := range s.threads {
@@ -231,6 +298,14 @@ func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) 
 		}
 		if f.OpenOnly && t.Status != sqlc.ThreadStatusNew && t.Status != sqlc.ThreadStatusInProgress {
 			continue
+		}
+		if f.NeedsAttention {
+			if t.Status != sqlc.ThreadStatusNew && t.Status != sqlc.ThreadStatusInProgress {
+				continue
+			}
+			if s.threadOpenedAt(t).After(f.AttentionCutoff) {
+				continue
+			}
 		}
 		if f.AccountID != nil && t.AccountID != *f.AccountID {
 			continue
@@ -601,6 +676,7 @@ func TestSecurityHeadersSandboxedIframeAndReopenBanner(t *testing.T) {
 		"imap_junk_mailbox":                {"Junk"},
 		"imap_sent_mailbox":                {"Sent"},
 		"subject_match_window_days":        {"45"},
+		"attention_age_days":               {"2"},
 	}
 	req3 := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
 	req3.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -627,6 +703,11 @@ func testAccounts() []web.AccountConfig {
 }
 
 // buildAccountTestServer builds a web.Server with two configured accounts.
+// testInboxPageSize, when > 0, overrides the inbox page size for servers built by
+// buildAccountTestServer (needed for pagination tests; the returned *web.Server pointer
+// cannot be reconfigured after the router closes over it).
+var testInboxPageSize int
+
 func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Handler, sqlc.User, sqlc.User) {
 	t.Helper()
 	store := newTestWebStore()
@@ -642,6 +723,9 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 	sm := auth.NewSessionManager(false)
 	authSvc := auth.NewService(store, auditLogger, sm, nil, "admin@example.com")
 	srv := web.NewServer(store, authSvc, wfSvc, outbox, attStore, auditLogger, sm, testAccounts())
+	if testInboxPageSize > 0 {
+		srv = srv.WithInboxPageSize(testInboxPageSize)
+	}
 
 	multiUser := store.adminUser
 	singleUser := sqlc.User{
@@ -1264,7 +1348,7 @@ func TestInboxStatusTabsKeepOverflowAndKeyboardAffordances(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=spam", nil))
 	body := rec.Body.String()
-	for _, want := range []string{`data-tab-strip`, `aria-label="Thread status"`, `aria-current="true">Spam</a>`} {
+	for _, want := range []string{`data-tab-strip`, `aria-label="Thread status"`, `aria-current="true"><span>Spam</span>`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("inbox is missing %q", want)
 		}
@@ -1508,6 +1592,7 @@ func TestSettingsEndpointsAcceptMultipartForm(t *testing.T) {
 		"imap_junk_mailbox":                {"Junk"},
 		"imap_sent_mailbox":                {"Sent"},
 		"subject_match_window_days":        {"45"},
+		"attention_age_days":               {"2"},
 	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, newMultipartRequest(t, http.MethodPost, "/settings", fields))
@@ -1935,7 +2020,7 @@ func TestInboxDefaultsToOpenQueueAndShowsSnippets(t *testing.T) {
 	if !strings.Contains(body, "Open one") || strings.Contains(body, "Done one") || strings.Contains(body, "Junk one") {
 		t.Fatalf("default inbox must only list open threads: %s", body)
 	}
-	for _, want := range []string{"Latest words here", "You:", `class="count-pill"`, "Waiting 2d", "wait-urgent"} {
+	for _, want := range []string{"Latest words here", "You:", `class="count-pill"`, "Open 2d", "wait-warning"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected %q in inbox: %s", want, body)
 		}
@@ -2106,8 +2191,8 @@ func TestExternalReplyEventSummaries(t *testing.T) {
 	}
 }
 
-// After a reply sent from another mail client the thread is in progress (no waiting badge),
-// shows the "You:" snippet, and its age reflects the reply.
+// After a reply sent from another mail client the thread is in progress,
+// shows the "You:" snippet, and displays its thread-age badge based on opened_at.
 func TestInboxReflectsExternalReply(t *testing.T) {
 	_, store, router, multiUser, _ := buildAccountTestServer(t)
 	id := uuid.New()
@@ -2121,13 +2206,13 @@ func TestInboxReflectsExternalReply(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads", nil))
 	body := rec.Body.String()
-	for _, want := range []string{"Answered elsewhere", "You:", "Sent from Thunderbird", "5m ago"} {
+	for _, want := range []string{"Answered elsewhere", "You:", "Sent from Thunderbird", "Open 3d", "wait-warning"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected %q in inbox: %s", want, body)
 		}
 	}
 	if strings.Contains(body, "Waiting") {
-		t.Fatalf("an answered thread must not show a waiting badge: %s", body)
+		t.Fatalf("an answered thread must not show a legacy waiting badge: %s", body)
 	}
 }
 
@@ -2264,5 +2349,409 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 	router.ServeHTTP(recEvil, reqEvil)
 	if !strings.Contains(recEvil.Body.String(), `<a class="back-link" href="/threads">`) {
 		t.Fatalf("expected cross-origin Referer to fall back to /threads, got: %s", recEvil.Body.String())
+	}
+}
+
+func TestThreadAgeBadge(t *testing.T) {
+	// Reference time: 2026-10-29 01:30:00 CET (which is 2026-10-29 00:30:00 UTC)
+	now := time.Date(2026, 10, 29, 0, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name        string
+		status      sqlc.ThreadStatus
+		openedAt    time.Time
+		now         time.Time // optional; zero means the shared "now" reference time
+		displayTZ   string
+		wantLabel   string
+		wantUrgency string
+	}{
+		{
+			name:        "new thread opened today in display timezone",
+			status:      sqlc.ThreadStatusNew,
+			openedAt:    time.Date(2026, 10, 28, 23, 15, 0, 0, time.UTC), // 2026-10-29 00:15 CET (same local calendar day as now)
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "Today",
+			wantUrgency: "fresh",
+		},
+		{
+			name:        "same timestamp in America/New_York is still Oct 28 for both opened and now",
+			status:      sqlc.ThreadStatusNew,
+			openedAt:    time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC), // Oct 28 08:00 EDT; now is Oct 28 20:30 EDT (same local day)
+			displayTZ:   "America/New_York",
+			wantLabel:   "Today",
+			wantUrgency: "fresh",
+		},
+		{
+			name:        "timezone boundary: Oct 28 22:30 UTC is Oct 28 23:30 CET vs now Oct 29 01:30 CET -> Open 1d",
+			status:      sqlc.ThreadStatusNew,
+			openedAt:    time.Date(2026, 10, 28, 22, 30, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "Open 1d",
+			wantUrgency: "warning",
+		},
+		{
+			name:        "in_progress thread opened 3 days ago gets warning badge",
+			status:      sqlc.ThreadStatusInProgress,
+			openedAt:    time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "Open 3d",
+			wantUrgency: "warning",
+		},
+		{
+			name:        "in_progress thread opened 7 days ago gets warning badge (boundary)",
+			status:      sqlc.ThreadStatusInProgress,
+			openedAt:    time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "Open 7d",
+			wantUrgency: "warning",
+		},
+		{
+			name:        "in_progress thread opened 8 days ago gets overdue urgent badge",
+			status:      sqlc.ThreadStatusInProgress,
+			openedAt:    time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "Overdue · 8d",
+			wantUrgency: "urgent",
+		},
+		{
+			name:        "completed thread gets no age badge",
+			status:      sqlc.ThreadStatusCompleted,
+			openedAt:    time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "",
+			wantUrgency: "",
+		},
+		{
+			// Spring-forward DST: on 2026-03-29 the Amsterdam clock jumps 02:00 CET -> 03:00 CEST,
+			// so this local day is only 23 hours long. now = 2026-03-29 01:30 UTC = 03:30 CEST
+			// (local Mar 29); openedAt = 2026-03-27 23:30 UTC = Mar 28 00:30 CET (local Mar 28).
+			// Calendar-day bucketing counts Mar 29 - Mar 28 = 1 day: the skipped hour must not
+			// inflate the label to "Open 2d".
+			name:        "spring-forward DST transition does not off-by-one the day count",
+			now:         time.Date(2026, 3, 29, 1, 30, 0, 0, time.UTC), // 03:30 CEST in Amsterdam
+			status:      sqlc.ThreadStatusNew,
+			openedAt:    time.Date(2026, 3, 27, 23, 30, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "Open 1d",
+			wantUrgency: "warning",
+		},
+		{
+			// Fall-back DST: 2026-10-25 the Amsterdam clock repeats 02:00-03:00 CEST->CET, making
+			// that local day 25 hours. now = 2026-10-26 00:30 UTC = 01:30 CET (Oct 26);
+			// openedAt = 2026-10-24 23:30 UTC = Oct 25 01:30 CEST (Oct 25) -> "Open 1d".
+			name:        "fall-back DST transition does not off-by-one the day count",
+			now:         time.Date(2026, 10, 26, 0, 30, 0, 0, time.UTC), // 01:30 CET in Amsterdam
+			status:      sqlc.ThreadStatusNew,
+			openedAt:    time.Date(2026, 10, 24, 23, 30, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "Open 1d",
+			wantUrgency: "warning",
+		},
+		{
+			name:        "invalid timezone string falls back to UTC",
+			status:      sqlc.ThreadStatusNew,
+			openedAt:    time.Date(2026, 10, 28, 23, 15, 0, 0, time.UTC), // UTC day Oct 28; now is Oct 29 00:30 UTC
+			displayTZ:   "Not/AZone",
+			wantLabel:   "Open 1d",
+			wantUrgency: "warning",
+		},
+		{
+			name:        "spam thread gets no age badge",
+			status:      sqlc.ThreadStatusSpam,
+			openedAt:    time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "",
+			wantUrgency: "",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		caseNow := now
+		if !tc.now.IsZero() {
+			caseNow = tc.now
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			gotLabel, gotUrgency := views.ThreadAgeBadge(tc.status, tc.openedAt, caseNow, tc.displayTZ)
+			if gotLabel != tc.wantLabel || gotUrgency != tc.wantUrgency {
+				t.Fatalf("ThreadAgeBadge(%q) = (%q, %q), want (%q, %q)",
+					tc.status, gotLabel, gotUrgency, tc.wantLabel, tc.wantUrgency)
+			}
+		})
+	}
+}
+
+func TestSettingsAttentionAgeDaysRange(t *testing.T) {
+	_, store, router, user, _ := buildAccountTestServer(t)
+	_ = user
+
+	for name, value := range map[string]int{"zero": 0, "too large": 10000} {
+		t.Run(name, func(t *testing.T) {
+			form := url.Values{
+				"display_timezone":          {"Europe/Amsterdam"},
+				"subject_match_window_days": {"30"},
+				"attention_age_days":        {fmt.Sprintf("%d", value)},
+				"imap_inbox_mailbox":        {"INBOX"},
+				"imap_archive_mailbox":      {"Archive"},
+				"imap_junk_mailbox":         {"Junk"},
+				"imap_sent_mailbox":         {"Sent"},
+			}
+			req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("POST /settings attention_age_days=%d status = %d, want 400", value, rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), "Needs attention threshold must be between 1 and 365 days.") {
+				t.Fatalf("expected range validation message in response: %s", rec.Body.String())
+			}
+			if store.settings.AttentionAgeDays != 2 {
+				t.Fatalf("settings must be unchanged on validation failure, got AttentionAgeDays=%d", store.settings.AttentionAgeDays)
+			}
+		})
+	}
+
+	// Boundary values are accepted.
+	for _, value := range []int{1, 365} {
+		form := url.Values{
+			"display_timezone":          {"Europe/Amsterdam"},
+			"subject_match_window_days": {"30"},
+			"attention_age_days":        {fmt.Sprintf("%d", value)},
+			"imap_inbox_mailbox":        {"INBOX"},
+			"imap_archive_mailbox":      {"Archive"},
+			"imap_junk_mailbox":         {"Junk"},
+			"imap_sent_mailbox":         {"Sent"},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("POST /settings attention_age_days=%d status = %d, want 303", value, rec.Code)
+		}
+		if store.settings.AttentionAgeDays != value {
+			t.Fatalf("store.settings.AttentionAgeDays = %d, want %d", store.settings.AttentionAgeDays, value)
+		}
+	}
+}
+
+// findAttentionBeforeLink extracts the next-page "Older threads" anchor. Only the anchor
+// tag counts: hidden return_to inputs and the Refresh button embed the refresh URL, which
+// carries the same before/id params.
+func findAttentionBeforeLink(body string) []string {
+	return regexp.MustCompile(`<a class="btn btn-secondary" href="(/threads\?[^"]*)">Older threads</a>`).FindStringSubmatch(body)
+}
+
+func TestNeedsAttentionPagination(t *testing.T) {
+	// The router in buildAccountTestServer closes over its own server variable, so the
+	// page size must be set via this hook before the server is built.
+	testInboxPageSize = 2
+	t.Cleanup(func() { testInboxPageSize = 0 })
+	_, store, router, _, _ := buildAccountTestServer(t)
+
+	now := time.Now().UTC()
+	// Three stale new threads; attention filtering keys on OpenedAt while the pagination
+	// cursor keys on (LastMessageAt, ID), so make the two orderings differ.
+	type spec struct {
+		name       string
+		opened, ln time.Time
+	}
+	specs := []spec{
+		{"Attention A", now.Add(-72 * time.Hour), now.Add(-1 * time.Hour)},
+		{"Attention B", now.Add(-60 * time.Hour), now.Add(-2 * time.Hour)},
+		{"Attention C", now.Add(-48 * time.Hour), now.Add(-3 * time.Hour)},
+	}
+	ids := map[string]uuid.UUID{}
+	for _, sp := range specs {
+		id := uuid.New()
+		ids[sp.name] = id
+		store.threads[id] = sqlc.Thread{
+			ID: id, AccountID: "support", SubjectDisplay: sp.name,
+			Status: sqlc.ThreadStatusNew, CustomerEmail: "p@example.com",
+			LastMessageAt: sp.ln, OpenedAt: sp.opened,
+		}
+	}
+
+	req := func(url string) string {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, url, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d: %s", url, rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	page1 := req("/threads?status=attention")
+	if !strings.Contains(page1, "Attention A") || !strings.Contains(page1, "Attention B") {
+		t.Fatalf("page 1 must show the two most recent threads: %s", page1)
+	}
+	if strings.Contains(page1, "Attention C") {
+		t.Fatalf("page 1 must not show the third thread: %s", page1)
+	}
+	m := findAttentionBeforeLink(page1)
+	if m == nil {
+		t.Fatalf("page 1 must contain a next-page link: %s", page1)
+	}
+
+	page2 := req(strings.ReplaceAll(m[1], "&amp;", "&"))
+	if !strings.Contains(page2, "Attention C") {
+		t.Fatalf("page 2 must continue with the remaining thread: %s", page2)
+	}
+	if strings.Contains(page2, "Attention A") || strings.Contains(page2, "Attention B") {
+		t.Fatalf("page 2 must not repeat page-1 threads: %s", page2)
+	}
+	// Page 2 is the last page: it must not offer a next-page link, and the cursor from
+	// page 2 renders an empty page without error.
+	if m2 := findAttentionBeforeLink(page2); m2 != nil {
+		t.Fatalf("page 2 must not have a next link: %s", page2)
+	}
+	page3 := req("/threads?status=attention&before=" + url.QueryEscape(now.Add(-48*time.Hour).Format(time.RFC3339Nano)) + "&id=" + ids["Attention C"].String())
+	if strings.Contains(page3, "Attention A") || strings.Contains(page3, "Attention B") || strings.Contains(page3, "Attention C") {
+		t.Fatalf("page 3 must be empty: %s", page3)
+	}
+}
+
+func TestCountThreadsByTabErrorStillRendersInbox(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	store.threads[uuid.New()] = sqlc.Thread{
+		ID: uuid.New(), AccountID: "support", SubjectDisplay: "Plain New",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "x@example.com",
+		LastMessageAt: time.Now().UTC().Add(-time.Hour),
+	}
+	store.countThreadsErr = fmt.Errorf("db unavailable")
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads", nil))
+	// The inbox must still render the thread list (200) — tab counts degrade to 0
+	// rather than failing the whole page — but the failure must not be silent.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads status = %d, want 200 despite tab-count failure: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Plain New") {
+		t.Fatalf("expected thread list to still render: %s", rec.Body.String())
+	}
+}
+
+func TestNeedsAttentionFilterAndTabCounts(t *testing.T) {
+	_, store, router, multiUser, supportOnlyUser := buildAccountTestServer(t)
+	now := time.Now().UTC()
+
+	// Configure attention threshold to 2 days (default) and verify settings update can change it.
+	otherUserID := supportOnlyUser.ID
+
+	threads := []sqlc.Thread{
+		{
+			ID: uuid.New(), AccountID: "support", SubjectDisplay: "Stale New Support",
+			Status: sqlc.ThreadStatusNew, AssigneeID: &multiUser.ID, CustomerEmail: "a@example.com",
+			LastMessageAt: now.Add(-1 * time.Hour), OpenedAt: now.Add(-72 * time.Hour), // 3d old -> Needs attention
+		},
+		{
+			ID: uuid.New(), AccountID: "support", SubjectDisplay: "Stale InProgress Support",
+			Status: sqlc.ThreadStatusInProgress, AssigneeID: &otherUserID, CustomerEmail: "b@example.com",
+			LastMessageAt: now.Add(-2 * time.Hour), OpenedAt: now.Add(-60 * time.Hour), // 2.5d old -> Needs attention
+		},
+		{
+			ID: uuid.New(), AccountID: "support", SubjectDisplay: "Fresh New Support",
+			Status: sqlc.ThreadStatusNew, AssigneeID: &multiUser.ID, CustomerEmail: "c@example.com",
+			LastMessageAt: now.Add(-30 * time.Minute), OpenedAt: now.Add(-4 * time.Hour), // 4h old -> NOT Needs attention
+		},
+		{
+			ID: uuid.New(), AccountID: "support", SubjectDisplay: "Old Completed Support",
+			Status: sqlc.ThreadStatusCompleted, AssigneeID: &multiUser.ID, CustomerEmail: "d@example.com",
+			LastMessageAt: now.Add(-96 * time.Hour), OpenedAt: now.Add(-120 * time.Hour), // Closed -> NOT Needs attention
+		},
+		{
+			ID: uuid.New(), AccountID: "sales", SubjectDisplay: "Stale New Sales",
+			Status: sqlc.ThreadStatusNew, AssigneeID: &multiUser.ID, CustomerEmail: "e@example.com",
+			LastMessageAt: now.Add(-3 * time.Hour), OpenedAt: now.Add(-96 * time.Hour), // 4d old in sales -> Needs attention for multiUser only
+		},
+	}
+	for _, th := range threads {
+		store.threads[th.ID] = th
+	}
+
+	// 1. GET /threads?status=attention returns 200 OK with only open threads older than threshold (2d)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=attention", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads?status=attention status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Stale New Support",
+		"Stale InProgress Support",
+		"Stale New Sales",
+		`aria-current="true">Needs attention <span class="count-pill">3</span></a>`,
+		`New <span class="count-pill">3</span></a>`,
+		`Mine <span class="count-pill">3</span></a>`,
+		`<span>In progress</span> <span class="count-pill">1</span>`,
+		`<span>Completed</span> <span class="count-pill">1</span>`,
+		`<span>Spam</span> <span class="count-pill">0</span>`,
+		`<span>All</span> <span class="count-pill">5</span>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %q in Needs attention response: %s", want, body)
+		}
+	}
+	for _, unwanted := range []string{"Fresh New Support", "Old Completed Support"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("did not expect %q in Needs attention response: %s", unwanted, body)
+		}
+	}
+
+	// 2. Account filter scopes both the list and the tab count pills
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=attention&account=support", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads?status=attention&account=support status = %d", rec.Code)
+	}
+	supportBody := rec.Body.String()
+	if strings.Contains(supportBody, "Stale New Sales") {
+		t.Fatalf("account=support must exclude sales threads: %s", supportBody)
+	}
+	for _, want := range []string{
+		`Needs attention <span class="count-pill">2</span></a>`,
+		`New <span class="count-pill">2</span></a>`,
+		`Mine <span class="count-pill">2</span></a>`,
+		`<span>All</span> <span class="count-pill">4</span>`,
+	} {
+		if !strings.Contains(supportBody, want) {
+			t.Fatalf("expected account-scoped count %q in response: %s", want, supportBody)
+		}
+	}
+
+	// 3. Updating attention_age_days via POST /settings changes the Needs attention cutoff
+	form := url.Values{
+		"display_timezone":          {"Europe/Amsterdam"},
+		"subject_match_window_days": {"30"},
+		"attention_age_days":        {"4"},
+		"imap_inbox_mailbox":        {"INBOX"},
+		"imap_archive_mailbox":      {"Archive"},
+		"imap_junk_mailbox":         {"Junk"},
+		"imap_sent_mailbox":         {"Sent"},
+	}
+	reqSettings := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+	reqSettings.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recSettings := httptest.NewRecorder()
+	router.ServeHTTP(recSettings, reqSettings)
+	if recSettings.Code != http.StatusSeeOther {
+		t.Fatalf("POST /settings status = %d: %s", recSettings.Code, recSettings.Body.String())
+	}
+	if store.settings.AttentionAgeDays != 4 {
+		t.Fatalf("store.settings.AttentionAgeDays = %d, want 4", store.settings.AttentionAgeDays)
+	}
+
+	// With threshold=4d, only "Stale New Sales" (96h old) qualifies; 3d and 2.5d threads no longer qualify.
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=attention", nil))
+	body4d := rec.Body.String()
+	if !strings.Contains(body4d, "Stale New Sales") || strings.Contains(body4d, "Stale New Support") || strings.Contains(body4d, "Stale InProgress Support") {
+		t.Fatalf("with 4d threshold, only Stale New Sales should appear: %s", body4d)
+	}
+	if !strings.Contains(body4d, `Needs attention <span class="count-pill">1</span></a>`) {
+		t.Fatalf("expected Needs attention count pill of 1 after threshold update: %s", body4d)
 	}
 }

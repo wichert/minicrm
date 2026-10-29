@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -191,5 +192,112 @@ func TestPostgresCompleteFromNewOrderingAndConcurrency(t *testing.T) {
 		if errs[0] == nil && thread.Status != sqlc.ThreadStatusCompleted {
 			t.Fatalf("completed overwritten: %s", thread.Status)
 		}
+	}
+}
+
+func TestPostgresNeedsAttentionAndTabCounts(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	config, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "attention_test_" + uuid.NewString()[:8]
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	db := stdlib.OpenDB(*config.ConnConfig)
+	defer db.Close()
+	if err := migrations.Up(ctx, db, "support"); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+
+	q := sqlc.New(pool)
+	settings, err := q.UpsertSystemSettings(ctx, sqlc.SystemSettings{
+		ID:                     1,
+		DisplayTimezone:        "Europe/Amsterdam",
+		IMAPInboxMailbox:       "INBOX",
+		IMAPArchiveMailbox:     "Archive",
+		IMAPJunkMailbox:        "Junk",
+		IMAPSentMailbox:        "Sent",
+		SubjectMatchWindowDays: 30,
+		AttentionAgeDays:       2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.AttentionAgeDays != 2 {
+		t.Fatalf("AttentionAgeDays = %d, want 2", settings.AttentionAgeDays)
+	}
+
+	userID := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO users(id,email,display_name,allowed_accounts) VALUES ($1,$2,'Agent',ARRAY['support'])`, userID, userID.String()+"@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	staleNewID := uuid.New()
+	staleInProgressID := uuid.New()
+	freshNewID := uuid.New()
+	completedOldID := uuid.New()
+	salesStaleID := uuid.New()
+
+	insertThreadWithEmail := func(id uuid.UUID, accountID string, status sqlc.ThreadStatus, assignee *uuid.UUID, openedAt, lastMsgAt time.Time) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO threads(id,account_id,subject_normalized,subject_display,status,assignee_id,customer_email,last_message_at) VALUES ($1,$2,'sub','sub',$3,$4,'c@example.com',$5)`,
+			id, accountID, status, assignee, lastMsgAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO emails(id,account_id,thread_id,message_id,direction,from_address,to_addresses,subject,subject_normalized,body_text,sent_at,received_at) VALUES ($1,$2,$3,$4,'inbound','c@example.com','[]'::jsonb,'sub','sub','body',$5,$5)`,
+			uuid.New(), accountID, id, "<"+id.String()+"@example.com>", openedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	insertThreadWithEmail(staleNewID, "support", sqlc.ThreadStatusNew, &userID, now.Add(-72*time.Hour), now.Add(-1*time.Hour))
+	insertThreadWithEmail(staleInProgressID, "support", sqlc.ThreadStatusInProgress, &userID, now.Add(-60*time.Hour), now.Add(-2*time.Hour))
+	insertThreadWithEmail(freshNewID, "support", sqlc.ThreadStatusNew, nil, now.Add(-4*time.Hour), now.Add(-4*time.Hour))
+	insertThreadWithEmail(completedOldID, "support", sqlc.ThreadStatusCompleted, &userID, now.Add(-96*time.Hour), now.Add(-48*time.Hour))
+	insertThreadWithEmail(salesStaleID, "sales", sqlc.ThreadStatusNew, &userID, now.Add(-96*time.Hour), now.Add(-30*time.Minute))
+
+	cutoff := now.Add(-48 * time.Hour)
+	list, err := q.ListThreads(ctx, sqlc.ListThreadsFilter{
+		NeedsAttention:  true,
+		AttentionCutoff: cutoff,
+		AllowedAccounts: []string{"support"},
+		Limit:           10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].ID != staleNewID || list[1].ID != staleInProgressID {
+		t.Fatalf("unexpected NeedsAttention list: %+v", list)
+	}
+
+	counts, err := q.CountThreadsByTab(ctx, sqlc.CountThreadsFilter{
+		AllowedAccounts: []string{"support"},
+		UserID:          userID,
+		AttentionCutoff: cutoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.NeedsAttention != 2 || counts.New != 2 || counts.Mine != 2 || counts.InProgress != 1 || counts.Completed != 1 || counts.Spam != 0 || counts.All != 4 {
+		t.Fatalf("unexpected tab counts: %+v", counts)
 	}
 }

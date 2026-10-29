@@ -135,41 +135,48 @@ func (q *Queries) UpdateUserOIDC(ctx context.Context, id uuid.UUID, oidcSub, dis
 func (q *Queries) GetSystemSettings(ctx context.Context) (SystemSettings, error) {
 	const query = `
 		SELECT id, display_timezone, imap_inbox_mailbox,
-		       imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox, subject_match_window_days
+		       imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox,
+		       subject_match_window_days, attention_age_days
 		FROM system_settings WHERE id = 1`
 	var s SystemSettings
 	err := q.db.QueryRow(ctx, query).Scan(
 		&s.ID, &s.DisplayTimezone,
 		&s.IMAPInboxMailbox, &s.IMAPArchiveMailbox, &s.IMAPJunkMailbox, &s.IMAPSentMailbox,
-		&s.SubjectMatchWindowDays,
+		&s.SubjectMatchWindowDays, &s.AttentionAgeDays,
 	)
 	return s, err
 }
 
 // UpsertSystemSettings inserts or updates the singleton system_settings row.
 func (q *Queries) UpsertSystemSettings(ctx context.Context, s SystemSettings) (SystemSettings, error) {
+	// No clamping here: the settings handler validates 1..365 and the DB CHECK
+	// constraint is the final guard against out-of-range values.
 	const query = `
 		INSERT INTO system_settings (
 			id, display_timezone, imap_inbox_mailbox,
-			imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox, subject_match_window_days
-		) VALUES (1, $1, $2, $3, $4, $5, $6)
+			imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox,
+			subject_match_window_days, attention_age_days
+		) VALUES (1, $1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (id) DO UPDATE SET
 			display_timezone = EXCLUDED.display_timezone,
 			imap_inbox_mailbox = EXCLUDED.imap_inbox_mailbox,
 			imap_archive_mailbox = EXCLUDED.imap_archive_mailbox,
 			imap_junk_mailbox = EXCLUDED.imap_junk_mailbox,
 			imap_sent_mailbox = EXCLUDED.imap_sent_mailbox,
-			subject_match_window_days = EXCLUDED.subject_match_window_days
+			subject_match_window_days = EXCLUDED.subject_match_window_days,
+			attention_age_days = EXCLUDED.attention_age_days
 		RETURNING id, display_timezone, imap_inbox_mailbox,
-		          imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox, subject_match_window_days`
+		          imap_archive_mailbox, imap_junk_mailbox, imap_sent_mailbox,
+		          subject_match_window_days, attention_age_days`
 	var out SystemSettings
 	err := q.db.QueryRow(ctx, query,
 		s.DisplayTimezone, s.IMAPInboxMailbox,
-		s.IMAPArchiveMailbox, s.IMAPJunkMailbox, s.IMAPSentMailbox, s.SubjectMatchWindowDays,
+		s.IMAPArchiveMailbox, s.IMAPJunkMailbox, s.IMAPSentMailbox,
+		s.SubjectMatchWindowDays, s.AttentionAgeDays,
 	).Scan(
 		&out.ID, &out.DisplayTimezone,
 		&out.IMAPInboxMailbox, &out.IMAPArchiveMailbox, &out.IMAPJunkMailbox, &out.IMAPSentMailbox,
-		&out.SubjectMatchWindowDays,
+		&out.SubjectMatchWindowDays, &out.AttentionAgeDays,
 	)
 	return out, err
 }
@@ -314,11 +321,25 @@ func (q *Queries) ListThreadEvents(ctx context.Context, threadID uuid.UUID) ([]T
 const threadColumns = `id, account_id, subject_normalized, subject_display, status, assignee_id,
 	       assignment_source, customer_email, COALESCE(customer_name, ''), reopens_thread_id, last_message_at`
 
+// scanThread scans the shared threadColumns projection.
 func scanThread(row pgx.Row) (Thread, error) {
 	var t Thread
 	err := row.Scan(
 		&t.ID, &t.AccountID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
 		&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
+	)
+	return t, err
+}
+
+// scanThreadWithOpenedAt scans threadColumns plus a trailing opened_at column. The
+// column list is shared with scanThread, so any addition to threadColumns must be
+// mirrored in both scanners — the trailing opened_at is scanned in addition to it.
+func scanThreadWithOpenedAt(row pgx.Row) (Thread, error) {
+	var t Thread
+	err := row.Scan(
+		&t.ID, &t.AccountID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
+		&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
+		&t.OpenedAt,
 	)
 	return t, err
 }
@@ -347,9 +368,13 @@ func (q *Queries) CreateThread(ctx context.Context, t Thread) (Thread, error) {
 	))
 }
 
-// GetThreadByID fetches a thread by UUID.
+// GetThreadByID fetches a thread by UUID. Unlike the shared threadColumns select, it also
+// returns opened_at (earliest email sent_at) so the detail page can show the thread-age badge
+// without relying on the first email's SentAt.
 func (q *Queries) GetThreadByID(ctx context.Context, id uuid.UUID) (Thread, error) {
-	return scanThread(q.db.QueryRow(ctx, `SELECT `+threadColumns+` FROM threads WHERE id = $1`, id))
+	return scanThreadWithOpenedAt(q.db.QueryRow(ctx, `SELECT `+threadColumns+`,
+	       COALESCE((SELECT MIN(e.sent_at) FROM emails e WHERE e.thread_id = threads.id), threads.last_message_at) AS opened_at
+	       FROM threads WHERE id = $1`, id))
 }
 
 // LockThreadByID fetches and locks a thread for a transactional workflow operation.
@@ -357,10 +382,31 @@ func (q *Queries) LockThreadByID(ctx context.Context, id uuid.UUID) (Thread, err
 	return scanThread(q.db.QueryRow(ctx, `SELECT `+threadColumns+` FROM threads WHERE id = $1 FOR UPDATE`, id))
 }
 
+// ThreadCounts holds live per-tab counts for the inbox navigation strip.
+type ThreadCounts struct {
+	NeedsAttention int
+	New            int
+	Mine           int
+	InProgress     int
+	Completed      int
+	Spam           int
+	All            int
+}
+
+// CountThreadsFilter specifies account and threshold parameters for CountThreadsByTab.
+type CountThreadsFilter struct {
+	AllowedAccounts []string
+	AccountID       *string
+	UserID          uuid.UUID
+	AttentionCutoff time.Time
+}
+
 // ListThreadsFilter specifies optional filters for listing threads.
 type ListThreadsFilter struct {
 	Status          *ThreadStatus
 	OpenOnly        bool
+	NeedsAttention  bool
+	AttentionCutoff time.Time
 	AssigneeID      *uuid.UUID
 	Unassigned      bool
 	AccountID       *string
@@ -371,6 +417,38 @@ type ListThreadsFilter struct {
 	BeforeTime      *time.Time
 	BeforeID        *uuid.UUID
 	Limit           int
+}
+
+// CountThreadsByTab computes all inbox tab counts in a single aggregate query scoped to
+// the user's allowed accounts and optional account filter.
+func (q *Queries) CountThreadsByTab(ctx context.Context, f CountThreadsFilter) (ThreadCounts, error) {
+	if len(f.AllowedAccounts) == 0 {
+		return ThreadCounts{}, nil
+	}
+	const query = `
+		SELECT
+			-- Inclusive <= cutoff: a thread opened exactly at the cutoff counts as
+			-- needing attention (matches the needs_attention predicate below).
+			COUNT(*) FILTER (WHERE t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $3::timestamptz)::int AS needs_attention,
+			COUNT(*) FILTER (WHERE t.status = 'new')::int AS new_count,
+			COUNT(*) FILTER (WHERE t.status IN ('new', 'in_progress') AND t.assignee_id = $4::uuid)::int AS mine_count,
+			COUNT(*) FILTER (WHERE t.status = 'in_progress')::int AS in_progress_count,
+			COUNT(*) FILTER (WHERE t.status = 'completed')::int AS completed_count,
+			COUNT(*) FILTER (WHERE t.status = 'spam')::int AS spam_count,
+			COUNT(*)::int AS all_count
+		FROM threads t
+		LEFT JOIN LATERAL (
+			SELECT MIN(e.sent_at) AS opened_at
+			FROM emails e
+			WHERE e.thread_id = t.id
+		) stats ON true
+		WHERE ($1::text IS NULL OR t.account_id = $1)
+		  AND ($2::text[] IS NULL OR t.account_id = ANY($2))`
+	var out ThreadCounts
+	err := q.db.QueryRow(ctx, query, f.AccountID, f.AllowedAccounts, f.AttentionCutoff, f.UserID).Scan(
+		&out.NeedsAttention, &out.New, &out.Mine, &out.InProgress, &out.Completed, &out.Spam, &out.All,
+	)
+	return out, err
 }
 
 // ListThreads returns threads matching the given filter ordered by last_message_at DESC,
@@ -417,9 +495,11 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		  AND ($8::timestamptz IS NULL OR (t.last_message_at, t.id) < ($8, $9::uuid))
 		  AND ($10::text = '' OR t.customer_email = $10::citext)
 		  AND ($11::uuid IS NULL OR t.id <> $11)
+		  -- Inclusive <= attention cutoff, matching the count query above.
+		  AND (NOT $13::boolean OR (t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $14::timestamptz))
 		ORDER BY t.last_message_at DESC, t.id DESC
 		LIMIT $12`
-	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.CustomerEmail, f.ExcludeThreadID, f.Limit)
+	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.CustomerEmail, f.ExcludeThreadID, f.Limit, f.NeedsAttention, f.AttentionCutoff)
 	if err != nil {
 		return nil, err
 	}

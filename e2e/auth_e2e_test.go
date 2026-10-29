@@ -274,6 +274,7 @@ var e2eBulkThreadID = uuid.MustParse("d9000000-0000-4000-8000-000000000001")
 
 type e2eMemStore struct {
 	threads         map[uuid.UUID]sqlc.Thread
+	emails          map[uuid.UUID]sqlc.Email
 	drafts          map[uuid.UUID]sqlc.ReplyDraft
 	users           map[uuid.UUID]sqlc.User
 	settings        *sqlc.SystemSettings
@@ -282,7 +283,7 @@ type e2eMemStore struct {
 }
 
 func newE2EMemStore() *e2eMemStore {
-	return &e2eMemStore{users: make(map[uuid.UUID]sqlc.User), threads: make(map[uuid.UUID]sqlc.Thread), drafts: make(map[uuid.UUID]sqlc.ReplyDraft)}
+	return &e2eMemStore{users: make(map[uuid.UUID]sqlc.User), threads: make(map[uuid.UUID]sqlc.Thread), emails: make(map[uuid.UUID]sqlc.Email), drafts: make(map[uuid.UUID]sqlc.ReplyDraft)}
 }
 
 func (m *e2eMemStore) GetUserByID(_ context.Context, id uuid.UUID) (sqlc.User, error) {
@@ -386,6 +387,67 @@ func (m *e2eMemStore) ListThreads(_ context.Context, _ sqlc.ListThreadsFilter) (
 		out = append(out, thread)
 	}
 	return out, nil
+}
+
+func (m *e2eMemStore) CountThreadsByTab(_ context.Context, f sqlc.CountThreadsFilter) (sqlc.ThreadCounts, error) {
+	if len(f.AllowedAccounts) == 0 {
+		return sqlc.ThreadCounts{}, nil
+	}
+	var out sqlc.ThreadCounts
+	for _, t := range m.threads {
+		if f.AccountID != nil && t.AccountID != *f.AccountID {
+			continue
+		}
+		allowed := false
+		for _, id := range f.AllowedAccounts {
+			if id == t.AccountID {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			continue
+		}
+		out.All++
+		isOpen := t.Status == sqlc.ThreadStatusNew || t.Status == sqlc.ThreadStatusInProgress
+		if isOpen && !m.openedAt(t).After(f.AttentionCutoff) {
+			out.NeedsAttention++
+		}
+		if isOpen && t.AssigneeID != nil && *t.AssigneeID == f.UserID {
+			out.Mine++
+		}
+		switch t.Status {
+		case sqlc.ThreadStatusNew:
+			out.New++
+		case sqlc.ThreadStatusInProgress:
+			out.InProgress++
+		case sqlc.ThreadStatusCompleted:
+			out.Completed++
+		case sqlc.ThreadStatusSpam:
+			out.Spam++
+		}
+	}
+	return out, nil
+}
+
+// openedAt mirrors the web test store: prefer the thread's OpenedAt, else the earliest
+// email sent_at, else last_message_at.
+func (m *e2eMemStore) openedAt(t sqlc.Thread) time.Time {
+	if !t.OpenedAt.IsZero() {
+		return t.OpenedAt
+	}
+	var earliest time.Time
+	for _, em := range m.emails {
+		if em.ThreadID == t.ID && !em.SentAt.IsZero() {
+			if earliest.IsZero() || em.SentAt.Before(earliest) {
+				earliest = em.SentAt
+			}
+		}
+	}
+	if !earliest.IsZero() {
+		return earliest
+	}
+	return t.LastMessageAt
 }
 
 func (m *e2eMemStore) ListCustomerHistory(_ context.Context, _ []string, _ string, _ uuid.UUID, _ int) ([]sqlc.Thread, error) {

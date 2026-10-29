@@ -37,6 +37,7 @@ type ThreadSummaryItem struct {
 	AccountName     string
 	FormattedTime   string
 	FullTime        string
+	OpenedFullTime  string
 	RelativeTime    string
 	WaitLabel       string
 	WaitUrgency     string
@@ -55,6 +56,7 @@ type InboxViewData struct {
 	ActiveNav      string
 	CurrentUser    sqlc.User
 	Threads        []ThreadSummaryItem
+	Counts         sqlc.ThreadCounts
 	StatusFilter   string
 	AssigneeFilter string
 	Users          []sqlc.User
@@ -243,6 +245,38 @@ func FormatWaitDuration(since, now time.Time) (string, string) {
 	}
 	days := int(d.Hours() / 24)
 	return fmt.Sprintf("Waiting %dd", days), "urgent"
+}
+
+// ThreadAgeBadge derives the age badge label and urgency tier ("fresh", "warning", "urgent")
+// for an open thread (new or in_progress) using its opened_at timestamp and the configured
+// IANA display timezone. Calendar-day buckets ("Today", "This week", "Overdue") are computed
+// in displayTimezone rather than UTC wall-clock time.
+func ThreadAgeBadge(status sqlc.ThreadStatus, openedAt, now time.Time, displayTimezone string) (string, string) {
+	if status != sqlc.ThreadStatusNew && status != sqlc.ThreadStatusInProgress {
+		return "", ""
+	}
+	if openedAt.IsZero() {
+		// Defensible default: an unknown open time is treated as today so a missing
+		// timestamp never inflates a thread's age or mislabels it as overdue.
+		return "Today", "fresh"
+	}
+	loc, err := time.LoadLocation(displayTimezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	openedLocal := openedAt.In(loc)
+	nowLocal := now.In(loc)
+	openedDay := time.Date(openedLocal.Year(), openedLocal.Month(), openedLocal.Day(), 0, 0, 0, 0, time.UTC)
+	nowDay := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(nowDay.Sub(openedDay) / (24 * time.Hour))
+	switch {
+	case days <= 0:
+		return "Today", "fresh"
+	case days <= 7:
+		return fmt.Sprintf("Open %dd", days), "warning"
+	default:
+		return fmt.Sprintf("Overdue · %dd", days), "urgent"
+	}
 }
 
 var htmlTagRe = regexp.MustCompile(`<[^>]+>`)
@@ -805,7 +839,7 @@ const inboxTablePartial = `
         <td class="assignee-cell">{{if .AssigneeName}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}</td>
         {{if $.ShowAccountUI}}<td class="account-cell"><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
         <td class="nowrap age-cell">
-          {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="First message received {{.FullTime}}">{{.WaitLabel}}</span>
+          {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="Opened {{.OpenedFullTime}}">{{.WaitLabel}}</span>
           {{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}
           <span class="muted age-date">{{.FormattedTime}}</span>
         </td>
@@ -856,12 +890,18 @@ const inboxBody = `
 <div class="toolbar">
   <div class="tab-strip" data-tab-strip>
   <nav class="tabs" aria-label="Thread status">
-    <a class="tab" href="/threads?status=open&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "open"}} aria-current="true"{{end}}>Open</a>
-    <a class="tab" href="/threads?status=new&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "new"}} aria-current="true"{{end}}>New</a>
-    <a class="tab" href="/threads?status=in_progress&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "in_progress"}} aria-current="true"{{end}}>In progress</a>
-    <a class="tab" href="/threads?status=completed&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "completed"}} aria-current="true"{{end}}>Completed</a>
-    <a class="tab" href="/threads?status=spam&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "spam"}} aria-current="true"{{end}}>Spam</a>
-    <a class="tab" href="/threads?status=all&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "all"}} aria-current="true"{{end}}>All</a>
+    <a class="tab" href="/threads?status=attention&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "attention"}} aria-current="true"{{end}}>Needs attention <span class="count-pill">{{.Counts.NeedsAttention}}</span></a>
+    <a class="tab" href="/threads?status=new&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "new"}} aria-current="true"{{end}}>New <span class="count-pill">{{.Counts.New}}</span></a>
+    <a class="tab" href="/threads?status=open&amp;assignee=me&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if and (eq .StatusFilter "open") (eq .AssigneeFilter "me")}} aria-current="true"{{end}}>Mine <span class="count-pill">{{.Counts.Mine}}</span></a>
+    <details class="row-menu tab-more" data-row-menu{{if or (eq .StatusFilter "in_progress") (eq .StatusFilter "completed") (eq .StatusFilter "spam") (eq .StatusFilter "all")}} data-active-more="true"{{end}}>
+      <summary class="tab tab-more-trigger">More{{if eq .StatusFilter "in_progress"}}: In progress <span class="count-pill">{{.Counts.InProgress}}</span>{{else if eq .StatusFilter "completed"}}: Completed <span class="count-pill">{{.Counts.Completed}}</span>{{else if eq .StatusFilter "spam"}}: Spam <span class="count-pill">{{.Counts.Spam}}</span>{{else if eq .StatusFilter "all"}}: All <span class="count-pill">{{.Counts.All}}</span>{{end}}</summary>
+      <div class="row-menu-popover tab-more-popover">
+        <a class="row-menu-item tab-more-item" href="/threads?status=in_progress&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "in_progress"}} aria-current="true"{{end}}><span>In progress</span> <span class="count-pill">{{.Counts.InProgress}}</span></a>
+        <a class="row-menu-item tab-more-item" href="/threads?status=completed&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "completed"}} aria-current="true"{{end}}><span>Completed</span> <span class="count-pill">{{.Counts.Completed}}</span></a>
+        <a class="row-menu-item tab-more-item" href="/threads?status=spam&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "spam"}} aria-current="true"{{end}}><span>Spam</span> <span class="count-pill">{{.Counts.Spam}}</span></a>
+        <a class="row-menu-item tab-more-item" href="/threads?status=all&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "all"}} aria-current="true"{{end}}><span>All</span> <span class="count-pill">{{.Counts.All}}</span></a>
+      </div>
+    </details>
   </nav>
   </div>
   <form method="get" action="/threads" class="filter-inline">
@@ -1229,6 +1269,10 @@ const settingsBody = `
     </label>
     <label class="field">Subject match window (days)
       <input type="number" name="subject_match_window_days" value="{{.Settings.SubjectMatchWindowDays}}" min="1" max="365" required>
+    </label>
+    <label class="field">Needs attention threshold (days)
+      <input type="number" name="attention_age_days" value="{{.Settings.AttentionAgeDays}}" min="1" max="365" required>
+      <span class="helper">Open threads older than this appear in Needs attention.</span>
     </label>
   </div>
   <fieldset>

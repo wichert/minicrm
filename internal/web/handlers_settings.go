@@ -130,6 +130,10 @@ func settingsFormFromRequest(r *http.Request) *settingsForm {
 	if err != nil {
 		windowDays = 0
 	}
+	attentionDays, err := strconv.Atoi(strings.TrimSpace(r.FormValue("attention_age_days")))
+	if err != nil {
+		attentionDays = 0
+	}
 	settings := sqlc.SystemSettings{
 		ID:                     1,
 		DisplayTimezone:        strings.TrimSpace(r.FormValue("display_timezone")),
@@ -138,6 +142,7 @@ func settingsFormFromRequest(r *http.Request) *settingsForm {
 		IMAPJunkMailbox:        defaultOrTrim(r.FormValue("imap_junk_mailbox"), "Junk"),
 		IMAPSentMailbox:        defaultOrTrim(r.FormValue("imap_sent_mailbox"), "Sent"),
 		SubjectMatchWindowDays: windowDays,
+		AttentionAgeDays:       attentionDays,
 	}
 	defaults := make(map[string]string)
 	for key, values := range r.Form {
@@ -176,6 +181,13 @@ func (s *Server) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		form.Settings.SubjectMatchWindowDays = 30
 	}
 
+	attentionDays := form.Settings.AttentionAgeDays
+	if attentionDays < 1 || attentionDays > 365 {
+		s.renderSettings(w, r, user, http.StatusBadRequest, form,
+			[]string{"Needs attention threshold must be between 1 and 365 days."})
+		return
+	}
+
 	oldSettings, _ := s.store.GetSystemSettings(ctx)
 
 	updated, err := s.store.UpsertSystemSettings(ctx, sqlc.SystemSettings{
@@ -186,6 +198,7 @@ func (s *Server) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		IMAPJunkMailbox:        form.Settings.IMAPJunkMailbox,
 		IMAPSentMailbox:        form.Settings.IMAPSentMailbox,
 		SubjectMatchWindowDays: windowDays,
+		AttentionAgeDays:       attentionDays,
 	})
 	if err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Save failed", "The settings could not be saved. Please try again.")
