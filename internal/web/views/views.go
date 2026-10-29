@@ -975,7 +975,7 @@ const inboxBody = `
 `
 
 const threadDetailBody = `
-<div class="thread-top-bar">
+<div class="thread-top-bar thread-detail">
   <a class="back-link" href="{{if .BackURL}}{{.BackURL}}{{else}}/threads{{end}}">&larr; Back to threads</a>
   <a class="btn btn-secondary btn-small" href="/threads/{{.Thread.ID}}">Refresh</a>
 </div>
@@ -1094,6 +1094,10 @@ const threadDetailBody = `
   </div>
 </div>
 
+{{if .ReplyAllowed}}
+<button type="button" class="reply-sticky-bar" data-open-reply-sheet>Reply</button>
+{{end}}
+
 <div class="section-heading">
   <h2>Messages ({{len .Emails}})</h2>
   {{if gt (len .Emails) 1}}<button type="button" class="btn btn-ghost btn-small" data-toggle-messages aria-pressed="false">Expand all</button>{{end}}
@@ -1185,11 +1189,15 @@ const threadDetailBody = `
 
 {{if .ReplyAllowed}}
 <section class="card reply-card" id="reply">
+  <button type="button" class="reply-sheet-close" data-close-reply-sheet aria-label="Close reply">&times;</button>
   <h2>Send reply</h2>
-  <dl class="reply-context">
-    <div><dt>From</dt><dd>{{.AccountName}} &lt;{{.AccountFromAddress}}&gt;</dd></div>
-    <div><dt>To</dt><dd>{{if .Thread.CustomerName}}{{.Thread.CustomerName}} {{end}}&lt;{{.Thread.CustomerEmail}}&gt;</dd></div>
-  </dl>
+  <details class="reply-context-details">
+    <summary>{{.AccountName}} &rarr; {{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else}}{{.Thread.CustomerEmail}}{{end}}</summary>
+    <dl class="reply-context">
+      <div><dt>From</dt><dd>{{.AccountName}} &lt;{{.AccountFromAddress}}&gt;</dd></div>
+      <div><dt>To</dt><dd>{{if .Thread.CustomerName}}{{.Thread.CustomerName}} {{end}}&lt;{{.Thread.CustomerEmail}}&gt;</dd></div>
+    </dl>
+  </details>
   {{if eq .Thread.Status "new"}}
   <p class="helper">If this thread is unassigned, sending will assign it to you. Sending a reply also moves a new thread to In progress.</p>
   {{end}}

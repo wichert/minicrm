@@ -871,6 +871,43 @@ document.addEventListener("DOMContentLoaded", function () {
     );
   }
 
+  // W5: mobile reply sheet + Cmd/Ctrl+Enter send.
+  var replyCard = document.querySelector(".reply-card");
+  var stickyBar = document.querySelector(".reply-sticky-bar");
+  if (replyCard && stickyBar) {
+    var closeReplySheet = function () {
+      delete replyCard.dataset.sheetOpen;
+      delete document.body.dataset.replySheetOpen;
+    };
+    stickyBar.addEventListener("click", function () {
+      replyCard.dataset.sheetOpen = "true";
+      document.body.dataset.replySheetOpen = "true";
+      replyCard.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+      var body = replyCard.querySelector("textarea[name=body_text]");
+      if (body) { body.focus(); }
+    });
+    var closeBtn = replyCard.querySelector("[data-close-reply-sheet]");
+    if (closeBtn) { closeBtn.addEventListener("click", closeReplySheet); }
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape" || !replyCard.matches("[data-sheet-open=true]")) { return; }
+      closeReplySheet();
+    });
+    var sendBtn = replyCard.querySelector("button[type=submit]");
+    var bodyField = replyCard.querySelector("textarea[name=body_text]");
+    if (sendBtn && bodyField) {
+      bodyField.addEventListener("keydown", function (event) {
+        if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.altKey && !event.shiftKey) {
+          if (!bodyField.value.trim()) { return; }
+          event.preventDefault();
+          if (sendBtn.disabled || sendBtn.dataset.keySend === "true") { return; }
+          sendBtn.dataset.keySend = "true";
+          sendBtn.click();
+          delete sendBtn.dataset.keySend;
+        }
+      });
+    }
+  }
+
   setupRowLinks();
   setupRowMenus();
   setupBulkForm();

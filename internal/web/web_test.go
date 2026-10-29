@@ -1138,6 +1138,9 @@ func TestThreadDetailSemanticsAndNoInlineStyles(t *testing.T) {
 		`<details class="card message message-inbound" open>`,
 		`sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"`,
 		`From</dt><dd>Customer Support &lt;support@example.com&gt;`,
+		`reply-context-details`,
+		`data-open-reply-sheet`,
+		`data-close-reply-sheet`,
 		`>Customer<`,
 	} {
 		if !strings.Contains(body, want) {

@@ -2445,6 +2445,130 @@ details.message:not([open]) > .message-header {
   .row-menu [data-row-select] { display: block; }
 }
 
+/* ---------- W5: Mobile thread detail ---------- */
+
+/* No-JS fallback: the sticky Reply bar links to the composer instead of
+   opening the sheet, and the close button stays hidden. */
+.reply-sticky-bar { display: none; }
+.reply-sheet-close { display: none; }
+html.js .reply-sticky-bar {
+  display: none;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 25;
+  width: 100%;
+  margin: 0;
+  padding: 0.85rem 1rem calc(0.85rem + env(safe-area-inset-bottom, 0px));
+  border: none;
+  border-radius: 0;
+  background: var(--primary);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 700;
+  text-align: center;
+  box-shadow: 0 -4px 16px rgba(15, 23, 42, 0.18);
+}
+html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
+@media (max-width: 768px) {
+  html.js .reply-sticky-bar { display: block; }
+  html.js .thread-detail {
+    --reply-bar-height: 3.6rem;
+    padding-bottom: calc(var(--reply-bar-height) + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Full-height mobile sheet: on mobile the reply card becomes a fixed overlay.
+   Desktop is untouched. */
+@media (max-width: 768px) {
+  html.js .reply-card[data-sheet-open="true"] {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    margin: 0;
+    border-radius: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    background: var(--surface);
+  }
+  html.js body[data-reply-sheet-open="true"] { overflow: hidden; }
+  .reply-sheet-close {
+    display: block;
+    position: sticky;
+    top: 0.25rem;
+    float: right;
+    margin: -0.4rem -0.4rem 0 0;
+    width: 2.2rem;
+    height: 2.2rem;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: var(--surface);
+    font-size: 1.2rem;
+    line-height: 1;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  @media (max-width: 768px) {
+    html.js .reply-card[data-sheet-open="true"] {
+      animation: reply-sheet-in 200ms ease;
+    }
+    @keyframes reply-sheet-in {
+      from { transform: translateY(100%); }
+      to { transform: translateY(0); }
+    }
+  }
+}
+
+/* Mobile-only compact action row: primary transition takes the full width,
+   secondary/danger actions and the assignee select share one row below it. */
+@media (max-width: 768px) {
+  .actions-bar .actions-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .actions-bar .actions-group > .inline-form:first-child .btn-primary {
+    flex: 1 1 100%;
+  }
+  .actions-bar .inline-form { width: auto; }
+  .actions-bar .assign-form {
+    width: auto;
+    flex: 1 1 12rem;
+  }
+}
+
+/* Collapse the routing block: one-line summary with the full From/To detail
+   kept in the DOM behind the <details> chevron (also works without JS). */
+.reply-context-details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  margin-bottom: 0.7rem;
+  padding: 0.45rem 0.7rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  font-size: 0.9rem;
+}
+.reply-context-details > summary::before {
+  content: "\25B8";
+  color: var(--muted);
+}
+.reply-context-details[open] > summary::before {
+  content: "\25BE";
+}
+.reply-context-details > summary::-webkit-details-marker { display: none; }
+.reply-context-details[open] .reply-context { margin-top: 0.4rem; }
+
+/* The sender <email> is in the summary line already; keep it for screen
+   readers and larger screens only. */
+@media (max-width: 768px) {
+  .message-address { display: none; }
+}
+
 @media (max-width: 480px) {
   .navbar-user-name {
     display: none;
