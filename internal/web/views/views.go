@@ -321,6 +321,26 @@ func ThreadAgeBadge(status sqlc.ThreadStatus, openedAt, now time.Time, displayTi
 	}
 }
 
+// PaneAgeLabel shortens a wait badge label for the split pane's compact age
+// element ("Today", "3d", "12d"). It reuses the exact bucketing of
+// ThreadAgeBadge — the buckets are derived from the same label so the two can
+// never disagree — and simply strips the words the pane does not have room
+// for. Labels that match no bucket (future-proofing) pass through unchanged.
+func PaneAgeLabel(waitLabel string) string {
+	switch waitLabel {
+	case "Today":
+		return "Today"
+	case "Open 1d", "Open 2d", "Open 3d", "Open 4d", "Open 5d", "Open 6d", "Open 7d":
+		return strings.TrimPrefix(waitLabel, "Open ")
+	default:
+		// "Overdue · Nd" or an unexpected label: keep the day count, drop words.
+		if days, ok := strings.CutPrefix(waitLabel, "Overdue · "); ok {
+			return days
+		}
+		return waitLabel
+	}
+}
+
 var htmlTagRe = regexp.MustCompile(`<[^>]+>`)
 
 // ExtractEmailSnippet extracts a clean single-line preview blurb from an email's plain text
@@ -729,6 +749,7 @@ var templateFuncs = template.FuncMap{
 	"isViewableAttachment": IsViewableAttachment,
 	"hasImageAttachments":  HasImageAttachments,
 	"attachmentKind":       AttachmentKindLabel,
+	"paneAgeLabel":         PaneAgeLabel,
 	"threadDetailURL":      threadDetailURL,
 }
 
@@ -917,13 +938,29 @@ const inboxTablePartial = `{{define "inbox_table"}}
       <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}{{if and $.PaneMode .IsCurrent}} thread-row-current{{end}}" data-row-href="{{threadDetailURL $paneBase .Thread.ID}}"{{if and $.PaneMode .IsCurrent}} aria-current="true"{{end}}>
         {{if and (not $.PaneMode) (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}<td class="select-cell"><label class="select-label"><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-status="{{.Thread.Status}}" data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>{{end}}
         <td class="thread-cell">
+          {{if $.PaneMode}}{{/* W-rows pane row: row 1 is the subject (a link, up to
+              two lines) beside the customer, row 2 is the message preamble on its
+              own full-width line with the compact age at its trailing edge.
+              Assignee, account and the absolute date are dropped from the pane —
+              they live in the detail header, and the tab strip + filters already
+              carry status/account. The age keeps its full text in its title attribute.
+              No-JS story: this is plain HTML, no behaviour depends on it. */}}
+          <div class="pane-row">
+            <div class="pane-row-top">
+              <a class="thread-link" href="{{threadDetailURL $paneBase .Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
+              <span class="pane-customer" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}</span>
+            </div>
+            <p class="pane-row-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}{{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}} pane-age" title="Opened {{.OpenedFullTime}}">{{paneAgeLabel .WaitLabel}}</span>{{else}}<time class="pane-age" title="{{.FullTime}}">{{.FormattedTime}}</time>{{end}}</p>
+          </div>
+          {{else}}
           <div class="thread-rowline">
             <span class="thread-line">
               <a class="thread-link" href="{{threadDetailURL $paneBase .Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
               <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
             </span>
-            <span class="thread-meta" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}{{if $.ShowAccountUI}} &middot; {{.AccountName}}{{end}} &middot; {{if .AssigneeName}}{{.AssigneeName}}{{else}}Unassigned{{end}}{{if $.PaneMode}} &middot; {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="Opened {{.OpenedFullTime}}">{{.WaitLabel}}</span>{{else if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>{{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}{{end}}</span>
+            <span class="thread-meta" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}{{if $.ShowAccountUI}} &middot; {{.AccountName}}{{end}} &middot; {{if .AssigneeName}}{{.AssigneeName}}{{else}}Unassigned{{end}}{{if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>{{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}</span>
           </div>
+          {{end}}
         </td>
         {{if not $.PaneMode}}<td class="status-cell">
           <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>

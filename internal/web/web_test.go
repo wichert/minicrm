@@ -3031,3 +3031,42 @@ func TestReplyContextDetailsRenderOpenForDesktopParity(t *testing.T) {
 		t.Fatalf("expected reply card still rendered after failed send: %s", rec2.Body.String())
 	}
 }
+
+// W-rows: the pane's compact age must reuse ThreadAgeBadge's buckets — it is a
+// pure label shortener over the badge's own output, never a second bucketing
+// implementation, so the two can never disagree about how old a thread is.
+func TestPaneAgeLabelShortensThreadAgeBadgeBuckets(t *testing.T) {
+	now := time.Date(2026, 10, 29, 0, 30, 0, 0, time.UTC)
+	// Feed every label ThreadAgeBadge can produce (plus unexpected passthroughs)
+	// through the compact helper and check the pane's label keeps the bucket.
+	tests := []struct {
+		name      string
+		waitLabel string
+		want      string
+	}{
+		{"today stays verbatim", "Today", "Today"},
+		{"open 1d loses only the word", "Open 1d", "1d"},
+		{"open 7d loses only the word", "Open 7d", "7d"},
+		{"overdue keeps the day count", "Overdue · 3d", "3d"},
+		{"overdue 12d keeps the day count", "Overdue · 12d", "12d"},
+		{"unexpected labels pass through unchanged", "???", "???"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := views.PaneAgeLabel(tc.waitLabel); got != tc.want {
+				t.Fatalf("PaneAgeLabel(%q) = %q, want %q", tc.waitLabel, got, tc.want)
+			}
+		})
+	}
+	// Cross-check against the badge itself for real timestamps: the pane label
+	// for a 2-day-old thread must match the badge's own bucket, not a recompute.
+	openedAt := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
+	label, _ := views.ThreadAgeBadge(sqlc.ThreadStatusNew, openedAt, now, "UTC")
+	compact := views.PaneAgeLabel(label)
+	if compact != strings.TrimPrefix(label, "Open ") {
+		t.Fatalf("pane label %q does not shorten badge label %q", compact, label)
+	}
+	if compact != "2d" {
+		t.Fatalf("pane label for a 2-day-old thread = %q, want \"2d\"", compact)
+	}
+}
