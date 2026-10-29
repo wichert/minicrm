@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -48,6 +49,9 @@ type testWebStore struct {
 	jobs            []sqlc.IMAPJob
 	accountSettings map[string]sqlc.AccountSettings
 	drafts          map[uuid.UUID]sqlc.ReplyDraft
+	// countThreadsErr, when set, makes CountThreadsByTab fail so tests can pin the
+	// handler's degraded-but-working behaviour on tab-count failures.
+	countThreadsErr error
 }
 
 func newTestWebStore() *testWebStore {
@@ -243,6 +247,9 @@ func (s *testWebStore) threadOpenedAt(t sqlc.Thread) time.Time {
 }
 
 func (s *testWebStore) CountThreadsByTab(_ context.Context, f sqlc.CountThreadsFilter) (sqlc.ThreadCounts, error) {
+	if s.countThreadsErr != nil {
+		return sqlc.ThreadCounts{}, s.countThreadsErr
+	}
 	if len(f.AllowedAccounts) == 0 {
 		return sqlc.ThreadCounts{}, nil
 	}
@@ -669,6 +676,7 @@ func TestSecurityHeadersSandboxedIframeAndReopenBanner(t *testing.T) {
 		"imap_junk_mailbox":                {"Junk"},
 		"imap_sent_mailbox":                {"Sent"},
 		"subject_match_window_days":        {"45"},
+		"attention_age_days":               {"2"},
 	}
 	req3 := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
 	req3.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -695,6 +703,11 @@ func testAccounts() []web.AccountConfig {
 }
 
 // buildAccountTestServer builds a web.Server with two configured accounts.
+// testInboxPageSize, when > 0, overrides the inbox page size for servers built by
+// buildAccountTestServer (needed for pagination tests; the returned *web.Server pointer
+// cannot be reconfigured after the router closes over it).
+var testInboxPageSize int
+
 func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Handler, sqlc.User, sqlc.User) {
 	t.Helper()
 	store := newTestWebStore()
@@ -710,6 +723,9 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 	sm := auth.NewSessionManager(false)
 	authSvc := auth.NewService(store, auditLogger, sm, nil, "admin@example.com")
 	srv := web.NewServer(store, authSvc, wfSvc, outbox, attStore, auditLogger, sm, testAccounts())
+	if testInboxPageSize > 0 {
+		srv = srv.WithInboxPageSize(testInboxPageSize)
+	}
 
 	multiUser := store.adminUser
 	singleUser := sqlc.User{
@@ -1576,6 +1592,7 @@ func TestSettingsEndpointsAcceptMultipartForm(t *testing.T) {
 		"imap_junk_mailbox":                {"Junk"},
 		"imap_sent_mailbox":                {"Sent"},
 		"subject_match_window_days":        {"45"},
+		"attention_age_days":               {"2"},
 	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, newMultipartRequest(t, http.MethodPost, "/settings", fields))
@@ -2343,6 +2360,7 @@ func TestThreadAgeBadge(t *testing.T) {
 		name        string
 		status      sqlc.ThreadStatus
 		openedAt    time.Time
+		now         time.Time // optional; zero means the shared "now" reference time
 		displayTZ   string
 		wantLabel   string
 		wantUrgency string
@@ -2404,6 +2422,40 @@ func TestThreadAgeBadge(t *testing.T) {
 			wantUrgency: "",
 		},
 		{
+			// Spring-forward DST: on 2026-03-29 the Amsterdam clock jumps 02:00 CET -> 03:00 CEST,
+			// so this local day is only 23 hours long. now = 2026-03-29 01:30 UTC = 03:30 CEST
+			// (local Mar 29); openedAt = 2026-03-27 23:30 UTC = Mar 28 00:30 CET (local Mar 28).
+			// Calendar-day bucketing counts Mar 29 - Mar 28 = 1 day: the skipped hour must not
+			// inflate the label to "Open 2d".
+			name:        "spring-forward DST transition does not off-by-one the day count",
+			now:         time.Date(2026, 3, 29, 1, 30, 0, 0, time.UTC), // 03:30 CEST in Amsterdam
+			status:      sqlc.ThreadStatusNew,
+			openedAt:    time.Date(2026, 3, 27, 23, 30, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "Open 1d",
+			wantUrgency: "warning",
+		},
+		{
+			// Fall-back DST: 2026-10-25 the Amsterdam clock repeats 02:00-03:00 CEST->CET, making
+			// that local day 25 hours. now = 2026-10-26 00:30 UTC = 01:30 CET (Oct 26);
+			// openedAt = 2026-10-24 23:30 UTC = Oct 25 01:30 CEST (Oct 25) -> "Open 1d".
+			name:        "fall-back DST transition does not off-by-one the day count",
+			now:         time.Date(2026, 10, 26, 0, 30, 0, 0, time.UTC), // 01:30 CET in Amsterdam
+			status:      sqlc.ThreadStatusNew,
+			openedAt:    time.Date(2026, 10, 24, 23, 30, 0, 0, time.UTC),
+			displayTZ:   "Europe/Amsterdam",
+			wantLabel:   "Open 1d",
+			wantUrgency: "warning",
+		},
+		{
+			name:        "invalid timezone string falls back to UTC",
+			status:      sqlc.ThreadStatusNew,
+			openedAt:    time.Date(2026, 10, 28, 23, 15, 0, 0, time.UTC), // UTC day Oct 28; now is Oct 29 00:30 UTC
+			displayTZ:   "Not/AZone",
+			wantLabel:   "Open 1d",
+			wantUrgency: "warning",
+		},
+		{
 			name:        "spam thread gets no age badge",
 			status:      sqlc.ThreadStatusSpam,
 			openedAt:    time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC),
@@ -2414,13 +2466,172 @@ func TestThreadAgeBadge(t *testing.T) {
 	}
 
 	for _, tc := range tests {
+		tc := tc
+		caseNow := now
+		if !tc.now.IsZero() {
+			caseNow = tc.now
+		}
 		t.Run(tc.name, func(t *testing.T) {
-			gotLabel, gotUrgency := views.ThreadAgeBadge(tc.status, tc.openedAt, now, tc.displayTZ)
+			gotLabel, gotUrgency := views.ThreadAgeBadge(tc.status, tc.openedAt, caseNow, tc.displayTZ)
 			if gotLabel != tc.wantLabel || gotUrgency != tc.wantUrgency {
 				t.Fatalf("ThreadAgeBadge(%q) = (%q, %q), want (%q, %q)",
 					tc.status, gotLabel, gotUrgency, tc.wantLabel, tc.wantUrgency)
 			}
 		})
+	}
+}
+
+func TestSettingsAttentionAgeDaysRange(t *testing.T) {
+	_, store, router, user, _ := buildAccountTestServer(t)
+	_ = user
+
+	for name, value := range map[string]int{"zero": 0, "too large": 10000} {
+		t.Run(name, func(t *testing.T) {
+			form := url.Values{
+				"display_timezone":          {"Europe/Amsterdam"},
+				"subject_match_window_days": {"30"},
+				"attention_age_days":        {fmt.Sprintf("%d", value)},
+				"imap_inbox_mailbox":        {"INBOX"},
+				"imap_archive_mailbox":      {"Archive"},
+				"imap_junk_mailbox":         {"Junk"},
+				"imap_sent_mailbox":         {"Sent"},
+			}
+			req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("POST /settings attention_age_days=%d status = %d, want 400", value, rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), "Needs attention threshold must be between 1 and 365 days.") {
+				t.Fatalf("expected range validation message in response: %s", rec.Body.String())
+			}
+			if store.settings.AttentionAgeDays != 2 {
+				t.Fatalf("settings must be unchanged on validation failure, got AttentionAgeDays=%d", store.settings.AttentionAgeDays)
+			}
+		})
+	}
+
+	// Boundary values are accepted.
+	for _, value := range []int{1, 365} {
+		form := url.Values{
+			"display_timezone":          {"Europe/Amsterdam"},
+			"subject_match_window_days": {"30"},
+			"attention_age_days":        {fmt.Sprintf("%d", value)},
+			"imap_inbox_mailbox":        {"INBOX"},
+			"imap_archive_mailbox":      {"Archive"},
+			"imap_junk_mailbox":         {"Junk"},
+			"imap_sent_mailbox":         {"Sent"},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("POST /settings attention_age_days=%d status = %d, want 303", value, rec.Code)
+		}
+		if store.settings.AttentionAgeDays != value {
+			t.Fatalf("store.settings.AttentionAgeDays = %d, want %d", store.settings.AttentionAgeDays, value)
+		}
+	}
+}
+
+// findAttentionBeforeLink extracts the next-page "Older threads" anchor. Only the anchor
+// tag counts: hidden return_to inputs and the Refresh button embed the refresh URL, which
+// carries the same before/id params.
+func findAttentionBeforeLink(body string) []string {
+	return regexp.MustCompile(`<a class="btn btn-secondary" href="(/threads\?[^"]*)">Older threads</a>`).FindStringSubmatch(body)
+}
+
+func TestNeedsAttentionPagination(t *testing.T) {
+	// The router in buildAccountTestServer closes over its own server variable, so the
+	// page size must be set via this hook before the server is built.
+	testInboxPageSize = 2
+	t.Cleanup(func() { testInboxPageSize = 0 })
+	_, store, router, _, _ := buildAccountTestServer(t)
+
+	now := time.Now().UTC()
+	// Three stale new threads; attention filtering keys on OpenedAt while the pagination
+	// cursor keys on (LastMessageAt, ID), so make the two orderings differ.
+	type spec struct {
+		name       string
+		opened, ln time.Time
+	}
+	specs := []spec{
+		{"Attention A", now.Add(-72 * time.Hour), now.Add(-1 * time.Hour)},
+		{"Attention B", now.Add(-60 * time.Hour), now.Add(-2 * time.Hour)},
+		{"Attention C", now.Add(-48 * time.Hour), now.Add(-3 * time.Hour)},
+	}
+	ids := map[string]uuid.UUID{}
+	for _, sp := range specs {
+		id := uuid.New()
+		ids[sp.name] = id
+		store.threads[id] = sqlc.Thread{
+			ID: id, AccountID: "support", SubjectDisplay: sp.name,
+			Status: sqlc.ThreadStatusNew, CustomerEmail: "p@example.com",
+			LastMessageAt: sp.ln, OpenedAt: sp.opened,
+		}
+	}
+
+	req := func(url string) string {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, url, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d: %s", url, rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	page1 := req("/threads?status=attention")
+	if !strings.Contains(page1, "Attention A") || !strings.Contains(page1, "Attention B") {
+		t.Fatalf("page 1 must show the two most recent threads: %s", page1)
+	}
+	if strings.Contains(page1, "Attention C") {
+		t.Fatalf("page 1 must not show the third thread: %s", page1)
+	}
+	m := findAttentionBeforeLink(page1)
+	if m == nil {
+		t.Fatalf("page 1 must contain a next-page link: %s", page1)
+	}
+
+	page2 := req(strings.ReplaceAll(m[1], "&amp;", "&"))
+	if !strings.Contains(page2, "Attention C") {
+		t.Fatalf("page 2 must continue with the remaining thread: %s", page2)
+	}
+	if strings.Contains(page2, "Attention A") || strings.Contains(page2, "Attention B") {
+		t.Fatalf("page 2 must not repeat page-1 threads: %s", page2)
+	}
+	// Page 2 is the last page: it must not offer a next-page link, and the cursor from
+	// page 2 renders an empty page without error.
+	if m2 := findAttentionBeforeLink(page2); m2 != nil {
+		t.Fatalf("page 2 must not have a next link: %s", page2)
+	}
+	page3 := req("/threads?status=attention&before=" + url.QueryEscape(now.Add(-48*time.Hour).Format(time.RFC3339Nano)) + "&id=" + ids["Attention C"].String())
+	if strings.Contains(page3, "Attention A") || strings.Contains(page3, "Attention B") || strings.Contains(page3, "Attention C") {
+		t.Fatalf("page 3 must be empty: %s", page3)
+	}
+}
+
+func TestCountThreadsByTabErrorStillRendersInbox(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	store.threads[uuid.New()] = sqlc.Thread{
+		ID: uuid.New(), AccountID: "support", SubjectDisplay: "Plain New",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "x@example.com",
+		LastMessageAt: time.Now().UTC().Add(-time.Hour),
+	}
+	store.countThreadsErr = fmt.Errorf("db unavailable")
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads", nil))
+	// The inbox must still render the thread list (200) — tab counts degrade to 0
+	// rather than failing the whole page — but the failure must not be silent.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads status = %d, want 200 despite tab-count failure: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Plain New") {
+		t.Fatalf("expected thread list to still render: %s", rec.Body.String())
 	}
 }
 

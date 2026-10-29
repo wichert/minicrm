@@ -256,6 +256,8 @@ func ThreadAgeBadge(status sqlc.ThreadStatus, openedAt, now time.Time, displayTi
 		return "", ""
 	}
 	if openedAt.IsZero() {
+		// Defensible default: an unknown open time is treated as today so a missing
+		// timestamp never inflates a thread's age or mislabels it as overdue.
 		return "Today", "fresh"
 	}
 	loc, err := time.LoadLocation(displayTimezone)

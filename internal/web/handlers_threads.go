@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -460,16 +461,8 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		beforeTime, beforeID = &parsedTime, &parsedID
 	}
 
-	displayTZ := "UTC"
-	attentionAgeDays := 2
-	if settings, err := s.store.GetSystemSettings(ctx); err == nil {
-		if settings.DisplayTimezone != "" {
-			displayTZ = settings.DisplayTimezone
-		}
-		if settings.AttentionAgeDays > 0 {
-			attentionAgeDays = settings.AttentionAgeDays
-		}
-	}
+	displayTZ := s.currentDisplayTimezone(ctx)
+	attentionAgeDays := s.attentionAgeDays(ctx)
 	now := time.Now().UTC()
 	attentionCutoff := now.Add(-time.Duration(attentionAgeDays) * 24 * time.Hour)
 
@@ -495,12 +488,17 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 			s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not load the conversation threads. Please try again.")
 			return
 		}
-		counts, _ = s.store.CountThreadsByTab(ctx, sqlc.CountThreadsFilter{
+		var countErr error
+		counts, countErr = s.store.CountThreadsByTab(ctx, sqlc.CountThreadsFilter{
 			AllowedAccounts: user.AllowedAccounts,
 			AccountID:       accountIDFilter,
 			UserID:          user.ID,
 			AttentionCutoff: attentionCutoff,
 		})
+		if countErr != nil {
+			// The thread list still renders; only the tab count pills degrade to 0.
+			slog.ErrorContext(ctx, "count_threads_by_tab_failed", slog.String("error", countErr.Error()))
+		}
 	}
 	nextURL := ""
 	if len(threads) > s.pageSize {
@@ -688,6 +686,8 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		}
 	}
 
+	// GetThreadByID now returns OpenedAt (earliest email sent_at); the emails[0] fallback
+	// only covers legacy callers that select threads without opened_at.
 	waitSince := thread.OpenedAt
 	if waitSince.IsZero() && len(emails) > 0 && !emails[0].SentAt.IsZero() {
 		waitSince = emails[0].SentAt
@@ -1126,6 +1126,16 @@ func (s *Server) currentDisplayTimezone(ctx context.Context) string {
 		return "UTC"
 	}
 	return settings.DisplayTimezone
+}
+
+// attentionAgeDays returns the configured needs-attention threshold in days, falling back
+// to 2 when settings are unavailable or the stored value is out of range.
+func (s *Server) attentionAgeDays(ctx context.Context) int {
+	settings, err := s.store.GetSystemSettings(ctx)
+	if err != nil || settings.AttentionAgeDays < 1 || settings.AttentionAgeDays > 365 {
+		return 2
+	}
+	return settings.AttentionAgeDays
 }
 
 func parseBoundedForm(w http.ResponseWriter, r *http.Request, maxBytes int64) error {

@@ -182,9 +182,10 @@ func (s *Server) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	attentionDays := form.Settings.AttentionAgeDays
-	if attentionDays <= 0 {
-		attentionDays = 2
-		form.Settings.AttentionAgeDays = 2
+	if attentionDays < 1 || attentionDays > 365 {
+		s.renderSettings(w, r, user, http.StatusBadRequest, form,
+			[]string{"Needs attention threshold must be between 1 and 365 days."})
+		return
 	}
 
 	oldSettings, _ := s.store.GetSystemSettings(ctx)

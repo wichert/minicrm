@@ -149,10 +149,8 @@ func (q *Queries) GetSystemSettings(ctx context.Context) (SystemSettings, error)
 
 // UpsertSystemSettings inserts or updates the singleton system_settings row.
 func (q *Queries) UpsertSystemSettings(ctx context.Context, s SystemSettings) (SystemSettings, error) {
-	attentionDays := s.AttentionAgeDays
-	if attentionDays <= 0 {
-		attentionDays = 2
-	}
+	// No clamping here: the settings handler validates 1..365 and the DB CHECK
+	// constraint is the final guard against out-of-range values.
 	const query = `
 		INSERT INTO system_settings (
 			id, display_timezone, imap_inbox_mailbox,
@@ -174,7 +172,7 @@ func (q *Queries) UpsertSystemSettings(ctx context.Context, s SystemSettings) (S
 	err := q.db.QueryRow(ctx, query,
 		s.DisplayTimezone, s.IMAPInboxMailbox,
 		s.IMAPArchiveMailbox, s.IMAPJunkMailbox, s.IMAPSentMailbox,
-		s.SubjectMatchWindowDays, attentionDays,
+		s.SubjectMatchWindowDays, s.AttentionAgeDays,
 	).Scan(
 		&out.ID, &out.DisplayTimezone,
 		&out.IMAPInboxMailbox, &out.IMAPArchiveMailbox, &out.IMAPJunkMailbox, &out.IMAPSentMailbox,
@@ -356,9 +354,13 @@ func (q *Queries) CreateThread(ctx context.Context, t Thread) (Thread, error) {
 	))
 }
 
-// GetThreadByID fetches a thread by UUID.
+// GetThreadByID fetches a thread by UUID. Unlike the shared threadColumns select, it also
+// returns opened_at (earliest email sent_at) so the detail page can show the thread-age badge
+// without relying on the first email's SentAt.
 func (q *Queries) GetThreadByID(ctx context.Context, id uuid.UUID) (Thread, error) {
-	return scanThread(q.db.QueryRow(ctx, `SELECT `+threadColumns+` FROM threads WHERE id = $1`, id))
+	return scanThread(q.db.QueryRow(ctx, `SELECT `+threadColumns+`,
+	       (SELECT MIN(e.sent_at) FROM emails e WHERE e.thread_id = threads.id) AS opened_at
+	       FROM threads WHERE id = $1`, id))
 }
 
 // LockThreadByID fetches and locks a thread for a transactional workflow operation.
@@ -411,6 +413,8 @@ func (q *Queries) CountThreadsByTab(ctx context.Context, f CountThreadsFilter) (
 	}
 	const query = `
 		SELECT
+			-- Inclusive <= cutoff: a thread opened exactly at the cutoff counts as
+			-- needing attention (matches the needs_attention predicate below).
 			COUNT(*) FILTER (WHERE t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $3::timestamptz)::int AS needs_attention,
 			COUNT(*) FILTER (WHERE t.status = 'new')::int AS new_count,
 			COUNT(*) FILTER (WHERE t.status IN ('new', 'in_progress') AND t.assignee_id = $4::uuid)::int AS mine_count,
@@ -477,6 +481,7 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		  AND ($8::timestamptz IS NULL OR (t.last_message_at, t.id) < ($8, $9::uuid))
 		  AND ($10::text = '' OR t.customer_email = $10::citext)
 		  AND ($11::uuid IS NULL OR t.id <> $11)
+		  -- Inclusive <= attention cutoff, matching the count query above.
 		  AND (NOT $13::boolean OR (t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $14::timestamptz))
 		ORDER BY t.last_message_at DESC, t.id DESC
 		LIMIT $12`
