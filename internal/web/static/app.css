@@ -3056,11 +3056,6 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   display: inline-flex;
 }
 
-.thread-row:hover .actions-cell .row-menu-submenu,
-.thread-row:focus-within .actions-cell .row-menu-submenu {
-  display: inline-flex;
-}
-
 /* W7: keyboard navigation highlight */
 .thread-row.kb-active {
   background: var(--surface-soft, #eef0f4);
