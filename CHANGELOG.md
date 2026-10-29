@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/wichert/minicrm/compare/v1.2.0...v1.2.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **web:** keep split view and filters consistent across list and detail navigation ([#33](https://github.com/wichert/minicrm/issues/33)) ([1a22876](https://github.com/wichert/minicrm/commit/1a22876c940b7fa7dd5c72cb9017e32bacf8363d))
+
 ## [1.2.0](https://github.com/wichert/minicrm/compare/v1.1.0...v1.2.0) (2026-10-29)
 
 
