@@ -2928,7 +2928,6 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
      the latest 5 are shown (entries 6-10 hidden). Scoped to the settings page's
      recent-activity card only — the full /settings/activity page shares the
      same table partial and must show every row. */
-  #settings-activity ~ .settings-audit-table tbody tr:nth-child(n+6),
   .settings-recent .settings-audit-table tbody tr:nth-child(n+6) {
     display: none;
   }
