@@ -854,6 +854,7 @@ const inboxTablePartial = `
               <span aria-hidden="true">&#8943;</span>
             </summary>
             <div class="row-menu-popover">
+              <button type="button" class="row-menu-item" data-row-select aria-label="Select {{.Thread.SubjectDisplay}} for bulk actions">Select</button>
               {{if .CanAssignToMe}}<form method="post" action="/threads/{{.Thread.ID}}/assign" class="row-menu-form">
                 <input type="hidden" name="assignee_id" value="{{$.CurrentUser.ID}}">
                 <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
@@ -953,7 +954,7 @@ const inboxBody = `
 <form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-has-selection="false" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
   <input type="hidden" name="return_to" value="{{.RefreshURL}}">
   <label class="mobile-select-all"><input type="checkbox" data-select-all-mobile> Select all on page</label>
-  <span data-selected-count aria-live="polite">Select conversations to assign, complete, or mark as spam.</span>
+  <span data-selected-count aria-live="polite"></span>
   <div class="bulk-actions-controls">
     <label class="inline-field">Assign selected to
       <select name="assignee_id" aria-label="Assignee for selected conversations" data-bulk-assignee disabled aria-disabled="true">
@@ -964,6 +965,7 @@ const inboxBody = `
     <button type="submit" formaction="/threads/bulk-assign" class="btn btn-secondary btn-small" data-bulk-action="assign" disabled aria-disabled="true">Assign selected</button>
     <button type="submit" formaction="/threads/bulk-complete" class="btn btn-secondary btn-small" data-bulk-action="complete" data-confirm="Mark selected conversations as completed and queue moves to Archive?" data-confirm-action="Complete selected" data-confirm-submit disabled aria-disabled="true">Complete selected</button>
     <button type="submit" class="btn btn-danger btn-small" data-bulk-action="spam" data-confirm-submit disabled aria-disabled="true">Mark selected as spam</button>
+    <button type="button" class="btn btn-secondary btn-small" data-bulk-clear>Clear</button>
   </div>
 </form>
 {{end}}

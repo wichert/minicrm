@@ -1,5 +1,9 @@
 /* MiniCRM progressive enhancement: filter auto-submit, confirmations, notice dismissal, frame resize */
 document.addEventListener("DOMContentLoaded", function () {
+  // Progressive enhancement flag: bulk-bar and selection-mode styling in
+  // app.css is scoped under html.js so the no-JS experience stays as today.
+  document.documentElement.classList.add("js");
+
   function setupFilterAutoSubmit() {
     document.querySelectorAll("[data-hx-get]").forEach(function (el) {
       el.addEventListener("change", function () {
@@ -116,12 +120,19 @@ document.addEventListener("DOMContentLoaded", function () {
   // the (re-applied) selection so the buttons and confirmation text stay right.
   var refreshBulkSelection = null;
 
+  // Module-scoped reference to the bulk form so the shared form[data-confirm]
+  // submit handler below can recognize it (it runs outside setupBulkForm's
+  // scope). Null when the page has no bulk bar.
+  var bulkFormRef = null;
+
   function setupBulkForm() {
     refreshBulkSelection = null;
+    bulkFormRef = null;
     var bulkForm = document.getElementById("bulk-spam-form");
     if (!bulkForm) {
       return;
     }
+    bulkFormRef = bulkForm;
     var checks = Array.from(document.querySelectorAll("[data-select-thread]"));
     var selectAll = Array.from(document.querySelectorAll("[data-select-all], [data-select-all-mobile]"));
     var count = bulkForm.querySelector("[data-selected-count]");
@@ -145,9 +156,11 @@ document.addEventListener("DOMContentLoaded", function () {
       var accounts = Array.from(new Set(openSelected.map(function (check) { return check.dataset.account; }))).filter(Boolean);
       var hasOpen = openSelected.length > 0;
       bulkForm.dataset.hasSelection = selected.length > 0 ? "true" : "false";
-      count.textContent = selected.length > 0
-        ? selected.length + " selected on this page"
-        : "Select conversations to assign, complete, or mark as spam.";
+      var modeContainer = document.querySelector("[data-inbox-results]");
+      if (modeContainer && selected.length === 0) {
+        modeContainer.removeAttribute("data-selection-mode");
+      }
+      count.textContent = selected.length > 0 ? selected.length + " selected" : "";
       setBulkControlDisabled(assigneeSelect, !hasOpen);
       bulkButtons.forEach(function (button) {
         setBulkControlDisabled(button, !hasOpen);
@@ -168,6 +181,32 @@ document.addEventListener("DOMContentLoaded", function () {
     }
     checks.forEach(function (check) { check.addEventListener("change", refreshSelection); });
     selectAll.forEach(function (control) { control.addEventListener("change", function () { checks.forEach(function (check) { check.checked = control.checked; }); refreshSelection(); }); });
+    var clearButton = bulkForm.querySelector("[data-bulk-clear]");
+    if (clearButton) {
+      clearButton.addEventListener("click", function () {
+        checks.forEach(function (check) { check.checked = false; });
+        var container = resultsContainer();
+        if (container) { container.removeAttribute("data-selection-mode"); }
+        refreshSelection();
+      });
+    }
+    // Row "Select" buttons live inside the table's row menus, not in this
+    // form, so bind them document-wide; swapResults() re-runs setupBulkForm()
+    // after every fragment swap, which re-binds the recreated buttons.
+    document.querySelectorAll("[data-row-select]").forEach(function (button) {
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        var menu = button.closest("details[data-row-menu]");
+        if (menu) { menu.open = false; }
+        enterSelectionMode();
+        var row = button.closest("tr");
+        var check = row && row.querySelector("[data-select-thread]");
+        if (check && !check.checked) {
+          check.checked = true;
+          refreshSelection();
+        }
+      });
+    });
     bulkForm.addEventListener("submit", function (event) {
       var selected = checks.filter(function (check) { return check.checked; });
       var openSelected = selected.filter(function (check) {
@@ -205,7 +244,7 @@ document.addEventListener("DOMContentLoaded", function () {
         if (event.defaultPrevented || form.dataset.confirmed === "true") {
           return;
         }
-        if (form === bulkForm && event.submitter && !event.submitter.hasAttribute("data-confirm-submit")) {
+        if (bulkFormRef && form === bulkFormRef && event.submitter && !event.submitter.hasAttribute("data-confirm-submit")) {
           return;
         }
         var trigger = event.submitter || form.querySelector("button[type=submit]") || document.activeElement;
@@ -251,6 +290,75 @@ document.addEventListener("DOMContentLoaded", function () {
       resetConfirm();
     });
   }
+
+  // Mobile selection mode: per-row checkboxes only exist visually while the
+  // results container carries data-selection-mode="true" (see app.css).
+  function resultsContainer() {
+    return document.querySelector("[data-inbox-results]");
+  }
+  function enterSelectionMode() {
+    var container = document.querySelector("[data-inbox-results]");
+    if (container) {
+      container.setAttribute("data-selection-mode", "true");
+    }
+  }
+  // Long-press (~500ms) on a mobile card enters selection mode and checks that
+  // row. Cancelled on movement/scroll and never navigates: the follow-up click
+  // is suppressed once.
+  var suppressNextRowClick = false;
+  function setupLongPress() {
+    var timer = null;
+    var pressRow = null;
+    var startX = 0;
+    var startY = 0;
+    function cancel() {
+      if (timer !== null) { clearTimeout(timer); timer = null; }
+      pressRow = null;
+    }
+    document.addEventListener("pointerdown", function (event) {
+      if (event.pointerType === "mouse" || event.button !== 0) { return; }
+      if (event.target.closest("a, button, select, input, label, details[data-row-menu], dialog")) { return; }
+      var row = event.target.closest("tr.thread-row");
+      if (!row || !row.querySelector("[data-select-thread]")) { return; }
+      pressRow = row;
+      startX = event.clientX;
+      startY = event.clientY;
+      timer = setTimeout(function () {
+        timer = null;
+        if (pressRow !== row) { return; }
+        enterSelectionMode();
+        var check = row.querySelector("[data-select-thread]");
+        if (check && !check.checked) {
+          check.checked = true;
+        }
+        if (refreshBulkSelection) { refreshBulkSelection(); }
+        suppressNextRowClick = true;
+        // iOS long-press often opens the text-selection callout instead of
+        // delivering a click; expire the suppression so the NEXT tap isn't
+        // swallowed (the real click, when it comes, lands well within 600ms).
+        setTimeout(function () { suppressNextRowClick = false; }, 600);
+        pressRow = null;
+      }, 500);
+    }, { passive: true });
+    // Small finger drift must not cancel the long-press; only real movement
+    // (which usually means a scroll start) does.
+    document.addEventListener("pointermove", function (event) {
+      if (Math.hypot(event.clientX - startX, event.clientY - startY) > 10) {
+        cancel();
+      }
+    }, { passive: true });
+    document.addEventListener("pointercancel", cancel, { passive: true });
+    document.addEventListener("pointerup", cancel, { passive: true });
+    document.addEventListener("scroll", cancel, { passive: true, capture: true });
+    document.addEventListener("click", function (event) {
+      if (suppressNextRowClick && event.target.closest("tr.thread-row")) {
+        suppressNextRowClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    }, true);
+  }
+  setupLongPress();
 
   document.querySelectorAll("[data-flash-dismiss]").forEach(function (button) {
     button.addEventListener("click", function () {
@@ -585,7 +693,12 @@ document.addEventListener("DOMContentLoaded", function () {
         return false;
       }
       var selected = checkedThreadIDs();
+      var selectionMode = results.getAttribute("data-selection-mode");
       results.innerHTML = fresh.innerHTML;
+      // Keep selection mode across the swap so long-press-selected rows stay visible.
+      if (selectionMode) {
+        results.setAttribute("data-selection-mode", selectionMode);
+      }
       if (selected.length) {
         var wanted = new Set(selected);
         results.querySelectorAll("[data-select-thread]").forEach(function (check) {
