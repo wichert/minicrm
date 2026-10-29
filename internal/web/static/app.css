@@ -2663,10 +2663,19 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
      active tab implies the status and the compact age rides at the end of the
      preamble), so the subject, customer and snippet get the width. The actions
      cell overlays the row's trailing edge and costs only its own icon. */
-  .split-list .threads-table-pane .actions-cell {
-    width: 1.9rem;
-    padding-left: 0;
-    padding-right: 0.15rem;
+  /* The pane is a reading queue: no hover highlight and no action affordances.
+     A row that lights up under the cursor competes with the selected-row accent
+     and suggests an action surface that is not there — acting on a thread
+     belongs to the detail page (and the full inbox). */
+  .split-list .thread-row:hover,
+  .split-list .thread-row:focus-within {
+    background: transparent;
+  }
+
+  .split-list .actions-cell,
+  .split-list .row-quick-actions,
+  .split-list .row-menu {
+    display: none;
   }
 
   /* W-rows: the pane row is three stacked parts — row 1 is the subject link

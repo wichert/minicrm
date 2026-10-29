@@ -596,12 +596,19 @@ func TestSplitPaneTableOmitsStatusAgeAndSelectColumns(t *testing.T) {
 	if !strings.Contains(pane, `<span class="wait-badge`) {
 		t.Error("pane rows must keep the age inline in the meta line")
 	}
-	// Row menus stay reachable from the pane, but without a bulk Select entry.
-	if !strings.Contains(pane, `data-row-menu`) || !strings.Contains(pane, `Complete`) {
-		t.Error("pane rows must keep the row menu with quick actions")
+	// The pane is a reading queue: no row menu, no hover quick actions and no
+	// bulk-select entry. Acting on a thread belongs to the detail page or the
+	// full inbox (/threads), which is one click away. Scope this to the results
+	// table — the pane's "More" tab strip legitimately uses data-row-menu.
+	resultsIdx := strings.Index(pane, `data-inbox-results`)
+	if resultsIdx < 0 {
+		t.Fatal("pane must render its results region")
 	}
-	if strings.Contains(pane, `data-row-select`) {
-		t.Error("pane row menus must not offer the bulk-select entry (no bulk bar in the pane)")
+	results := pane[resultsIdx:]
+	for _, unwanted := range []string{`data-row-menu`, `data-row-select`, `row-quick-complete`, `row-quick-spam`, `class="actions-cell"`, `<th scope="col" class="actions-cell">`} {
+		if strings.Contains(results, unwanted) {
+			t.Errorf("pane rows must not render the action affordance %q", unwanted)
+		}
 	}
 }
 
@@ -677,9 +684,14 @@ func TestSplitPaneStylesAreWideOnly(t *testing.T) {
 		strings.Contains(sheet, ".split-list .thread-meta") {
 		t.Error("app.css must drop the retired .split-list one-line row overrides")
 	}
-	// The pane's actions column is slimmed to the icon it holds.
-	if !strings.Contains(sheet, ".split-list .threads-table-pane .actions-cell {") {
-		t.Error("app.css must slim the pane's actions cell")
+	// The pane renders no actions cell, and no row hover highlight: a row that
+	// lit up under the cursor suggested an action surface that is not there.
+	if !strings.Contains(sheet, ".split-list .thread-row:hover") ||
+		!strings.Contains(sheet, "background: transparent;") {
+		t.Error("app.css must suppress the split pane's row hover highlight")
+	}
+	if !strings.Contains(sheet, ".split-list .row-quick-actions,") {
+		t.Error("app.css must keep the pane's quick actions hidden")
 	}
 	// The split filter row is wide-only: rendered above the split, hidden below
 	// 1280px where the pane does not exist.
@@ -762,5 +774,100 @@ func TestSplitPaneTrailingAgeStaysCompactWithoutWaitBadge(t *testing.T) {
 	}
 	if !strings.Contains(label, "ago") && label != "Just now" {
 		t.Errorf("the pane's trailing age must be a relative age, got %q", label)
+	}
+}
+
+// The split pane's results-status line must not carry a ticking age label. The
+// eyebrow still renders so the manual "Refresh" affordance stays reachable, but
+// the live status text is left empty and app.js never paints it inside the pane
+// (a "Updated just now" beside a queue the user is reading is noise).
+func TestSplitPaneHasNoUpdatedStatusLabel(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Quiet pane thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "quiet@example.com",
+		LastMessageAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		OpenedAt:      time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		MessageCount:  1, LatestBodyText: "Quiet pane preamble",
+	}
+	store.emails[uuid.New()] = sqlc.Email{
+		ID: uuid.New(), ThreadID: threadID, AccountID: "support", FromAddress: "quiet@example.com",
+		Subject: "Quiet pane thread", BodyText: "Quiet pane preamble",
+		SentAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=new", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatalf("pane/detail markers not in expected order")
+	}
+	pane := body[paneIdx:detailIdx]
+
+	// The manual refresh control survives so the queue can be reloaded on demand.
+	if !strings.Contains(pane, `data-refresh-link`) {
+		t.Error("the pane must keep its manual refresh affordance")
+	}
+	// The live status span must exist (app.js targets it) but render no text.
+	if !strings.Contains(pane, `data-refresh-status`) {
+		t.Fatal("the pane must keep the data-refresh-status hook")
+	}
+	statusIdx := strings.Index(pane, `data-refresh-status`)
+	open := strings.Index(pane[statusIdx:], ">")
+	if open < 0 {
+		t.Fatal("malformed data-refresh-status element")
+	}
+	closeIdx := strings.Index(pane[statusIdx+open:], "</span>")
+	if closeIdx < 0 {
+		t.Fatal("malformed data-refresh-status element: missing closing tag")
+	}
+	label := strings.TrimSpace(pane[statusIdx+open+1 : statusIdx+open+closeIdx])
+	if label != "" && !strings.EqualFold(label, "Refresh") {
+		t.Errorf("the pane's status span must not carry an age label, got %q", label)
+	}
+	// And the split pane markup must not contain the phrase the auto-refresh used
+	// to paint into it.
+	if strings.Contains(pane, "Updated just now") {
+		t.Error("the pane must not render an 'Updated just now' label")
+	}
+}
+
+// The retired "Oldest open" sort is replaced by "Longest waiting": the select
+// offers only the new key and no longer mentions the old label anywhere.
+func TestSortSelectOffersLongestWaiting(t *testing.T) {
+	_, _, router, _, _ := buildAccountTestServer(t)
+
+	for _, path := range []string{"/threads?status=new", "/threads?status=new&sort=longest_waiting"} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", path, rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "Longest waiting") {
+			t.Errorf("%s: sort control must offer Longest waiting", path)
+		}
+		if strings.Contains(body, "Oldest open") || strings.Contains(body, `value="oldest_open"`) {
+			t.Errorf("%s: the retired Oldest open sort must be gone", path)
+		}
+	}
+
+	// The default stays newest, and the new key round-trips.
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new", nil))
+	if !strings.Contains(rec.Body.String(), `value="newest" selected`) {
+		t.Error("the default sort must stay Newest")
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new&sort=longest_waiting", nil))
+	if !strings.Contains(rec.Body.String(), `value="longest_waiting" selected`) {
+		t.Error("sort=longest_waiting must select the new option")
 	}
 }

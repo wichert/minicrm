@@ -103,11 +103,12 @@ func TestGetThreadByIDScansOpenedAt(t *testing.T) {
 	}
 }
 
-// TestListThreadsSortOrders verifies the W7 allow-listed sort orders against real
+// TestListThreadsSortOrders verifies the allow-listed sort orders against real
 // PostgreSQL: "newest" orders by last_message_at DESC (index-orderable literal
-// ORDER BY) and "oldest_open" by the earliest inbound message time (opened_at)
-// ASC. The sort value only selects between two static query variants in Go, so
-// an unknown value must fall back to newest rather than alter the query shape.
+// ORDER BY) and "longest_waiting" by last activity ASC — the time of the most
+// recent email on the thread in either direction. The sort value only selects
+// between two static query variants in Go, so an unknown value must fall back
+// to newest rather than alter the query shape.
 func TestListThreadsSortOrders(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -142,8 +143,10 @@ func TestListThreadsSortOrders(t *testing.T) {
 	q := sqlc.New(pool)
 
 	newest := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-	// Thread A opened earliest but replied to last (newest last_message_at).
-	// Thread B opened later but never received a follow-up.
+	// Thread A opened earliest but had activity most recently (newest
+	// last_message_at). Thread B's only email is much older, so B has been
+	// waiting longest even though it was opened later than A. This is what
+	// distinguishes "longest waiting" from the old opened_at ordering.
 	a, err := q.CreateThread(ctx, sqlc.Thread{AccountID: "support", SubjectNormalized: "sort-a", SubjectDisplay: "Sort A", Status: sqlc.ThreadStatusNew, CustomerEmail: "a@example.com", LastMessageAt: newest.Add(-1 * time.Hour)})
 	if err != nil {
 		t.Fatal(err)
@@ -177,17 +180,17 @@ func TestListThreadsSortOrders(t *testing.T) {
 		t.Fatalf("newest order = [%s, %s], want [A, B]", idsOf(byNewest)[0], idsOf(byNewest)[1])
 	}
 
-	byOldest, err := q.ListThreads(ctx, sqlc.ListThreadsFilter{
+	byWaiting, err := q.ListThreads(ctx, sqlc.ListThreadsFilter{
 		AllowedAccounts: []string{"support"},
 		OpenOnly:        openOnly,
-		Sort:            "oldest_open",
+		Sort:            "longest_waiting",
 		Limit:           10,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(byOldest) != 2 || byOldest[0].ID != a.ID || byOldest[1].ID != b.ID {
-		t.Fatalf("oldest_open order = [%s, %s], want [A, B] (A opened first)", idsOf(byOldest)[0], idsOf(byOldest)[1])
+	if len(byWaiting) != 2 || byWaiting[0].ID != b.ID || byWaiting[1].ID != a.ID {
+		t.Fatalf("longest_waiting order = [%s, %s], want [B, A] (B waited longest)", idsOf(byWaiting)[0], idsOf(byWaiting)[1])
 	}
 
 	// An unknown sort value must fall back to newest, never interpolate.

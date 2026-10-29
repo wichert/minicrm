@@ -440,7 +440,7 @@ type ListThreadsFilter struct {
 	CustomerEmail   string
 	ExcludeThreadID *uuid.UUID
 	// Sort is the allow-listed ordering: "newest" (default) orders by
-	// last_message_at DESC; "oldest_open" orders by opened_at ASC. Only these two
+	// last_message_at DESC; "longest_waiting" orders by last activity ASC. Only these two
 	// constants are accepted — callers must never interpolate raw strings.
 	Sort       string
 	BeforeTime *time.Time
@@ -481,8 +481,8 @@ func (q *Queries) CountThreadsByTab(ctx context.Context, f CountThreadsFilter) (
 }
 
 // ListThreads returns threads matching the given filter, ordered by the
-// allow-listed Sort field ("newest" = last_message_at DESC, "oldest_open" =
-// opened_at ASC), enriched with latest-message preview metadata and message count.
+// allow-listed Sort field ("newest" = last_message_at DESC, "longest_waiting" =
+// last activity ASC), enriched with latest-message preview metadata and message count.
 func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Thread, error) {
 	if f.Limit <= 0 {
 		f.Limit = 100
@@ -495,14 +495,17 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 	// while a literal ORDER BY t.last_message_at DESC, t.id DESC stays
 	// index-orderable. Sort values never reach the SQL text; the branch is
 	// selected in Go from the allow-listed f.Sort field only.
-	const oldestOpenOrder = `
-		ORDER BY
-			ROW(COALESCE(stats.opened_at, t.last_message_at), t.id)`
+	// oldestActivityOrder sorts by last activity ascending: last_message_at is
+	// maintained as the most recent sent_at of any email on the thread (both
+	// directions), so "longest waiting" means the thread whose last email —
+	// received or sent — is furthest in the past. t.id breaks ties stably.
+	const oldestActivityOrder = `
+		ORDER BY t.last_message_at ASC, t.id ASC`
 	const newestOrder = `
 		ORDER BY t.last_message_at DESC, t.id DESC`
 	orderClause := newestOrder
-	if f.Sort == "oldest_open" {
-		orderClause = oldestOpenOrder
+	if f.Sort == "longest_waiting" {
+		orderClause = oldestActivityOrder
 	}
 	query := `
 		SELECT t.id, t.account_id, t.subject_normalized, t.subject_display, t.status, t.assignee_id,

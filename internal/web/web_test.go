@@ -346,7 +346,7 @@ func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) 
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if f.Sort == "oldest_open" {
+		if f.Sort == "longest_waiting" {
 			ti, tj := s.threadOpenedAt(out[i]), s.threadOpenedAt(out[j])
 			if ti.Equal(tj) {
 				return strings.Compare(out[i].ID.String(), out[j].ID.String()) < 0

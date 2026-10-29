@@ -397,8 +397,12 @@ func (s *Server) loadAuthorizedThread(ctx context.Context, user sqlc.User, threa
 // inboxSortKeys is the closed allow-list of supported sort orders; anything
 // else falls back to "newest" so an unknown value can never reach SQL.
 const (
-	inboxSortNewest     = "newest"
-	inboxSortOldestOpen = "oldest_open"
+	inboxSortNewest = "newest"
+	// inboxSortLongestWaiting orders by the thread's last activity ascending:
+	// the time of the last email received on or sent to the thread, whichever
+	// is more recent. It answers "who has been waiting on us the longest?"
+	// without ignoring conversations we already replied to.
+	inboxSortLongestWaiting = "longest_waiting"
 )
 
 // assigneeFilterForUser returns the active users that may be offered as an inbox assignee filter.
@@ -500,7 +504,7 @@ func parseInboxListFilters(r *http.Request, user sqlc.User) (inboxListFilters, e
 	switch sortParam := strings.TrimSpace(r.URL.Query().Get("sort")); sortParam {
 	case "":
 		f.sort = inboxSortNewest
-	case inboxSortNewest, inboxSortOldestOpen:
+	case inboxSortNewest, inboxSortLongestWaiting:
 		f.sort = sortParam
 	default:
 		f.sort = inboxSortNewest
@@ -572,11 +576,12 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 	}
 	nextURL := ""
 	var totalKnown int
-	// W7: the oldest_open sort intentionally has no cursor pagination. The query
-	// fetches pageSize+1 rows; when it returns more than a full page, cap it and
-	// flag the truncation instead of paging. Exactly pageSize results fit on the
-	// page without a truncation notice.
-	sortTruncated := filters.sort == inboxSortOldestOpen && len(threads) > s.pageSize
+	// W7: the longest_waiting sort has no cursor pagination because its ORDER BY
+	// is not carried by the cursor (which keys on last_message_at and id). The
+	// query fetches pageSize+1 rows; when it returns more than a full page, cap
+	// it and flag the truncation instead of paging. Exactly pageSize results fit
+	// on the page without a truncation notice.
+	sortTruncated := filters.sort == inboxSortLongestWaiting && len(threads) > s.pageSize
 	if sortTruncated {
 		threads = threads[:s.pageSize]
 	}
