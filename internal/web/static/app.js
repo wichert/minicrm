@@ -1103,7 +1103,21 @@ document.addEventListener("DOMContentLoaded", function () {
         return;
       }
       var target = event.target;
-      if (target.closest("input, textarea, select, [contenteditable], dialog, details[data-row-menu]")) {
+      // Esc inside the search field clears and blurs it instead of only
+      // clearing the active row.
+      if (event.key === "Escape") {
+        var searchField = target.closest(".filter-inline input[type=search]");
+        if (searchField) {
+          event.preventDefault();
+          searchField.value = "";
+          searchField.blur();
+          return;
+        }
+      }
+      // Focused links, buttons and summaries keep their own Enter/Space
+      // semantics: never hijack activation keys away from interactive targets
+      // (e.g. the "Load older" link or a row-menu trigger).
+      if (target.closest("input, textarea, select, [contenteditable], dialog, details[data-row-menu], a, button, summary, [href]")) {
         return;
       }
       var rows = kbRows();
@@ -1171,7 +1185,9 @@ document.addEventListener("DOMContentLoaded", function () {
           if (btn) {
             btn.click();
           } else {
-            chosen.submit();
+            // requestSubmit runs the submit event pipeline (confirm dialogs,
+            // validation); a raw submit() call would bypass them.
+            chosen.requestSubmit();
           }
         }
         return;
@@ -1185,14 +1201,23 @@ document.addEventListener("DOMContentLoaded", function () {
         if (!kbActiveRow || !kbActiveRow.isConnected) {
           return;
         }
+        var fresh = null;
         var check = kbActiveRow.querySelector("input[data-select-thread]");
         var id = check ? check.value : null;
-        if (!id) {
-          kbSetActive(null);
-          return;
+        if (id) {
+          var found = document.querySelector('tr[data-row-href] input[data-select-thread][value="' + id + '"]');
+          fresh = found ? found.closest("tr[data-row-href]") : null;
+        } else {
+          // Rows without a select checkbox (completed/spam tabs) are re-matched
+          // by their row href so the highlight survives auto-refresh swaps.
+          var href = kbActiveRow.getAttribute("data-row-href");
+          if (href) {
+            fresh = kbRows().find(function (row) {
+              return row.getAttribute("data-row-href") === href;
+            }) || null;
+          }
         }
-        var fresh = document.querySelector('tr[data-row-href] input[data-select-thread][value="' + id + '"]');
-        kbSetActive(fresh ? fresh.closest("tr[data-row-href]") : null);
+        kbSetActive(fresh);
       }).observe(resultsEl, { childList: true });
     }
   }

@@ -572,9 +572,11 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 	}
 	nextURL := ""
 	var totalKnown int
-	// W7: the oldest_open sort intentionally has no cursor pagination. When the
-	// result fills the page, cap it and flag the truncation instead of paging.
-	sortTruncated := filters.sort == inboxSortOldestOpen && len(threads) >= s.pageSize
+	// W7: the oldest_open sort intentionally has no cursor pagination. The query
+	// fetches pageSize+1 rows; when it returns more than a full page, cap it and
+	// flag the truncation instead of paging. Exactly pageSize results fit on the
+	// page without a truncation notice.
+	sortTruncated := filters.sort == inboxSortOldestOpen && len(threads) > s.pageSize
 	if sortTruncated {
 		threads = threads[:s.pageSize]
 	}

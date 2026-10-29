@@ -87,9 +87,6 @@ type InboxViewData struct {
 	// Sort is the allow-listed sort key of the current list ("newest" or
 	// "oldest_open"); unknown query values collapse to "newest".
 	Sort string
-	// NextSortURL is the inbox URL that toggles to the other sort while keeping
-	// every other filter; empty when unavailable.
-	NextSortURL string
 	// SortTruncated is true when the oldest_open sort was capped at the page limit
 	// without cursor pagination; the view renders a truncation notice.
 	SortTruncated bool
@@ -972,23 +969,26 @@ const inboxTablePartial = `{{define "inbox_table"}}
                 </div>
               </details>
               {{end}}
-              {{if or (eq .Thread.Status "new") (eq .Thread.Status "in_progress")}}
-              <div class="row-quick-actions" aria-label="Quick actions">
-                <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as completed and move its messages to Archive?" data-confirm-action="Complete thread">
-                  <input type="hidden" name="status" value="completed">
-                  {{if eq .Thread.Status "new"}}<input type="hidden" name="complete_from_new" value="1">{{end}}
-                  <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
-                  <button type="submit" class="row-quick-btn row-quick-complete" aria-label="Complete {{.Thread.SubjectDisplay}}" title="Complete"><span aria-hidden="true">&#10003;</span></button>
-                </form>
-                <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as spam and move its messages to Junk?" data-confirm-action="Mark as spam">
-                  <input type="hidden" name="status" value="spam">
-                  <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
-                  <button type="submit" class="row-quick-btn row-quick-spam" aria-label="Mark {{.Thread.SubjectDisplay}} as spam" title="Mark as spam"><span aria-hidden="true">&#10005;</span></button>
-                </form>
-              </div>
-              {{end}}
             </div>
           </details>
+          {{if or (eq .Thread.Status "new") (eq .Thread.Status "in_progress")}}
+          <!-- W7 spec: hover quick actions live directly in the actions cell,
+               outside the ⋯ popover, so they work without opening the menu.
+               Each form is self-contained (own action + hidden inputs). -->
+          <div class="row-quick-actions" aria-label="Quick actions">
+            <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as completed and move its messages to Archive?" data-confirm-action="Complete thread">
+              <input type="hidden" name="status" value="completed">
+              {{if eq .Thread.Status "new"}}<input type="hidden" name="complete_from_new" value="1">{{end}}
+              <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+              <button type="submit" class="row-quick-btn row-quick-complete" aria-label="Complete {{.Thread.SubjectDisplay}}" title="Complete"><span aria-hidden="true">&#10003;</span></button>
+            </form>
+            <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as spam and move its messages to Junk?" data-confirm-action="Mark as spam">
+              <input type="hidden" name="status" value="spam">
+              <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+              <button type="submit" class="row-quick-btn row-quick-spam" aria-label="Mark {{.Thread.SubjectDisplay}} as spam" title="Mark as spam"><span aria-hidden="true">&#10005;</span></button>
+            </form>
+          </div>
+          {{end}}
           {{end}}
         </td>
         {{end}}

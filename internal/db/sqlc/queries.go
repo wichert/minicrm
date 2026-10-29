@@ -490,7 +490,21 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 	if (f.BeforeTime == nil) != (f.BeforeID == nil) {
 		return nil, fmt.Errorf("inbox cursor must include both time and ID")
 	}
-	const query = `
+	// Two fully static query variants instead of one ORDER BY CASE expression:
+	// the parameterized CASE defeats index scans for the default "newest" sort,
+	// while a literal ORDER BY t.last_message_at DESC, t.id DESC stays
+	// index-orderable. Sort values never reach the SQL text; the branch is
+	// selected in Go from the allow-listed f.Sort field only.
+	const oldestOpenOrder = `
+		ORDER BY
+			ROW(COALESCE(stats.opened_at, t.last_message_at), t.id)`
+	const newestOrder = `
+		ORDER BY t.last_message_at DESC, t.id DESC`
+	orderClause := newestOrder
+	if f.Sort == "oldest_open" {
+		orderClause = oldestOpenOrder
+	}
+	query := `
 		SELECT t.id, t.account_id, t.subject_normalized, t.subject_display, t.status, t.assignee_id,
 		       t.assignment_source, t.customer_email, COALESCE(t.customer_name, ''), t.reopens_thread_id, t.last_message_at,
 		       COALESCE(stats.message_count, 0),
@@ -527,14 +541,11 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		  AND ($11::uuid IS NULL OR t.id <> $11)
 		  -- Inclusive <= attention cutoff, matching the count query above.
 		  AND (NOT $13::boolean OR (t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $14::timestamptz))
-		ORDER BY
-			CASE WHEN $15::text = 'oldest_open'
-			     THEN ROW(COALESCE(stats.opened_at, t.last_message_at), t.id)
-			     ELSE ROW(t.last_message_at, t.id) END
+		` + orderClause + `
 		LIMIT $12`
-	// The allow-listed Sort is folded into the fixed ORDER BY expression via a
-	// bound parameter ($15) — no string interpolation of user input reaches SQL.
-	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.CustomerEmail, f.ExcludeThreadID, f.Limit, f.NeedsAttention, f.AttentionCutoff, f.Sort)
+	// f.Sort is allow-listed upstream; it only selects between two static query
+	// variants — no user input reaches the SQL text.
+	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.CustomerEmail, f.ExcludeThreadID, f.Limit, f.NeedsAttention, f.AttentionCutoff)
 	if err != nil {
 		return nil, err
 	}

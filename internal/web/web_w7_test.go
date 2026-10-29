@@ -142,3 +142,30 @@ func TestInboxFooterAndSortTruncation(t *testing.T) {
 		t.Fatalf("oldest_open page must be capped to the page size, got %d links", strings.Count(body2, `class="thread-link"`))
 	}
 }
+
+// Exactly pageSize oldest_open results must fit the page without a truncation
+// notice: the query fetches pageSize+1 rows, so the boundary is strictly
+// greater-than (off-by-one guard).
+func TestInboxOldestOpenExactPageSizeNoTruncation(t *testing.T) {
+	testInboxPageSize = 2
+	t.Cleanup(func() { testInboxPageSize = 0 })
+	_, store, router, _, _ := buildAccountTestServer(t)
+	now := time.Now().UTC()
+	for i := 0; i < 2; i++ {
+		id := uuid.New()
+		store.threads[id] = sqlc.Thread{ID: id, AccountID: "support", SubjectDisplay: fmt.Sprintf("Boundary %d", i), Status: sqlc.ThreadStatusNew, CustomerEmail: "b@x.example", LastMessageAt: now.Add(-time.Duration(i) * time.Hour)}
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new&sort=oldest_open", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "list-truncated") {
+		t.Error("exactly pageSize oldest_open results must not show the truncation notice")
+	}
+	if strings.Count(body, `class="thread-link"`) != 2 {
+		t.Errorf("expected both threads rendered, got %d", strings.Count(body, `class="thread-link"`))
+	}
+}

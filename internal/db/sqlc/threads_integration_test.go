@@ -104,10 +104,10 @@ func TestGetThreadByIDScansOpenedAt(t *testing.T) {
 }
 
 // TestListThreadsSortOrders verifies the W7 allow-listed sort orders against real
-// PostgreSQL: "newest" orders by last_message_at DESC and "oldest_open" by the
-// earliest inbound message time (opened_at) ASC. The sort value is a bound
-// parameter folded into a fixed ORDER BY expression, so an unknown value must
-// fall back to newest rather than alter the query shape.
+// PostgreSQL: "newest" orders by last_message_at DESC (index-orderable literal
+// ORDER BY) and "oldest_open" by the earliest inbound message time (opened_at)
+// ASC. The sort value only selects between two static query variants in Go, so
+// an unknown value must fall back to newest rather than alter the query shape.
 func TestListThreadsSortOrders(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -144,11 +144,11 @@ func TestListThreadsSortOrders(t *testing.T) {
 	newest := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	// Thread A opened earliest but replied to last (newest last_message_at).
 	// Thread B opened later but never received a follow-up.
-	a, err := q.CreateThread(ctx, sqlc.Thread{AccountID: "support", SubjectNormalized: "sort-a", SubjectDisplay: "Sort A", Status: sqlc.ThreadStatusNew, CustomerEmail: "a@example.com"})
+	a, err := q.CreateThread(ctx, sqlc.Thread{AccountID: "support", SubjectNormalized: "sort-a", SubjectDisplay: "Sort A", Status: sqlc.ThreadStatusNew, CustomerEmail: "a@example.com", LastMessageAt: newest.Add(-1 * time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := q.CreateThread(ctx, sqlc.Thread{AccountID: "support", SubjectNormalized: "sort-b", SubjectDisplay: "Sort B", Status: sqlc.ThreadStatusNew, CustomerEmail: "b@example.com"})
+	b, err := q.CreateThread(ctx, sqlc.Thread{AccountID: "support", SubjectNormalized: "sort-b", SubjectDisplay: "Sort B", Status: sqlc.ThreadStatusNew, CustomerEmail: "b@example.com", LastMessageAt: newest.Add(-48 * time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2971,9 +2971,13 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   color: var(--text-muted, #5b5b6b);
 }
 
-/* W7: per-thread "Assign to…" submenu inside the row menu popover */
+/* W7: per-thread "Assign to…" submenu inside the row menu popover.
+   Kept inline-flex so it lines up with the sibling quick-action forms; the
+   show/hide rules below toggle between none and inline-flex consistently. */
 .row-menu-submenu {
   position: static;
+  display: inline-flex;
+  align-items: center;
 }
 
 .row-menu-submenu > summary {
@@ -3052,8 +3056,9 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   display: inline-flex;
 }
 
-.thread-row:hover .actions-cell .row-menu-submenu {
-  display: block;
+.thread-row:hover .actions-cell .row-menu-submenu,
+.thread-row:focus-within .actions-cell .row-menu-submenu {
+  display: inline-flex;
 }
 
 /* W7: keyboard navigation highlight */
@@ -3063,9 +3068,11 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   outline-offset: -2px;
 }
 
+/* W7 mobile: the ⋯ popover stays the primary affordance below 768px, but the
+   "Assign to…" submenu must remain reachable there too — only the hover
+   quick-action buttons are hidden (they would overlap the narrow row). */
 @media (max-width: 767px) {
-  .actions-cell .row-quick-actions,
-  .actions-cell .row-menu-submenu {
+  .actions-cell .row-quick-actions {
     display: none !important;
   }
 }
