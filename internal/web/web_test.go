@@ -346,6 +346,13 @@ func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) 
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if f.Sort == "oldest_open" {
+			ti, tj := s.threadOpenedAt(out[i]), s.threadOpenedAt(out[j])
+			if ti.Equal(tj) {
+				return strings.Compare(out[i].ID.String(), out[j].ID.String()) < 0
+			}
+			return ti.Before(tj)
+		}
 		if out[i].LastMessageAt.Equal(out[j].LastMessageAt) {
 			return strings.Compare(out[i].ID.String(), out[j].ID.String()) > 0
 		}
@@ -1292,7 +1299,7 @@ func TestInboxCompactChromeFiltersAndRefreshFragment(t *testing.T) {
 		`class="filter-inline"`,
 		`class="search-icon" aria-hidden="true"`,
 		`name="q" value="compact"`,
-		`class="search-clear" href="/threads?status=open"`,
+		`class="search-clear" href="/threads?sort=newest&amp;status=open"`,
 		`name="assignee"`,
 		`data-inbox-results`,
 		`data-refresh-link`,
@@ -1620,7 +1627,7 @@ func TestInboxKeysetPaginationAndSearch(t *testing.T) {
 		t.Fatalf("unexpected first page: status %d, links %d", first.Code, strings.Count(body, `class="thread-link"`))
 	}
 	const marker = `href="`
-	end := strings.Index(body, `">Older threads</a>`)
+	end := strings.Index(body, `">Load older</a>`)
 	if end < 0 {
 		t.Fatal("missing next page")
 	}
@@ -1635,7 +1642,7 @@ func TestInboxKeysetPaginationAndSearch(t *testing.T) {
 	second := httptest.NewRecorder()
 	router.ServeHTTP(second, httptest.NewRequest(http.MethodGet, next, nil))
 	secondBody := second.Body.String()
-	if second.Code != http.StatusOK || strings.Count(secondBody, `class="thread-link"`) != 5 || strings.Contains(secondBody, "Match inserted") || strings.Contains(secondBody, `>Older threads</a>`) {
+	if second.Code != http.StatusOK || strings.Count(secondBody, `class="thread-link"`) != 5 || strings.Contains(secondBody, "Match inserted") || strings.Contains(secondBody, `>Load older</a>`) {
 		t.Fatalf("unexpected second page: status %d, links %d", second.Code, strings.Count(secondBody, `class="thread-link"`))
 	}
 	for i := 0; i < 105; i++ {
@@ -2711,7 +2718,7 @@ func TestSettingsAttentionAgeDaysRange(t *testing.T) {
 // tag counts: hidden return_to inputs and the Refresh button embed the refresh URL, which
 // carries the same before/id params.
 func findAttentionBeforeLink(body string) []string {
-	return regexp.MustCompile(`<a class="btn btn-secondary" href="(/threads\?[^"]*)">Older threads</a>`).FindStringSubmatch(body)
+	return regexp.MustCompile(`<a class="btn btn-secondary" href="(/threads\?[^"]*)">Load older</a>`).FindStringSubmatch(body)
 }
 
 func TestNeedsAttentionPagination(t *testing.T) {

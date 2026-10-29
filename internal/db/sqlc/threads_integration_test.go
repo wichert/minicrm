@@ -102,3 +102,113 @@ func TestGetThreadByIDScansOpenedAt(t *testing.T) {
 		t.Fatalf("LockThreadByID returned %v, want %v", locked.ID, created.ID)
 	}
 }
+
+// TestListThreadsSortOrders verifies the W7 allow-listed sort orders against real
+// PostgreSQL: "newest" orders by last_message_at DESC (index-orderable literal
+// ORDER BY) and "oldest_open" by the earliest inbound message time (opened_at)
+// ASC. The sort value only selects between two static query variants in Go, so
+// an unknown value must fall back to newest rather than alter the query shape.
+func TestListThreadsSortOrders(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set TEST_DATABASE_URL to a disposable PostgreSQL database")
+	}
+	ctx := context.Background()
+	config, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "threads_test_" + uuid.NewString()[:8]
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	db := stdlib.OpenDB(*config.ConnConfig)
+	defer db.Close()
+	if err := migrations.Up(ctx, db, "support"); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	q := sqlc.New(pool)
+
+	newest := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	// Thread A opened earliest but replied to last (newest last_message_at).
+	// Thread B opened later but never received a follow-up.
+	a, err := q.CreateThread(ctx, sqlc.Thread{AccountID: "support", SubjectNormalized: "sort-a", SubjectDisplay: "Sort A", Status: sqlc.ThreadStatusNew, CustomerEmail: "a@example.com", LastMessageAt: newest.Add(-1 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := q.CreateThread(ctx, sqlc.Thread{AccountID: "support", SubjectNormalized: "sort-b", SubjectDisplay: "Sort B", Status: sqlc.ThreadStatusNew, CustomerEmail: "b@example.com", LastMessageAt: newest.Add(-48 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emails := []sqlc.Email{
+		{ThreadID: a.ID, AccountID: "support", Direction: "inbound", FromAddress: "a@example.com", Subject: "Sort A", MessageID: "<sort-a-0@test>", SentAt: newest.Add(-72 * time.Hour)},
+		{ThreadID: a.ID, AccountID: "support", Direction: "inbound", FromAddress: "a@example.com", Subject: "Sort A", MessageID: "<sort-a-1@test>", SentAt: newest.Add(-1 * time.Hour)},
+		{ThreadID: b.ID, AccountID: "support", Direction: "inbound", FromAddress: "b@example.com", Subject: "Sort B", MessageID: "<sort-b-0@test>", SentAt: newest.Add(-48 * time.Hour)},
+	}
+	for _, e := range emails {
+		if _, err := q.CreateEmail(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	openOnly := true
+	byNewest, err := q.ListThreads(ctx, sqlc.ListThreadsFilter{
+		AllowedAccounts: []string{"support"},
+		OpenOnly:        openOnly,
+		Sort:            "newest",
+		Limit:           10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byNewest) != 2 || byNewest[0].ID != a.ID || byNewest[1].ID != b.ID {
+		t.Fatalf("newest order = [%s, %s], want [A, B]", idsOf(byNewest)[0], idsOf(byNewest)[1])
+	}
+
+	byOldest, err := q.ListThreads(ctx, sqlc.ListThreadsFilter{
+		AllowedAccounts: []string{"support"},
+		OpenOnly:        openOnly,
+		Sort:            "oldest_open",
+		Limit:           10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byOldest) != 2 || byOldest[0].ID != a.ID || byOldest[1].ID != b.ID {
+		t.Fatalf("oldest_open order = [%s, %s], want [A, B] (A opened first)", idsOf(byOldest)[0], idsOf(byOldest)[1])
+	}
+
+	// An unknown sort value must fall back to newest, never interpolate.
+	byUnknown, err := q.ListThreads(ctx, sqlc.ListThreadsFilter{
+		AllowedAccounts: []string{"support"},
+		OpenOnly:        openOnly,
+		Sort:            "invalid'; DROP TABLE threads; --",
+		Limit:           10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byUnknown) != 2 || byUnknown[0].ID != a.ID {
+		t.Fatalf("unknown sort must fall back to newest, got [%s, %s]", idsOf(byUnknown)[0], idsOf(byUnknown)[1])
+	}
+}
+
+func idsOf(threads []sqlc.Thread) []string {
+	out := make([]string, len(threads))
+	for i, t := range threads {
+		out[i] = t.ID.String()
+	}
+	return out
+}

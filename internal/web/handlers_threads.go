@@ -300,7 +300,7 @@ func sanitizeInboxBackURL(raw, requestHost string) string {
 	// into pane row links (it would hide the pane on the next click) or a stray
 	// thread= (the link's own ?thread= must win). Filtering preserves the original
 	// parameter order so round-tripped URLs stay stable.
-	allowed := map[string]bool{"status": true, "assignee": true, "account": true, "q": true, "before": true, "id": true}
+	allowed := map[string]bool{"status": true, "assignee": true, "account": true, "q": true, "sort": true, "before": true, "id": true}
 	var kept []string
 	for _, pair := range strings.Split(u.RawQuery, "&") {
 		key := pair
@@ -394,6 +394,13 @@ func (s *Server) loadAuthorizedThread(ctx context.Context, user sqlc.User, threa
 	return thread, nil
 }
 
+// inboxSortKeys is the closed allow-list of supported sort orders; anything
+// else falls back to "newest" so an unknown value can never reach SQL.
+const (
+	inboxSortNewest     = "newest"
+	inboxSortOldestOpen = "oldest_open"
+)
+
 // assigneeFilterForUser returns the active users that may be offered as an inbox assignee filter.
 func assigneeFilterUsers(allUsers []sqlc.User, current sqlc.User) []sqlc.User {
 	out := make([]sqlc.User, 0, len(allUsers))
@@ -430,6 +437,7 @@ type inboxListFilters struct {
 	assigneeID     *uuid.UUID
 	unassigned     bool
 	search         string
+	sort           string
 	beforeTime     *time.Time
 	beforeID       *uuid.UUID
 }
@@ -489,6 +497,15 @@ func parseInboxListFilters(r *http.Request, user sqlc.User) (inboxListFilters, e
 	}
 	f.search = search
 
+	switch sortParam := strings.TrimSpace(r.URL.Query().Get("sort")); sortParam {
+	case "":
+		f.sort = inboxSortNewest
+	case inboxSortNewest, inboxSortOldestOpen:
+		f.sort = sortParam
+	default:
+		f.sort = inboxSortNewest
+	}
+
 	before, id := r.URL.Query().Get("before"), r.URL.Query().Get("id")
 	if before != "" || id != "" {
 		parsedTime, timeErr := time.Parse(time.RFC3339Nano, before)
@@ -533,6 +550,7 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 			AccountID:       filters.accountID,
 			AllowedAccounts: user.AllowedAccounts,
 			Search:          filters.search,
+			Sort:            filters.sort,
 			BeforeTime:      filters.beforeTime,
 			BeforeID:        filters.beforeID,
 			Limit:           s.pageSize + 1,
@@ -553,12 +571,24 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 		data.Counts = counts
 	}
 	nextURL := ""
-	if len(threads) > s.pageSize {
+	var totalKnown int
+	// W7: the oldest_open sort intentionally has no cursor pagination. The query
+	// fetches pageSize+1 rows; when it returns more than a full page, cap it and
+	// flag the truncation instead of paging. Exactly pageSize results fit on the
+	// page without a truncation notice.
+	sortTruncated := filters.sort == inboxSortOldestOpen && len(threads) > s.pageSize
+	if sortTruncated {
+		threads = threads[:s.pageSize]
+	}
+	if len(threads) > s.pageSize && !sortTruncated {
 		threads = threads[:s.pageSize]
 		last := threads[len(threads)-1]
-		query := url.Values{"status": {filters.statusStr}, "assignee": {filters.assigneeFilter}, "account": {filters.accountFilter}, "q": {filters.search},
+		query := url.Values{"status": {filters.statusStr}, "assignee": {filters.assigneeFilter}, "account": {filters.accountFilter}, "q": {filters.search}, "sort": {filters.sort},
 			"before": {last.LastMessageAt.UTC().Format(time.RFC3339Nano)}, "id": {last.ID.String()}}
 		nextURL = "/threads?" + query.Encode()
+		totalKnown = 0
+	} else {
+		totalKnown = len(threads)
 	}
 	users, _ := s.store.ListUsers(ctx)
 	userNames := make(map[uuid.UUID]string, len(users))
@@ -567,6 +597,17 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 	}
 
 	assignableUsers := assigneeFilterUsers(users, user)
+
+	// W7: per-thread "Assign to" lists — only active users with access to the
+	// thread's own account, filtered server-side (never client-side).
+	assignableByThread := make(map[string][]sqlc.User, len(threads))
+	for _, th := range threads {
+		for _, u := range users {
+			if u.IsActive && u.HasAccountAccess(th.AccountID) {
+				assignableByThread[th.ID.String()] = append(assignableByThread[th.ID.String()], u)
+			}
+		}
+	}
 
 	items := make([]views.ThreadSummaryItem, 0, len(threads))
 	for _, th := range threads {
@@ -603,6 +644,8 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 	// Clearing the search keeps the active tab and other filters.
 	clearSearchQuery := r.URL.Query()
 	clearSearchQuery.Del("q")
+	// W7: the ClearSearch link keeps the current sort; rebuild it with sort added.
+	clearSearchQuery.Set("sort", filters.sort)
 	clearSearchQuery.Del("before")
 	clearSearchQuery.Del("id")
 	clearSearchQuery.Set("status", filters.statusStr)
@@ -611,12 +654,16 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 	data.StatusFilter = filters.statusStr
 	data.AssigneeFilter = filters.assigneeFilter
 	data.Users = assignableUsers
+	data.AssignableUsers = assignableByThread
 	data.DisplayTZ = displayTZ
 	data.ShowAccountUI = user.HasMultipleAccounts()
 	data.ShowAssigneeUI = len(assignableUsers) > 1
 	data.AccountFilter = filters.accountFilter
 	data.Accounts = s.accessibleAccounts(user)
 	data.Search = filters.search
+	data.Sort = filters.sort
+	data.SortTruncated = sortTruncated
+	data.TotalCount = totalKnown
 	data.ClearSearchURL = "/threads?" + clearSearchQuery.Encode()
 	data.NextURL = nextURL
 	data.RefreshURL = r.URL.RequestURI()
