@@ -134,6 +134,9 @@ type ThreadDetailViewData struct {
 	Errors []string
 	// ReplyErrors are reply-composition errors rendered next to the reply field only.
 	ReplyErrors []string
+	// List, when non-nil, renders the inbox list pane beside the thread for the
+	// W4 split layout on wide viewports (nil with ?nolist=1 or on list failure).
+	List *InboxViewData
 }
 
 // AccountSettingsView pairs a configured mail account with its current settings.
@@ -701,9 +704,9 @@ var templateFuncs = template.FuncMap{
 }
 
 var (
-	inboxFullTmpl = template.Must(template.New("inbox").Funcs(templateFuncs).Parse(layoutHeader + inboxBody + layoutFooter))
+	inboxFullTmpl = template.Must(template.New("inbox").Funcs(templateFuncs).Parse(inboxTablePartial + layoutHeader + inboxBody + layoutFooter))
 	inboxPartTmpl = template.Must(template.New("inbox_partial").Funcs(templateFuncs).Parse(inboxTablePartial))
-	detailTmpl    = template.Must(template.New("detail").Funcs(templateFuncs).Parse(layoutHeader + threadDetailBody + layoutFooter))
+	detailTmpl    = template.Must(template.New("detail").Funcs(templateFuncs).Parse(inboxTablePartial + layoutHeader + threadDetailBody + layoutFooter))
 	settingsTmpl  = template.Must(template.New("settings").Funcs(templateFuncs).Parse(layoutHeader + settingsBody + layoutFooter))
 	errorTmpl     = template.Must(template.New("error").Funcs(templateFuncs).Parse(layoutHeader + errorBody + layoutFooter))
 	emailBodyTmpl = template.Must(template.New("email_body").Funcs(templateFuncs).Parse(isolatedEmailBodyHTML))
@@ -712,7 +715,7 @@ var (
 // RenderInbox renders either the full inbox page or the partial thread table.
 func RenderInbox(w io.Writer, data InboxViewData, partialOnly bool) error {
 	if partialOnly {
-		return inboxPartTmpl.Execute(w, data)
+		return inboxPartTmpl.ExecuteTemplate(w, "inbox_table", data)
 	}
 	return inboxFullTmpl.Execute(w, data)
 }
@@ -812,7 +815,7 @@ const layoutFooter = `
 </html>
 `
 
-const inboxTablePartial = `
+const inboxTablePartial = `{{define "inbox_table"}}
 {{if .Threads}}
 <div class="table-wrap">
   <table class="threads-table">
@@ -883,6 +886,7 @@ const inboxTablePartial = `
 </div>
 {{else}}
 <p class="card empty-state">No threads match these filters.</p>
+{{end}}
 {{end}}
 `
 
@@ -969,14 +973,104 @@ const inboxBody = `
   </div>
 </form>
 {{end}}
-` + inboxTablePartial + `
+{{template "inbox_table" .}}
 {{if .NextURL}}<p class="older-threads"><a class="btn btn-secondary" href="{{.NextURL}}">Older threads</a></p>{{end}}
 </div>
 `
 
 const threadDetailBody = `
+<div class="split-layout" data-split-layout>
+{{if .List}}
+  <aside class="split-list" data-split-list id="split-list" aria-label="Thread list">
+  <h1 class="sr-only">Threads</h1>
+  <div class="inbox-toolbar" data-inbox-toolbar>
+    <div class="tab-strip" data-tab-strip>
+    <nav class="tabs" aria-label="Thread status">
+      <a class="tab" href="/threads?status=attention&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "attention"}} aria-current="true"{{end}}>Needs attention <span class="count-pill">{{.List.Counts.NeedsAttention}}</span></a>
+      <a class="tab" href="/threads?status=new&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "new"}} aria-current="true"{{end}}>New <span class="count-pill">{{.List.Counts.New}}</span></a>
+      <a class="tab" href="/threads?status=open&assignee=me&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if and (eq .List.StatusFilter "open") (eq .List.AssigneeFilter "me")}} aria-current="true"{{end}}>Mine <span class="count-pill">{{.List.Counts.Mine}}</span></a>
+      <details class="row-menu tab-more" data-row-menu{{if or (eq .List.StatusFilter "in_progress") (eq .List.StatusFilter "completed") (eq .List.StatusFilter "spam") (eq .List.StatusFilter "all")}} data-active-more="true"{{end}}>
+        <summary class="tab tab-more-trigger">More{{if eq .List.StatusFilter "in_progress"}}: In progress <span class="count-pill">{{.List.Counts.InProgress}}</span>{{else if eq .List.StatusFilter "completed"}}: Completed <span class="count-pill">{{.List.Counts.Completed}}</span>{{else if eq .List.StatusFilter "spam"}}: Spam <span class="count-pill">{{.List.Counts.Spam}}</span>{{else if eq .List.StatusFilter "all"}}: All <span class="count-pill">{{.List.Counts.All}}</span>{{end}}</summary>
+        <div class="row-menu-popover tab-more-popover">
+          <a class="row-menu-item tab-more-item" href="/threads?status=in_progress&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "in_progress"}} aria-current="true"{{end}}><span>In progress</span> <span class="count-pill">{{.List.Counts.InProgress}}</span></a>
+          <a class="row-menu-item tab-more-item" href="/threads?status=completed&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "completed"}} aria-current="true"{{end}}><span>Completed</span> <span class="count-pill">{{.List.Counts.Completed}}</span></a>
+          <a class="row-menu-item tab-more-item" href="/threads?status=spam&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "spam"}} aria-current="true"{{end}}><span>Spam</span> <span class="count-pill">{{.List.Counts.Spam}}</span></a>
+          <a class="row-menu-item tab-more-item" href="/threads?status=all&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "all"}} aria-current="true"{{end}}><span>All</span> <span class="count-pill">{{.List.Counts.All}}</span></a>
+        </div>
+      </details>
+    </nav>
+    </div>
+    <div class="results-status">
+      <p class="results-count">{{len .List.Threads}} thread{{if ne (len .List.Threads) 1}}s{{end}}{{if .List.NextURL}} &middot; more available{{end}}</p>
+      <a class="refresh-meta" href="{{.List.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
+    </div>
+  </div>
+  <div class="filter-sticky">
+    <form method="get" action="/threads" class="filter-inline">
+      <input type="hidden" name="status" value="{{.List.StatusFilter}}">
+      <label class="inline-field search-field">
+        <span class="search-icon" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </span>
+        <span class="sr-only">Customer or subject</span>
+        <input type="search" name="q" value="{{.List.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
+        {{if .List.Search}}<a class="search-clear" href="{{.List.ClearSearchURL}}" aria-label="Clear search">&times;</a>{{end}}
+      </label>
+      {{if .List.ShowAssigneeUI}}
+      <label class="inline-field inline-field-compact">
+        <span class="sr-only">Assignee</span>
+        <select name="assignee" data-hx-get="/threads" aria-label="Assignee">
+          <option value="" {{if eq .List.AssigneeFilter ""}}selected{{end}}>Anyone</option>
+          <option value="me" {{if eq .List.AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
+          <option value="unassigned" {{if eq .List.AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
+          {{range .List.Users}}
+          <option value="{{.ID}}" {{if eq .ID.String $.List.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
+          {{end}}
+        </select>
+      </label>
+      {{end}}
+      {{if .List.ShowAccountUI}}
+      <label class="inline-field inline-field-compact">
+        <span class="sr-only">Account</span>
+        <select name="account" data-hx-get="/threads" aria-label="Account">
+          <option value="">All accounts</option>
+          {{range .List.Accounts}}
+          <option value="{{.ID}}" {{if eq .ID $.List.AccountFilter}}selected{{end}}>{{.Name}}</option>
+          {{end}}
+        </select>
+      </label>
+      {{end}}
+      <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
+    </form>
+  </div>
+  <div data-inbox-results>
+  {{if and .List.Threads (ne .List.StatusFilter "completed") (ne .List.StatusFilter "spam")}}
+  <form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-has-selection="false" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
+    <input type="hidden" name="return_to" value="{{.List.RefreshURL}}">
+    <label class="mobile-select-all"><input type="checkbox" data-select-all-mobile> Select all on page</label>
+    <span data-selected-count aria-live="polite"></span>
+    <div class="bulk-actions-controls">
+      <label class="inline-field">Assign selected to
+        <select name="assignee_id" aria-label="Assignee for selected conversations" data-bulk-assignee disabled aria-disabled="true">
+          <option value="">Choose assignee</option>
+          {{range .List.Users}}<option value="{{.ID}}">{{.DisplayName}}</option>{{end}}
+        </select>
+      </label>
+      <button type="submit" formaction="/threads/bulk-assign" class="btn btn-secondary btn-small" data-bulk-action="assign" disabled aria-disabled="true">Assign selected</button>
+      <button type="submit" formaction="/threads/bulk-complete" class="btn btn-secondary btn-small" data-bulk-action="complete" data-confirm="Mark selected conversations as completed and queue moves to Archive?" data-confirm-action="Complete selected" data-confirm-submit disabled aria-disabled="true">Complete selected</button>
+      <button type="submit" class="btn btn-danger btn-small" data-bulk-action="spam" data-confirm-submit disabled aria-disabled="true">Mark selected as spam</button>
+      <button type="button" class="btn btn-secondary btn-small" data-bulk-clear>Clear</button>
+    </div>
+  </form>
+  {{end}}
+  {{template "inbox_table" .List}}
+  {{if .List.NextURL}}<p class="older-threads"><a class="btn btn-secondary" href="{{.List.NextURL}}">Older threads</a></p>{{end}}
+  </div>
+  </aside>
+{{end}}
+  <div class="split-detail" data-split-detail>
 <div class="thread-top-bar thread-detail">
-  <a class="back-link" href="{{if .BackURL}}{{.BackURL}}{{else}}/threads{{end}}">&larr; Back to threads</a>
+  <a class="back-link" href="{{if .BackURL}}{{.BackURL}}{{else}}/threads{{end}}" aria-hidden="true" tabindex="-1">&larr; Back to threads</a>
   <a class="btn btn-secondary btn-small" href="/threads/{{.Thread.ID}}">Refresh</a>
 </div>
 <div class="card thread-header-card">

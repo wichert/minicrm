@@ -388,77 +388,104 @@ func assigneeFilterUsers(allUsers []sqlc.User, current sqlc.User) []sqlc.User {
 	return out
 }
 
-// HandleListThreads renders the filterable thread inbox.
-func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	user, _ := auth.UserFromContext(ctx)
+// Sentinel errors for malformed inbox query strings; both render styled 400 pages.
+var (
+	errInboxInvalidSearch = errors.New("invalid search")
+	errInboxInvalidPage   = errors.New("invalid page")
+)
 
+// inboxListFilters holds the parsed inbox filter query shared by the inbox page
+// and the split-pane list rendered inside the thread detail (W4).
+type inboxListFilters struct {
+	statusStr      string
+	statusFilter   *sqlc.ThreadStatus
+	openOnly       bool
+	needsAttention bool
+	accountFilter  string
+	accountID      *string
+	assigneeFilter string
+	assigneeID     *uuid.UUID
+	unassigned     bool
+	search         string
+	beforeTime     *time.Time
+	beforeID       *uuid.UUID
+}
+
+// parseInboxListFilters parses the /threads query-string filters (status, assignee,
+// account, q, before/id cursor). Unknown status values fall back to the default
+// open queue instead of reaching PostgreSQL.
+func parseInboxListFilters(r *http.Request, user sqlc.User) (inboxListFilters, error) {
 	rawStatus := strings.TrimSpace(r.URL.Query().Get("status"))
-	var statusStr string
-	var statusFilter *sqlc.ThreadStatus
-	openOnly := false
-	needsAttention := false
+	var f inboxListFilters
 	switch rawStatus {
 	case "", "open":
-		statusStr = "open"
-		openOnly = true
+		f.statusStr = "open"
+		f.openOnly = true
 	case "attention":
-		statusStr = "attention"
-		needsAttention = true
+		f.statusStr = "attention"
+		f.needsAttention = true
 	case "all":
-		statusStr = "all"
+		f.statusStr = "all"
 	case string(sqlc.ThreadStatusNew), string(sqlc.ThreadStatusInProgress), string(sqlc.ThreadStatusCompleted), string(sqlc.ThreadStatusSpam):
 		st := sqlc.ThreadStatus(rawStatus)
-		statusFilter = &st
-		statusStr = rawStatus
+		f.statusFilter = &st
+		f.statusStr = rawStatus
 	default:
-		// Unknown status values fall back to the default open queue instead of reaching PostgreSQL.
-		statusStr = "open"
-		openOnly = true
+		f.statusStr = "open"
+		f.openOnly = true
 	}
 
 	accountFilter := strings.TrimSpace(r.URL.Query().Get("account"))
-	var accountIDFilter *string
 	if accountFilter != "" && user.HasAccountAccess(accountFilter) {
-		accountIDFilter = &accountFilter
+		f.accountID = &accountFilter
 	} else {
 		accountFilter = ""
 	}
+	f.accountFilter = accountFilter
 
 	assigneeFilter := strings.TrimSpace(r.URL.Query().Get("assignee"))
-	var assigneeID *uuid.UUID
-	unassigned := false
 	switch assigneeFilter {
 	case "":
 	case "me":
 		id := user.ID
-		assigneeID = &id
+		f.assigneeID = &id
 	case "unassigned":
-		unassigned = true
+		f.unassigned = true
 	default:
 		if parsed, err := uuid.Parse(assigneeFilter); err == nil {
-			assigneeID = &parsed
+			f.assigneeID = &parsed
 		} else {
 			assigneeFilter = ""
 		}
 	}
+	f.assigneeFilter = assigneeFilter
 
 	search := strings.TrimSpace(r.URL.Query().Get("q"))
 	if len(search) > 200 {
-		s.renderError(w, r, http.StatusBadRequest, "Invalid search", "Search terms must be at most 200 bytes.")
-		return
+		return f, errInboxInvalidSearch
 	}
-	var beforeTime *time.Time
-	var beforeID *uuid.UUID
+	f.search = search
+
 	before, id := r.URL.Query().Get("before"), r.URL.Query().Get("id")
 	if before != "" || id != "" {
 		parsedTime, timeErr := time.Parse(time.RFC3339Nano, before)
 		parsedID, idErr := uuid.Parse(id)
 		if timeErr != nil || idErr != nil {
-			s.renderError(w, r, http.StatusBadRequest, "Invalid page", "That inbox page link is not valid.")
-			return
+			return f, errInboxInvalidPage
 		}
-		beforeTime, beforeID = &parsedTime, &parsedID
+		f.beforeTime, f.beforeID = &parsedTime, &parsedID
+	}
+	return f, nil
+}
+
+// loadInboxList loads the inbox list (filters, threads, counts) using the same
+// query-string semantics as the inbox page. HandleListThreads and the split-pane
+// list on the thread detail share this one code path; page chrome (title, flash,
+// navigation) is filled in by the caller.
+func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Request) (views.InboxViewData, error) {
+	filters, err := parseInboxListFilters(r, user)
+	if err != nil {
+		return views.InboxViewData{}, err
 	}
 
 	displayTZ := s.currentDisplayTimezone(ctx)
@@ -466,32 +493,29 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	attentionCutoff := now.Add(-time.Duration(attentionAgeDays) * 24 * time.Hour)
 
+	var data views.InboxViewData
 	var threads []sqlc.Thread
-	var counts sqlc.ThreadCounts
 	if len(user.AllowedAccounts) > 0 {
-		var err error
 		threads, err = s.store.ListThreads(ctx, sqlc.ListThreadsFilter{
-			Status:          statusFilter,
-			OpenOnly:        openOnly,
-			NeedsAttention:  needsAttention,
+			Status:          filters.statusFilter,
+			OpenOnly:        filters.openOnly,
+			NeedsAttention:  filters.needsAttention,
 			AttentionCutoff: attentionCutoff,
-			AssigneeID:      assigneeID,
-			Unassigned:      unassigned,
-			AccountID:       accountIDFilter,
+			AssigneeID:      filters.assigneeID,
+			Unassigned:      filters.unassigned,
+			AccountID:       filters.accountID,
 			AllowedAccounts: user.AllowedAccounts,
-			Search:          search,
-			BeforeTime:      beforeTime,
-			BeforeID:        beforeID,
+			Search:          filters.search,
+			BeforeTime:      filters.beforeTime,
+			BeforeID:        filters.beforeID,
 			Limit:           s.pageSize + 1,
 		})
 		if err != nil {
-			s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not load the conversation threads. Please try again.")
-			return
+			return views.InboxViewData{}, err
 		}
-		var countErr error
-		counts, countErr = s.store.CountThreadsByTab(ctx, sqlc.CountThreadsFilter{
+		counts, countErr := s.store.CountThreadsByTab(ctx, sqlc.CountThreadsFilter{
 			AllowedAccounts: user.AllowedAccounts,
-			AccountID:       accountIDFilter,
+			AccountID:       filters.accountID,
 			UserID:          user.ID,
 			AttentionCutoff: attentionCutoff,
 		})
@@ -499,16 +523,16 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 			// The thread list still renders; only the tab count pills degrade to 0.
 			slog.ErrorContext(ctx, "count_threads_by_tab_failed", slog.String("error", countErr.Error()))
 		}
+		data.Counts = counts
 	}
 	nextURL := ""
 	if len(threads) > s.pageSize {
 		threads = threads[:s.pageSize]
 		last := threads[len(threads)-1]
-		query := url.Values{"status": {statusStr}, "assignee": {assigneeFilter}, "account": {accountFilter}, "q": {search},
+		query := url.Values{"status": {filters.statusStr}, "assignee": {filters.assigneeFilter}, "account": {filters.accountFilter}, "q": {filters.search},
 			"before": {last.LastMessageAt.UTC().Format(time.RFC3339Nano)}, "id": {last.ID.String()}}
 		nextURL = "/threads?" + query.Encode()
 	}
-	refreshURL := r.URL.RequestURI()
 	users, _ := s.store.ListUsers(ctx)
 	userNames := make(map[uuid.UUID]string, len(users))
 	for _, u := range users {
@@ -547,46 +571,64 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 
 	s.audit.LogDataAccess(ctx, "thread_list", "inbox")
 
+	// Clearing the search keeps the active tab and other filters.
+	clearSearchQuery := r.URL.Query()
+	clearSearchQuery.Del("q")
+	clearSearchQuery.Del("before")
+	clearSearchQuery.Del("id")
+	clearSearchQuery.Set("status", filters.statusStr)
+
+	data.Threads = items
+	data.StatusFilter = filters.statusStr
+	data.AssigneeFilter = filters.assigneeFilter
+	data.Users = assignableUsers
+	data.DisplayTZ = displayTZ
+	data.ShowAccountUI = user.HasMultipleAccounts()
+	data.ShowAssigneeUI = len(assignableUsers) > 1
+	data.AccountFilter = filters.accountFilter
+	data.Accounts = s.accessibleAccounts(user)
+	data.Search = filters.search
+	data.ClearSearchURL = "/threads?" + clearSearchQuery.Encode()
+	data.NextURL = nextURL
+	data.RefreshURL = r.URL.RequestURI()
+	return data, nil
+}
+
+// HandleListThreads renders the filterable thread inbox.
+func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	user, _ := auth.UserFromContext(ctx)
+
+	list, listErr := s.loadInboxList(ctx, user, r)
+	if listErr != nil {
+		switch {
+		case errors.Is(listErr, errInboxInvalidSearch):
+			s.renderError(w, r, http.StatusBadRequest, "Invalid search", "Search terms must be at most 200 bytes.")
+		case errors.Is(listErr, errInboxInvalidPage):
+			s.renderError(w, r, http.StatusBadRequest, "Invalid page", "That inbox page link is not valid.")
+		default:
+			s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not load the conversation threads. Please try again.")
+		}
+		return
+	}
+
 	if s.sessions != nil {
 		if currentInbox := sanitizeInboxBackURL(r.URL.RequestURI(), r.Host); currentInbox != "" {
 			s.sessions.Put(ctx, lastInboxURLSessionKey, currentInbox)
 		}
 	}
 
-	// Clearing the search keeps the active tab and other filters.
-	clearSearchQuery := r.URL.Query()
-	clearSearchQuery.Del("q")
-	clearSearchQuery.Del("before")
-	clearSearchQuery.Del("id")
-	clearSearchQuery.Set("status", statusStr)
-	clearSearchURL := "/threads?" + clearSearchQuery.Encode()
-
 	b := s.appBranding()
 	partial := r.Header.Get("HX-Request") == "true"
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := views.RenderInbox(w, views.InboxViewData{
-		Title:          "Threads",
-		AppName:        b.Name,
-		AppShortName:   b.ShortName,
-		Flash:          s.popFlash(r),
-		ActiveNav:      "threads",
-		CurrentUser:    user,
-		Threads:        items,
-		Counts:         counts,
-		StatusFilter:   statusStr,
-		AssigneeFilter: assigneeFilter,
-		Users:          assignableUsers,
-		DisplayTZ:      displayTZ,
-		ShowAccountUI:  user.HasMultipleAccounts(),
-		ShowAssigneeUI: len(assignableUsers) > 1,
-		AccountFilter:  accountFilter,
-		Accounts:       s.accessibleAccounts(user),
-		Search:         search,
-		ClearSearchURL: clearSearchURL,
-		NextURL:        nextURL,
-		RefreshURL:     refreshURL,
-		WideLayout:     true,
-	}, partial); err != nil {
+	list.Title = "Threads"
+	list.AppName = b.Name
+	list.AppShortName = b.ShortName
+	list.Flash = s.popFlash(r)
+	list.ActiveNav = "threads"
+	list.CurrentUser = user
+	list.WideLayout = true
+	if err := views.RenderInbox(w, list, partial); err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not render the conversation threads.")
 	}
 }
@@ -617,6 +659,21 @@ func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user sqlc.User, thread sqlc.Thread, status int, headerErrors, replyErrors []string, replyDraft string) {
 	ctx := r.Context()
 
+	// W4 split layout: the same document also renders the inbox list pane.
+	// `?nolist=1` is the only escape hatch (never set by JS); without it the
+	// detail request's own filter params (status/assignee/account/q) select the
+	// queue shown in the pane, defaulting to the open inbox.
+	var listData *views.InboxViewData
+	if r.URL.Query().Get("nolist") != "1" {
+		list, listErr := s.loadInboxList(ctx, user, r)
+		if listErr == nil {
+			list.WideLayout = false // pane chrome only; the page container is driven by the detail view
+			listData = &list
+		} else if !errors.Is(listErr, errInboxInvalidSearch) && !errors.Is(listErr, errInboxInvalidPage) {
+			// A list failure must never take down the thread page; degrade to single pane.
+			slog.ErrorContext(ctx, "split_list_load_failed", slog.String("error", listErr.Error()))
+		}
+	}
 	var reopensThread *sqlc.Thread
 	reopenCompletedAt := ""
 	reopenCompletedBy := ""
@@ -752,6 +809,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		w.WriteHeader(status)
 	}
 	if err := views.RenderThreadDetail(w, views.ThreadDetailViewData{
+		WideLayout:         listData != nil, // the split layout needs the wide container
 		Title:              thread.SubjectDisplay,
 		AppName:            b.Name,
 		AppShortName:       b.ShortName,
@@ -778,6 +836,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		DraftRevision:      draft.Revision.String(),
 		DraftFormatting:    draft.Formatting,
 		PreviousThreads:    history,
+		List:               listData,
 		Errors:             headerErrors,
 		ReplyErrors:        replyErrors,
 	}); err != nil && status == http.StatusOK {

@@ -2496,7 +2496,7 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 	reqEvil.Header.Set("Referer", "https://evil.example.com/threads?status=new")
 	recEvil := httptest.NewRecorder()
 	router.ServeHTTP(recEvil, reqEvil)
-	if !strings.Contains(recEvil.Body.String(), `<a class="back-link" href="/threads">`) {
+	if !strings.Contains(recEvil.Body.String(), `class="back-link" href="/threads"`) {
 		t.Fatalf("expected cross-origin Referer to fall back to /threads, got: %s", recEvil.Body.String())
 	}
 }

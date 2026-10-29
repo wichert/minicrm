@@ -941,11 +941,72 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
+  // W4: the split-pane inbox list lives in the DOM on every thread detail page,
+  // but CSS only shows it at >=1280px. Below the breakpoint the hidden pane must
+  // not be reachable, so `inert` (or an aria-hidden/tabindex fallback) is toggled
+  // from a matchMedia listener — firing on change means an in-place resize across
+  // 1280px updates it without a reload. Pure attribute writes: CSP forbids
+  // inline styles/scripts.
+  function setupSplitListInert() {
+    var pane = document.querySelector("[data-split-list]");
+    if (!pane || !window.matchMedia) {
+      return;
+    }
+    var query = window.matchMedia("(min-width: 1280px)");
+    function apply() {
+      if (query.matches) {
+        if (pane.inert) {
+          pane.inert = false;
+        } else {
+          pane.removeAttribute("inert");
+          pane.removeAttribute("aria-hidden");
+          pane.querySelectorAll("[data-inert-tabindex]").forEach(function (el) {
+            el.tabIndex = Number(el.getAttribute("data-inert-tabindex"));
+            el.removeAttribute("data-inert-tabindex");
+          });
+        }
+        pane.removeAttribute("data-inert-pane");
+        var backLink = document.querySelector(".back-link");
+        if (backLink) {
+          backLink.removeAttribute("data-inert-back");
+          backLink.removeAttribute("aria-hidden");
+          backLink.removeAttribute("tabindex");
+        }
+      } else {
+        pane.setAttribute("data-inert-pane", "true");
+        if ("inert" in pane) {
+          pane.inert = true;
+        } else {
+          pane.setAttribute("aria-hidden", "true");
+          pane.querySelectorAll("a[href], button, input, select, textarea, summary, [tabindex]").forEach(function (el) {
+            if (!el.hasAttribute("data-inert-tabindex")) {
+              el.setAttribute("data-inert-tabindex", String(el.tabIndex));
+              el.tabIndex = -1;
+            }
+          });
+        }
+        var back = document.querySelector(".back-link");
+        if (back) {
+          back.setAttribute("data-inert-back", "true");
+          back.setAttribute("aria-hidden", "true");
+          back.setAttribute("tabindex", "-1");
+        }
+      }
+    }
+    apply();
+    if (typeof query.addEventListener === "function") {
+      query.addEventListener("change", apply);
+    } else if (typeof query.addListener === "function") {
+      query.addListener(apply);
+    }
+  }
+
   setupRowLinks();
   setupRowMenus();
   setupBulkForm();
   setupInboxAutoRefresh();
   setupPullToRefresh();
+  setupSplitListInert();
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {

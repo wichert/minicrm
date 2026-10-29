@@ -2588,3 +2588,48 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
     font-size: 0.88rem;
   }
 }
+
+/* ---------- W4: master-detail split on wide viewports ---------- */
+
+/* Base (below 1280px) the split document is byte-for-byte today's single-pane
+   detail page: the list pane is hidden and the detail fills the page. */
+.split-layout {
+  display: block;
+}
+
+.split-list {
+  display: none;
+}
+
+.split-detail {
+  min-width: 0;
+}
+
+/* One media query is the entire layout mechanism: no reload, no JS, no state
+   loss when a resize crosses 1280px. */
+@media (min-width: 1280px) {
+  .split-layout {
+    display: grid;
+    grid-template-columns: clamp(340px, 32vw, 460px) minmax(0, 1fr);
+    gap: 1rem;
+    align-items: start;
+  }
+
+  .split-list {
+    display: block;
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+  }
+
+  /* W4: below 1280px the split list is display:none and must not be focusable;
+     in split mode the back link is shown again instead. */
+  .split-list[data-inert-pane="true"] {
+    display: none;
+  }
+
+  .back-link[data-inert-back] {
+    display: inline-block;
+  }
+}
