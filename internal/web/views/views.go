@@ -1095,7 +1095,7 @@ const threadDetailBody = `
 </div>
 
 {{if .ReplyAllowed}}
-<button type="button" class="reply-sticky-bar" data-open-reply-sheet>Reply</button>
+<button type="button" class="reply-sticky-bar" data-open-reply-sheet aria-controls="reply" aria-expanded="false">Reply</button>
 {{end}}
 
 <div class="section-heading">
@@ -1191,7 +1191,7 @@ const threadDetailBody = `
 <section class="card reply-card" id="reply">
   <button type="button" class="reply-sheet-close" data-close-reply-sheet aria-label="Close reply">&times;</button>
   <h2>Send reply</h2>
-  <details class="reply-context-details">
+  <details class="reply-context-details" open>
     <summary>{{.AccountName}} &rarr; {{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else}}{{.Thread.CustomerEmail}}{{end}}</summary>
     <dl class="reply-context">
       <div><dt>From</dt><dd>{{.AccountName}} &lt;{{.AccountFromAddress}}&gt;</dd></div>

@@ -875,15 +875,29 @@ document.addEventListener("DOMContentLoaded", function () {
   var replyCard = document.querySelector(".reply-card");
   var stickyBar = document.querySelector(".reply-sticky-bar");
   if (replyCard && stickyBar) {
-    var closeReplySheet = function () {
-      delete replyCard.dataset.sheetOpen;
-      delete document.body.dataset.replySheetOpen;
+    var lastFocused = null;
+    var setSheetState = function (open) {
+      if (open) {
+        replyCard.dataset.sheetOpen = "true";
+        document.body.dataset.replySheetOpen = "true";
+      } else {
+        delete replyCard.dataset.sheetOpen;
+        delete document.body.dataset.replySheetOpen;
+      }
+      stickyBar.setAttribute("aria-expanded", open ? "true" : "false");
     };
+    var closeReplySheet = function () {
+      if (!replyCard.matches("[data-sheet-open=true]")) { return; }
+      setSheetState(false);
+      if (lastFocused) { lastFocused.focus(); lastFocused = null; }
+    };
+    stickyBar.setAttribute("aria-controls", "reply");
+    stickyBar.setAttribute("aria-expanded", "false");
     stickyBar.addEventListener("click", function () {
-      replyCard.dataset.sheetOpen = "true";
-      document.body.dataset.replySheetOpen = "true";
+      lastFocused = document.activeElement;
+      setSheetState(true);
       replyCard.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
-      var body = replyCard.querySelector("textarea[name=body_text]");
+      var body = replyCard.querySelector("textarea[name=body_text]") || replyCard.querySelector("[data-editor] [contenteditable]");
       if (body) { body.focus(); }
     });
     var closeBtn = replyCard.querySelector("[data-close-reply-sheet]");
@@ -892,17 +906,23 @@ document.addEventListener("DOMContentLoaded", function () {
       if (event.key !== "Escape" || !replyCard.matches("[data-sheet-open=true]")) { return; }
       closeReplySheet();
     });
+    // Cmd/Ctrl+Enter sends from both the plain-text textarea and the rich-text
+    // ProseMirror editor. Bound at form level because editor.js hides the
+    // textarea, and preventDefault stops ProseMirror's own Mod-Enter block split.
+    var sendForm = replyCard.querySelector("form.reply-form");
     var sendBtn = replyCard.querySelector("button[type=submit]");
     var bodyField = replyCard.querySelector("textarea[name=body_text]");
-    if (sendBtn && bodyField) {
-      bodyField.addEventListener("keydown", function (event) {
+    var sending = false;
+    if (sendForm && sendBtn) {
+      sendForm.addEventListener("submit", function () { sending = true; });
+      sendForm.addEventListener("keydown", function (event) {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.altKey && !event.shiftKey) {
-          if (!bodyField.value.trim()) { return; }
           event.preventDefault();
-          if (sendBtn.disabled || sendBtn.dataset.keySend === "true") { return; }
-          sendBtn.dataset.keySend = "true";
+          event.stopPropagation();
+          if (sending || sendBtn.disabled) { return; }
+          if (!bodyField || !bodyField.value.trim()) { return; }
+          sending = true;
           sendBtn.click();
-          delete sendBtn.dataset.keySend;
         }
       });
     }

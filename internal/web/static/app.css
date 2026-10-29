@@ -2460,7 +2460,7 @@ html.js .reply-sticky-bar {
   z-index: 25;
   width: 100%;
   margin: 0;
-  padding: 0.85rem 1rem calc(0.85rem + env(safe-area-inset-bottom, 0px));
+  padding: 0.85rem 1rem;
   border: none;
   border-radius: 0;
   background: var(--primary);
@@ -2474,7 +2474,7 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
 @media (max-width: 768px) {
   html.js .reply-sticky-bar { display: block; }
   html.js .thread-detail {
-    --reply-bar-height: 3.6rem;
+    --reply-bar-height: 3.2rem;
     padding-bottom: calc(var(--reply-bar-height) + env(safe-area-inset-bottom, 0px));
   }
 }
@@ -2494,7 +2494,7 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
     background: var(--surface);
   }
   html.js body[data-reply-sheet-open="true"] { overflow: hidden; }
-  .reply-sheet-close {
+  html.js .reply-card[data-sheet-open="true"] .reply-sheet-close {
     display: block;
     position: sticky;
     top: 0.25rem;
@@ -2539,34 +2539,43 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   }
 }
 
-/* Collapse the routing block: one-line summary with the full From/To detail
-   kept in the DOM behind the <details> chevron (also works without JS). */
-.reply-context-details > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  cursor: pointer;
-  margin-bottom: 0.7rem;
-  padding: 0.45rem 0.7rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 0.45rem;
-  font-size: 0.9rem;
-}
-.reply-context-details > summary::before {
-  content: "\25B8";
-  color: var(--muted);
-}
-.reply-context-details[open] > summary::before {
-  content: "\25BE";
-}
+/* The routing block renders as an always-open <details> so desktop keeps the
+   always-visible From/To dl; only mobile collapses it behind the summary. */
+.reply-context-details > summary { list-style: none; }
 .reply-context-details > summary::-webkit-details-marker { display: none; }
-.reply-context-details[open] .reply-context { margin-top: 0.4rem; }
+.reply-context-details > summary::before { content: none; }
+.reply-context-details[open] > summary::before { content: none; }
+.reply-context-details .reply-context { margin: 0; }
 
-/* The sender <email> is in the summary line already; keep it for screen
-   readers and larger screens only. */
+/* Mobile-only collapse: one-line summary with the full From/To detail kept
+   in the DOM behind the <details> chevron. */
 @media (max-width: 768px) {
-  .message-address { display: none; }
+  .reply-context-details > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    cursor: pointer;
+    margin-bottom: 0.7rem;
+    padding: 0.45rem 0.7rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 0.45rem;
+    font-size: 0.9rem;
+  }
+  .reply-context-details:not([open]) > summary::before {
+    content: "\25B8";
+    color: var(--muted);
+  }
+  .reply-context-details[open] > summary::before {
+    content: "\25BE";
+  }
+  .reply-context-details[open] .reply-context { margin-top: 0.4rem; }
+}
+
+/* On collapsed (mobile) messages the sender <email> is in the summary line
+   already; inside an expanded message it stays visible. */
+@media (max-width: 768px) {
+  details.message:not([open]) .message-address { display: none; }
 }
 
 @media (max-width: 480px) {
