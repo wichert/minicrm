@@ -1379,6 +1379,52 @@ h3 {
 
 /* ---------- Inbox rows ---------- */
 
+/* W3: contextual bulk bar. Without JS (no html.js class) the bar renders
+   inline and visible exactly as before. With JS it floats fixed at the
+   bottom of the viewport and is revealed only when a selection exists. */
+html.js .bulk-actions {
+  position: fixed;
+  left: 50%;
+  bottom: 1rem;
+  transform: translateX(-50%);
+  /* Intentionally at/below the row-menu popover z-index (also 30, later in
+     source order wins): an open row menu must paint above the bulk bar. */
+  z-index: 30;
+  width: max-content;
+  max-width: min(46rem, calc(100vw - 2rem));
+  padding: 0.6rem 0.9rem;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 0.6rem;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+}
+html.js .bulk-actions[data-has-selection="false"] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(0.75rem);
+}
+html.js .bulk-actions[data-has-selection="true"] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+@media (prefers-reduced-motion: no-preference) {
+  html.js .bulk-actions {
+    transition: opacity 160ms ease, transform 160ms ease, visibility 160ms;
+  }
+}
+html.js [data-inbox-results] {
+  --bulk-bar-height: 4.5rem;
+}
+html.js [data-inbox-results][data-selection-mode="true"],
+html.js [data-inbox-results]:has(.bulk-actions[data-has-selection="true"]) {
+  /* NOTE: :has() degrades silently on older Safari (<15.4)/Chromium (<105);
+     those browsers just lose the selection-mode padding, not the feature. */
+  padding-bottom: var(--bulk-bar-height);
+}
+
 .bulk-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin: 0; padding: 0; }
 .bulk-actions-controls { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; }
 .btn:disabled,
@@ -2273,7 +2319,44 @@ details.message:not([open]) > .message-header {
   }
 
   .mobile-select-all { display: inline-flex; align-items: center; gap: 0.4rem; }
-  .bulk-actions[data-has-selection="false"] .bulk-actions-controls { display: none; }
+
+  /* W3 mobile: the bar becomes a full-width bottom sheet; per-row checkboxes
+     appear only in selection mode (JS-gated via html.js). */
+  html.js .bulk-actions {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    transform: none;
+    width: auto;
+    max-width: none;
+    border-radius: 0.6rem 0.6rem 0 0;
+    padding-bottom: max(0.6rem, env(safe-area-inset-bottom));
+  }
+  html.js .bulk-actions[data-has-selection="false"] {
+    transform: translateY(0.75rem);
+  }
+  html.js .bulk-actions[data-has-selection="true"] {
+    transform: translateY(0);
+  }
+  html.js [data-inbox-results] {
+    --bulk-bar-height: 7.5rem;
+  }
+  html.js .threads-table th.select-cell,
+  html.js .threads-table td.select-cell {
+    display: none;
+  }
+  html.js [data-inbox-results][data-selection-mode="true"] .threads-table td.select-cell {
+    display: block;
+  }
+  html.js [data-inbox-results]:has([data-select-thread]:checked) .threads-table td.select-cell {
+    /* NOTE: :has() degrades silently on older Safari (<15.4)/Chromium (<105);
+       checkboxes there stay hidden until selection mode is entered via JS. */
+    display: block;
+  }
+
+  /* The Clear button only works with JS; keep it out of the no-JS render. */
+  [data-bulk-clear] { display: none; }
+  html.js [data-bulk-clear] { display: inline-block; }
 
   /* Card order on phones: subject/snippet first, then one line of status, age,
      actions and the selection checkbox. */
@@ -2353,6 +2436,13 @@ details.message:not([open]) > .message-header {
     padding-left: 0;
     margin-left: -0.2rem;
   }
+}
+
+/* Desktop bar keeps a hidden "Select" row-menu item off; on mobile it is the
+   non-gestural way into selection mode. */
+.row-menu [data-row-select] { display: none; }
+@media (max-width: 768px) {
+  .row-menu [data-row-select] { display: block; }
 }
 
 @media (max-width: 480px) {
