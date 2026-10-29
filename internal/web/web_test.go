@@ -932,18 +932,21 @@ func TestAccountIsolationAndConditionalAccountsUI(t *testing.T) {
 		t.Fatalf("multi /threads status %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `name="account"`) || !strings.Contains(body, `<th scope="col">Account</th>`) {
-		t.Fatalf("expected account filter and column for multi-account user: %s", body)
+	if !strings.Contains(body, `name="account"`) {
+		t.Fatalf("expected account filter for multi-account user: %s", body)
 	}
 	if !strings.Contains(body, "Customer Support") || !strings.Contains(body, "Sales") {
 		t.Fatalf("expected account names in inbox: %s", body)
+	}
+	if !strings.Contains(body, `class="thread-meta"`) || !strings.Contains(body, "Customer Support &middot; ") {
+		t.Fatalf("expected account name in the merged thread metadata line: %s", body)
 	}
 
 	// Single-account user: account UI is hidden.
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?as=single", nil))
 	body = rec.Body.String()
-	if strings.Contains(body, `name="account"`) || strings.Contains(body, `<th scope="col">Account</th>`) {
+	if strings.Contains(body, `name="account"`) {
 		t.Fatalf("expected no account UI for single-account user: %s", body)
 	}
 	if strings.Contains(body, "Sales Ticket") {
@@ -1176,7 +1179,7 @@ func TestInboxAssigneeFilterAndTableSemantics(t *testing.T) {
 	if strings.Contains(body, `style="`) {
 		t.Fatalf("inbox must not contain inline styles: %s", body)
 	}
-	for _, want := range []string{`name="assignee"`, `scope="col"`, "Showing 1 thread", `aria-current="page"`} {
+	for _, want := range []string{`name="assignee"`, `scope="col"`, `class="results-count"`, "1 thread", `aria-current="page"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected %q in inbox: %s", want, body)
 		}
@@ -1187,6 +1190,87 @@ func TestInboxAssigneeFilterAndTableSemantics(t *testing.T) {
 	body = rec.Body.String()
 	if !strings.Contains(body, "Nobody") || strings.Contains(body, ">Mine<") || strings.Contains(body, "Someone else") {
 		t.Fatalf("unassigned filter mismatch: %s", body)
+	}
+}
+
+func TestInboxCompactChromeFiltersAndRefreshFragment(t *testing.T) {
+	_, store, router, multiUser, singleUser := buildAccountTestServer(t)
+	// A second active user removes the single-member assignee shortcut.
+	store.users[singleUser.ID] = singleUser
+	threadID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Compact chrome", Status: sqlc.ThreadStatusNew,
+		AssigneeID: &multiUser.ID, CustomerEmail: "lena@client.example", LastMessageAt: time.Now().UTC(),
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?q=compact", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// One filter row: search with icon + clear link, both selects, no Search button.
+	for _, want := range []string{
+		`class="filter-inline"`,
+		`class="search-icon" aria-hidden="true"`,
+		`name="q" value="compact"`,
+		`class="search-clear" href="/threads?status=open"`,
+		`name="assignee"`,
+		`data-inbox-results`,
+		`data-refresh-link`,
+		`<noscript><button type="submit"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %q in compact inbox: %s", want, body)
+		}
+	}
+	if strings.Contains(body, `>Search</button>`) {
+		t.Fatalf("inbox must not render a dedicated Search button: %s", body)
+	}
+	// The results count moved next to the tab strip.
+	if !strings.Contains(body, `class="inbox-toolbar" data-inbox-toolbar`) || !strings.Contains(body, `class="results-count"`) {
+		t.Fatalf("expected the results area in the tab strip: %s", body)
+	}
+	// The customer email stays out of the list, in the title attribute only.
+	if strings.Contains(body, ">lena@client.example<") {
+		t.Fatalf("inbox rows must not print the customer email: %s", body)
+	}
+	if !strings.Contains(body, `title="lena@client.example"`) {
+		t.Fatalf("expected the customer email in the row title: %s", body)
+	}
+
+	// Fragment refresh returns just the results region for the auto-refresh loop.
+	fragRec := httptest.NewRecorder()
+	fragReq := httptest.NewRequest(http.MethodGet, "/threads?q=compact", nil)
+	fragReq.Header.Set("HX-Request", "true")
+	router.ServeHTTP(fragRec, fragReq)
+	frag := fragRec.Body.String()
+	if !strings.Contains(frag, `class="thread-link"`) {
+		t.Fatalf("expected thread rows in the refresh fragment: %s", frag)
+	}
+	if strings.Contains(frag, `data-inbox-toolbar`) {
+		t.Fatalf("refresh fragment must not re-render the toolbar: %s", frag)
+	}
+}
+
+func TestInboxHidesAssigneeFilterForSoloTeamMember(t *testing.T) {
+	_, store, router, soloUser, _ := buildAccountTestServer(t)
+	// Only one active user can access the account, so the assignee select is pointless.
+	store.adminUser = soloUser
+	store.users = map[uuid.UUID]sqlc.User{soloUser.ID: soloUser}
+	store.threads[uuid.New()] = sqlc.Thread{
+		ID: uuid.New(), AccountID: "support", SubjectDisplay: "Solo", Status: sqlc.ThreadStatusNew,
+		LastMessageAt: time.Now().UTC(),
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads status = %d", rec.Code)
+	}
+	if body := rec.Body.String(); strings.Contains(body, `name="assignee"`) {
+		t.Fatalf("expected no assignee filter for a solo team member: %s", body)
 	}
 }
 
@@ -1789,8 +1873,13 @@ func TestQueueCompleteRowAndBulkComplete(t *testing.T) {
 			t.Fatalf("queue missing %q: %s", want, listBody)
 		}
 	}
-	if strings.Index(listBody, `<th scope="col">Thread</th>`) > strings.Index(listBody, `<th scope="col">Account</th>`) {
-		t.Fatalf("expected Thread column before Account column in inbox header: %s", listBody)
+	if !strings.Contains(listBody, `<th scope="col">Thread</th>`) {
+		t.Fatalf("expected a Thread column in the inbox header: %s", listBody)
+	}
+	// Account and assignee live in the merged metadata line under the subject, not
+	// in their own columns, so the row stays two lines on desktop.
+	if !strings.Contains(listBody, `class="thread-meta"`) {
+		t.Fatalf("expected the merged thread metadata line: %s", listBody)
 	}
 
 	// Row complete on a new thread uses CompleteFromNew, records 2 thread_events, queues 1 move_to_archive, and redirects to return_to.
@@ -2306,7 +2395,7 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 		LastMessageAt: now, OpenedAt: now,
 	}
 
-	// 1. Inbox renders Refresh button with active filter params and head PWA metadata
+	// 1. Inbox renders the refresh affordance with active filter params and head PWA metadata
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new&assignee=me", nil))
 	if rec.Code != http.StatusOK {
@@ -2317,11 +2406,16 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 		`<link rel="manifest" href="/manifest.webmanifest">`,
 		`<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">`,
 		`<meta name="theme-color" content="#14142b">`,
-		`href="/threads?status=new&amp;assignee=me">Refresh</a>`,
+		`<h1 class="sr-only">Threads</h1>`,
+		`href="/threads?status=new&amp;assignee=me" data-refresh-link`,
+		`data-refresh-status`,
 	} {
 		if !strings.Contains(inboxHTML, want) {
 			t.Fatalf("expected %q in inbox HTML", want)
 		}
+	}
+	if strings.Contains(inboxHTML, `<h1>Threads</h1>`) {
+		t.Fatalf("inbox should not render a visible Threads heading")
 	}
 
 	// 2. Thread detail preserves BackURL from same-origin /threads?... Referer and rejects cross-origin Referer

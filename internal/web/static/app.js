@@ -1,33 +1,63 @@
 /* MiniCRM progressive enhancement: filter auto-submit, confirmations, notice dismissal, frame resize */
 document.addEventListener("DOMContentLoaded", function () {
-  document.querySelectorAll("[data-hx-get]").forEach(function (el) {
-    el.addEventListener("change", function () {
-      if (el.form) {
-        el.form.submit();
-      }
+  function setupFilterAutoSubmit() {
+    document.querySelectorAll("[data-hx-get]").forEach(function (el) {
+      el.addEventListener("change", function () {
+        if (el.form) {
+          el.form.submit();
+        }
+      });
     });
-  });
+  }
 
-  document.querySelectorAll("[data-tab-strip]").forEach(function (strip) {
+  setupFilterAutoSubmit();
+
+  // Tab-strip chrome is re-applied after a fragment swap, so the setup is a
+  // function rather than a one-shot DOMContentLoaded pass. Per-strip observers
+  // are bound once (the strip element survives a swap); focus listeners are
+  // bound per tab because swapResults() replaces the tab children.
+  function updateTabOverflow(strip) {
     var tabs = strip.querySelector(".tabs");
     if (!tabs) {
       return;
     }
-    function updateOverflow() {
-      strip.dataset.overflowStart = tabs.scrollLeft > 1 ? "true" : "false";
-      strip.dataset.overflowEnd = tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1 ? "true" : "false";
-    }
-    tabs.addEventListener("scroll", updateOverflow, { passive: true });
-    tabs.querySelectorAll(".tab").forEach(function (tab) {
-      tab.addEventListener("focus", function () {
-        tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+    strip.dataset.overflowStart = tabs.scrollLeft > 1 ? "true" : "false";
+    strip.dataset.overflowEnd = tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1 ? "true" : "false";
+  }
+
+  function setupTabStrips(root) {
+    (root || document).querySelectorAll("[data-tab-strip]").forEach(function (strip) {
+      var tabs = strip.querySelector(".tabs");
+      if (!tabs) {
+        return;
+      }
+      if (strip.dataset.tabStripReady !== "true") {
+        strip.dataset.tabStripReady = "true";
+        tabs.addEventListener("scroll", function () {
+          updateTabOverflow(strip);
+        }, { passive: true });
+        if (typeof ResizeObserver === "function") {
+          new ResizeObserver(function () {
+            updateTabOverflow(strip);
+          }).observe(tabs);
+        }
+      }
+      tabs.querySelectorAll(".tab").forEach(function (tab) {
+        if (tab.dataset.tabFocusBound === "true") {
+          return;
+        }
+        tab.dataset.tabFocusBound = "true";
+        tab.addEventListener("focus", function () {
+          tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+        });
       });
+      updateTabOverflow(strip);
     });
-    window.addEventListener("resize", updateOverflow);
-    if (typeof ResizeObserver === "function") {
-      new ResizeObserver(updateOverflow).observe(tabs);
-    }
-    updateOverflow();
+  }
+
+  setupTabStrips();
+  window.addEventListener("resize", function () {
+    document.querySelectorAll("[data-tab-strip]").forEach(updateTabOverflow);
   });
 
   document.querySelectorAll("form[data-draft-url]").forEach(function (form) {
@@ -82,8 +112,16 @@ document.addEventListener("DOMContentLoaded", function () {
     window.addEventListener("beforeunload", function (event) { if (!sending && (snapshot() !== saved || saving)) { event.preventDefault(); event.returnValue = ""; } });
   });
 
-  var bulkForm = document.getElementById("bulk-spam-form");
-  if (bulkForm) {
+  // Exposed to swapResults(): after a fragment swap the bulk bar must recount
+  // the (re-applied) selection so the buttons and confirmation text stay right.
+  var refreshBulkSelection = null;
+
+  function setupBulkForm() {
+    refreshBulkSelection = null;
+    var bulkForm = document.getElementById("bulk-spam-form");
+    if (!bulkForm) {
+      return;
+    }
     var checks = Array.from(document.querySelectorAll("[data-select-thread]"));
     var selectAll = Array.from(document.querySelectorAll("[data-select-all], [data-select-all-mobile]"));
     var count = bulkForm.querySelector("[data-selected-count]");
@@ -142,6 +180,7 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     });
     refreshSelection();
+    refreshBulkSelection = refreshSelection;
   }
 
   // Confirm consequential actions in an accessible in-page dialog. When <dialog> is
@@ -371,35 +410,55 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
-  document.querySelectorAll("tr[data-row-href]").forEach(function (row) {
-    row.addEventListener("click", function (event) {
-      if (event.target.closest("a, button, input, select, label, summary, details")) {
-        return;
-      }
-      if (window.getSelection && String(window.getSelection())) {
-        return;
-      }
-      window.location.href = row.getAttribute("data-row-href");
+  function setupRowLinks() {
+    document.querySelectorAll("tr[data-row-href]").forEach(function (row) {
+      row.addEventListener("click", function (event) {
+        if (event.target.closest("a, button, input, select, label, summary, details")) {
+          return;
+        }
+        if (window.getSelection && String(window.getSelection())) {
+          return;
+        }
+        // Navigate through the row's own anchor instead of assigning a string read
+        // from the DOM: the destination stays a URL the browser resolved from the
+        // rendered markup, and no script-visible string is ever treated as a URL.
+        var link = row.querySelector("a.thread-link[href]");
+        if (link) {
+          link.click();
+        }
+      });
     });
-  });
+  }
 
-  var rowMenus = Array.from(document.querySelectorAll("details[data-row-menu]"));
-  if (rowMenus.length) {
-    rowMenus.forEach(function (menu) {
+  // Row-menu setup runs after every fragment swap, so the document-level
+  // click/Escape handlers are hoisted into a one-time setup and query the open
+  // menus at event time instead of closing over a stale row list.
+  var rowMenuDocumentReady = false;
+
+  function setupRowMenus(root) {
+    (root || document).querySelectorAll("details[data-row-menu]").forEach(function (menu) {
+      if (menu.dataset.rowMenuReady === "true") {
+        return;
+      }
+      menu.dataset.rowMenuReady = "true";
       menu.addEventListener("toggle", function () {
         if (!menu.open) {
           return;
         }
-        rowMenus.forEach(function (other) {
-          if (other !== menu && other.open) {
+        document.querySelectorAll("details[data-row-menu][open]").forEach(function (other) {
+          if (other !== menu) {
             other.open = false;
           }
         });
       });
     });
+    if (rowMenuDocumentReady) {
+      return;
+    }
+    rowMenuDocumentReady = true;
     document.addEventListener("click", function (event) {
-      rowMenus.forEach(function (menu) {
-        if (menu.open && !menu.contains(event.target)) {
+      document.querySelectorAll("details[data-row-menu][open]").forEach(function (menu) {
+        if (!menu.contains(event.target)) {
           menu.open = false;
         }
       });
@@ -408,10 +467,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (event.key !== "Escape") {
         return;
       }
-      rowMenus.forEach(function (menu) {
-        if (!menu.open) {
-          return;
-        }
+      document.querySelectorAll("details[data-row-menu][open]").forEach(function (menu) {
         var summary = menu.querySelector("summary");
         menu.open = false;
         if (summary) {
@@ -420,6 +476,293 @@ document.addEventListener("DOMContentLoaded", function () {
       });
     });
   }
+
+  /* Inbox auto-refresh: keeps the thread list current without a Refresh button.
+     Polls the current URL every 60s and swaps just the results region, pausing
+     while the tab is hidden, text is selected, a row menu or confirm <dialog> is
+     open, a bulk selection exists, or an inline edit has unsaved input. Plain
+     links keep working without JavaScript.
+
+     The fetch stays a full-page GET on purpose: the server's HX-Request partial
+     (inboxTablePartial) contains only the table, while this loop also refreshes
+     the .results-count and .tabs toolbar regions from next to it. Fetching the
+     full document keeps those three regions correct with one request and no
+     duplicated template; the cost is a page-sized response every 60s on the
+     inbox only. */
+  var inboxRefresh = { refresh: null, repaint: null };
+
+  function setupInboxAutoRefresh() {
+    var results = document.querySelector("[data-inbox-results]");
+    var statusEl = document.querySelector("[data-refresh-status]");
+    var refreshLink = document.querySelector("[data-refresh-link]");
+    if (!results) {
+      return;
+    }
+    var intervalMs = 60000;
+    var lastLoadedAt = Date.now();
+    var inflight = false;
+
+    function hasPendingInlineEdit() {
+      var active = document.activeElement;
+      if (!active) {
+        return false;
+      }
+      var tag = active.tagName;
+      if (tag === "TEXTAREA" || tag === "SELECT") {
+        return true;
+      }
+      if (tag === "INPUT") {
+        var type = (active.getAttribute("type") || "text").toLowerCase();
+        if (type === "checkbox" || type === "radio" || type === "submit") {
+          return false;
+        }
+        return String(active.value) !== String(active.defaultValue || "");
+      }
+      return Boolean(active.isContentEditable);
+    }
+
+    // Auto-refresh contract: a swap must never destroy work in progress. Pause
+    // while the tab is hidden, text is selected, a row menu or confirm <dialog>
+    // is open, any thread checkbox is checked, focus is inside the results
+    // region, or an inline edit is dirty. swapResults() additionally re-applies
+    // checked thread IDs and refreshes the bulk bar counts (belt and braces).
+    function isPaused() {
+      if (document.visibilityState === "hidden") {
+        return true;
+      }
+      if (window.getSelection && String(window.getSelection())) {
+        return true;
+      }
+      if (document.querySelector("details[data-row-menu][open]")) {
+        return true;
+      }
+      if (document.querySelector("dialog[open]")) {
+        return true;
+      }
+      if (document.querySelector("[data-select-thread]:checked")) {
+        return true;
+      }
+      // Never yank the DOM out from under a focused row action or menu trigger.
+      if (results.contains(document.activeElement)) {
+        return true;
+      }
+      return hasPendingInlineEdit();
+    }
+
+    function checkedThreadIDs() {
+      return Array.from(document.querySelectorAll("[data-select-thread]:checked")).map(function (check) {
+        return check.value;
+      });
+    }
+
+    function formatAgo(ms) {
+      var seconds = Math.max(0, Math.round(ms / 1000));
+      if (seconds < 45) {
+        return "Updated just now";
+      }
+      var minutes = Math.round(seconds / 60);
+      if (minutes < 60) {
+        return "Updated " + minutes + "m ago";
+      }
+      var hours = Math.round(minutes / 60);
+      return "Updated " + hours + "h ago";
+    }
+
+    function paintStatus() {
+      if (!statusEl) {
+        return;
+      }
+      statusEl.textContent = formatAgo(Date.now() - lastLoadedAt);
+    }
+
+    // Contract: preserving the selection across the swap is mandatory even
+    // though isPaused() normally prevents a swap while rows are checked. Re-apply
+    // the checked IDs that still exist after the swap, then recount the bulk bar.
+    function swapResults(html) {
+      var doc = new DOMParser().parseFromString(html, "text/html");
+      var fresh = doc.querySelector("[data-inbox-results]");
+      if (!fresh) {
+        return false;
+      }
+      var selected = checkedThreadIDs();
+      results.innerHTML = fresh.innerHTML;
+      if (selected.length) {
+        var wanted = new Set(selected);
+        results.querySelectorAll("[data-select-thread]").forEach(function (check) {
+          if (wanted.has(check.value)) {
+            check.checked = true;
+          }
+        });
+      }
+      var freshCount = doc.querySelector(".results-count");
+      var count = document.querySelector(".inbox-toolbar .results-count");
+      if (freshCount && count) {
+        count.innerHTML = freshCount.innerHTML;
+      }
+      var freshTabs = doc.querySelector(".tabs");
+      var tabs = document.querySelector(".inbox-toolbar .tabs");
+      if (freshTabs && tabs) {
+        tabs.innerHTML = freshTabs.innerHTML;
+        setupTabStrips(document.querySelector(".inbox-toolbar"));
+      }
+      setupRowLinks();
+      setupRowMenus();
+      setupBulkForm();
+      if (refreshBulkSelection) {
+        refreshBulkSelection();
+      }
+      return true;
+    }
+
+    function refresh() {
+      if (inflight) {
+        return;
+      }
+      inflight = true;
+      var url = window.location.pathname + window.location.search;
+      fetch(url, { headers: { "X-Requested-With": "fetch" }, credentials: "same-origin" })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("refresh failed");
+          }
+          return response.text();
+        })
+        .then(function (html) {
+          if (swapResults(html)) {
+            lastLoadedAt = Date.now();
+            paintStatus();
+          }
+        })
+        .catch(function () {
+          // Keep the current list; the next tick or a manual click retries.
+        })
+        .then(function () {
+          inflight = false;
+        });
+    }
+
+    if (refreshLink) {
+      refreshLink.addEventListener("click", function (event) {
+        event.preventDefault();
+        refresh();
+      });
+    }
+    inboxRefresh.refresh = refresh;
+    inboxRefresh.repaint = paintStatus;
+
+    paintStatus();
+    window.setInterval(paintStatus, 30000);
+    window.setInterval(function () {
+      if (!isPaused()) {
+        refresh();
+      }
+    }, intervalMs);
+    // Returning to the tab repaints the age label; a restored back/forward cache
+    // entry revalidates the list once (the zero-cost fallback the plan asks for).
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") {
+        paintStatus();
+      }
+    });
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted && !isPaused()) {
+        refresh();
+      }
+    });
+  }
+
+  /* Pull-to-refresh on touch devices, on top of the browser's own overscroll
+     behaviour (which reloads the whole page and loses scroll position). Only
+     engages at the very top of the document, ignores gestures that start in a
+     paused context, and never fires while another refresh is running. */
+  function setupPullToRefresh() {
+    if (!("ontouchstart" in window) || !document.querySelector("[data-inbox-results]")) {
+      return;
+    }
+    // The pull feedback uses its own indicator, not [data-refresh-status]: the
+    // results-status line is hidden below 768px, so the gesture would otherwise
+    // be invisible on a phone.
+    var indicator = document.querySelector("[data-pull-indicator]");
+    var startY = null;
+    var pulled = 0;
+    var threshold = 70;
+    var hideTimer = null;
+
+    function showPull(label) {
+      if (!indicator) {
+        return;
+      }
+      clearTimeout(hideTimer);
+      if (!label) {
+        delete indicator.dataset.active;
+        indicator.textContent = "";
+        return;
+      }
+      indicator.dataset.active = "true";
+      indicator.textContent = label;
+    }
+
+    function triggerRefresh() {
+      showPull("Refreshing…");
+      if (inboxRefresh.refresh) {
+        inboxRefresh.refresh();
+      }
+      hideTimer = setTimeout(function () {
+        showPull("");
+      }, 1200);
+    }
+
+    document.addEventListener(
+      "touchstart",
+      function (event) {
+        if (window.scrollY > 0 || event.touches.length !== 1 || event.target.closest("dialog, details[data-row-menu]")) {
+          startY = null;
+          return;
+        }
+        startY = event.touches[0].clientY;
+        pulled = 0;
+      },
+      { passive: true }
+    );
+
+    document.addEventListener(
+      "touchmove",
+      function (event) {
+        if (startY === null || event.touches.length !== 1) {
+          return;
+        }
+        pulled = event.touches[0].clientY - startY;
+        if (pulled > 0 && window.scrollY === 0) {
+          showPull(pulled >= threshold ? "Release to refresh" : "Pull to refresh");
+        }
+      },
+      { passive: true }
+    );
+
+    document.addEventListener(
+      "touchend",
+      function () {
+        var shouldRefresh = startY !== null && pulled >= threshold && window.scrollY === 0;
+        startY = null;
+        pulled = 0;
+        if (shouldRefresh) {
+          triggerRefresh();
+        } else {
+          showPull("");
+          if (inboxRefresh.repaint) {
+            inboxRefresh.repaint();
+          }
+        }
+      },
+      { passive: true }
+    );
+  }
+
+  setupRowLinks();
+  setupRowMenus();
+  setupBulkForm();
+  setupInboxAutoRefresh();
+  setupPullToRefresh();
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
