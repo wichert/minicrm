@@ -321,11 +321,25 @@ func (q *Queries) ListThreadEvents(ctx context.Context, threadID uuid.UUID) ([]T
 const threadColumns = `id, account_id, subject_normalized, subject_display, status, assignee_id,
 	       assignment_source, customer_email, COALESCE(customer_name, ''), reopens_thread_id, last_message_at`
 
+// scanThread scans the shared threadColumns projection.
 func scanThread(row pgx.Row) (Thread, error) {
 	var t Thread
 	err := row.Scan(
 		&t.ID, &t.AccountID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
 		&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
+	)
+	return t, err
+}
+
+// scanThreadWithOpenedAt scans threadColumns plus a trailing opened_at column. The
+// column list is shared with scanThread, so any addition to threadColumns must be
+// mirrored in both scanners — the trailing opened_at is scanned in addition to it.
+func scanThreadWithOpenedAt(row pgx.Row) (Thread, error) {
+	var t Thread
+	err := row.Scan(
+		&t.ID, &t.AccountID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
+		&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
+		&t.OpenedAt,
 	)
 	return t, err
 }
@@ -358,8 +372,8 @@ func (q *Queries) CreateThread(ctx context.Context, t Thread) (Thread, error) {
 // returns opened_at (earliest email sent_at) so the detail page can show the thread-age badge
 // without relying on the first email's SentAt.
 func (q *Queries) GetThreadByID(ctx context.Context, id uuid.UUID) (Thread, error) {
-	return scanThread(q.db.QueryRow(ctx, `SELECT `+threadColumns+`,
-	       (SELECT MIN(e.sent_at) FROM emails e WHERE e.thread_id = threads.id) AS opened_at
+	return scanThreadWithOpenedAt(q.db.QueryRow(ctx, `SELECT `+threadColumns+`,
+	       COALESCE((SELECT MIN(e.sent_at) FROM emails e WHERE e.thread_id = threads.id), threads.last_message_at) AS opened_at
 	       FROM threads WHERE id = $1`, id))
 }
 
