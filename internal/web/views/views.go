@@ -45,6 +45,9 @@ type ThreadSummaryItem struct {
 	LatestDirection string
 	MessageCount    int
 	CanAssignToMe   bool
+	// IsCurrent marks the thread the detail page is showing so the pane row reads as
+	// selected (aria-current plus a background in app.css).
+	IsCurrent bool
 }
 
 // InboxViewData holds data for rendering the threads inbox view.
@@ -82,6 +85,11 @@ type InboxViewData struct {
 	// a thread keeps the queue's filters in the link, and the pane re-renders with
 	// the same filters instead of falling back to the default open inbox.
 	PaneLinksBaseURL string
+	// PaneMode marks the list as the narrow W4 split pane rather than the full inbox
+	// page: the pane table drops the bulk-select, status and age columns (the active
+	// tab implies status and the age rides in the meta line) and its rows lay out on
+	// two lines instead of one.
+	PaneMode bool
 }
 
 // EmailItemView holds an email, its formatted timestamp, and its attachments.
@@ -848,37 +856,43 @@ const layoutFooter = `
 const inboxTablePartial = `{{define "inbox_table"}}
 {{if .Threads}}
 <div class="table-wrap">
-  <table class="threads-table">
+  {{/* PaneMode (W4 split list) drops the bulk-select, status and age columns: the
+       active tab already states the status and the age rides inline in the meta
+       line, so the narrow pane spends its width on the subject and customer.
+       The actions column stays (slimmed in app.css) so row menus are reachable. */}}
+  <table class="threads-table{{if .PaneMode}} threads-table-pane{{end}}">
     <thead>
       <tr>
-        {{if and (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="select-cell"><label class="select-label"><input type="checkbox" data-select-all aria-label="Select all on page"></label></th>{{end}}
+        {{if and (not .PaneMode) (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="select-cell"><label class="select-label"><input type="checkbox" data-select-all aria-label="Select all on page"></label></th>{{end}}
         <th scope="col">Thread</th>
-        <th scope="col">Status</th>
-        <th scope="col">Age</th>
+        {{if not .PaneMode}}<th scope="col">Status</th>
+        <th scope="col">Age</th>{{end}}
         {{if and (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th>{{end}}
       </tr>
     </thead>
     <tbody>
       {{$paneBase := .PaneLinksBaseURL}}{{range .Threads}}
-      <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}" data-row-href="{{threadDetailURL $paneBase .Thread.ID}}">
-        {{if and (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}<td class="select-cell"><label class="select-label"><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-status="{{.Thread.Status}}" data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>{{end}}
+      {{/* The open thread reads as selected in the pane: aria-current for assistive
+           tech plus a background/border-left in app.css. */}}
+      <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}{{if and $.PaneMode .IsCurrent}} thread-row-current{{end}}" data-row-href="{{threadDetailURL $paneBase .Thread.ID}}"{{if and $.PaneMode .IsCurrent}} aria-current="true"{{end}}>
+        {{if and (not $.PaneMode) (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}<td class="select-cell"><label class="select-label"><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-status="{{.Thread.Status}}" data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>{{end}}
         <td class="thread-cell">
           <div class="thread-rowline">
             <span class="thread-line">
               <a class="thread-link" href="{{threadDetailURL $paneBase .Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
               <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
             </span>
-            <span class="thread-meta" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}{{if $.ShowAccountUI}} &middot; {{.AccountName}}{{end}} &middot; {{if .AssigneeName}}{{.AssigneeName}}{{else}}Unassigned{{end}}</span>
+            <span class="thread-meta" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}{{if $.ShowAccountUI}} &middot; {{.AccountName}}{{end}} &middot; {{if .AssigneeName}}{{.AssigneeName}}{{else}}Unassigned{{end}}{{if $.PaneMode}} &middot; {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="Opened {{.OpenedFullTime}}">{{.WaitLabel}}</span>{{else if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>{{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}{{end}}</span>
           </div>
         </td>
-        <td class="status-cell">
+        {{if not $.PaneMode}}<td class="status-cell">
           <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
         </td>
         <td class="nowrap age-cell">
           {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="Opened {{.OpenedFullTime}}">{{.WaitLabel}}</span>
           {{else if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>
           {{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}
-        </td>
+        </td>{{end}}
         {{if and (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}
         <td class="actions-cell">
           {{if or (eq .Thread.Status "new") (eq .Thread.Status "in_progress")}}
@@ -887,7 +901,8 @@ const inboxTablePartial = `{{define "inbox_table"}}
               <span aria-hidden="true">&#8943;</span>
             </summary>
             <div class="row-menu-popover">
-              <button type="button" class="row-menu-item" data-row-select aria-label="Select {{.Thread.SubjectDisplay}} for bulk actions">Select</button>
+              {{/* Bulk selection stays on the full inbox; the pane has no bulk bar. */}}
+              {{if not $.PaneMode}}<button type="button" class="row-menu-item" data-row-select aria-label="Select {{.Thread.SubjectDisplay}} for bulk actions">Select</button>{{end}}
               {{if .CanAssignToMe}}<form method="post" action="/threads/{{.Thread.ID}}/assign" class="row-menu-form">
                 <input type="hidden" name="assignee_id" value="{{$.CurrentUser.ID}}">
                 <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
@@ -1009,6 +1024,52 @@ const inboxBody = `
 `
 
 const threadDetailBody = `
+{{if .List}}
+{{/* W4: the filter row lives once, above the whole split layout, instead of inside
+     the clamp(360px..520px) list pane where four controls wrapped onto three lines.
+     It is shown only at >=1280px (app.css .split-filters): below that the pane is
+     hidden anyway and the standalone detail page keeps its today's chrome. The form
+     posts back to the open thread's own path, so applying a filter re-renders the
+     pane without leaving the conversation — no-JS included. */}}
+<div class="split-filters" data-split-filters>
+  <form method="get" action="/threads/{{.Thread.ID}}" class="filter-inline">
+    <input type="hidden" name="status" value="{{.List.StatusFilter}}">
+    <label class="inline-field search-field">
+      <span class="search-icon" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </span>
+      <span class="sr-only">Customer or subject</span>
+      <input type="search" name="q" value="{{.List.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
+      {{if .List.Search}}<a class="search-clear" href="/threads/{{.Thread.ID}}?status={{.List.StatusFilter}}&amp;assignee={{.List.AssigneeFilter}}&amp;account={{.List.AccountFilter}}" aria-label="Clear search">&times;</a>{{end}}
+    </label>
+    {{if .List.ShowAssigneeUI}}
+    <label class="inline-field inline-field-compact">
+      <span class="sr-only">Assignee</span>
+      <select name="assignee" data-hx-get="/threads" aria-label="Assignee">
+        <option value="" {{if eq .List.AssigneeFilter ""}}selected{{end}}>Anyone</option>
+        <option value="me" {{if eq .List.AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
+        <option value="unassigned" {{if eq .List.AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
+        {{range .List.Users}}
+        <option value="{{.ID}}" {{if eq .ID.String $.List.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
+        {{end}}
+      </select>
+    </label>
+    {{end}}
+    {{if .List.ShowAccountUI}}
+    <label class="inline-field inline-field-compact">
+      <span class="sr-only">Account</span>
+      <select name="account" data-hx-get="/threads" aria-label="Account">
+        <option value="">All accounts</option>
+        {{range .List.Accounts}}
+        <option value="{{.ID}}" {{if eq .ID $.List.AccountFilter}}selected{{end}}>{{.Name}}</option>
+        {{end}}
+      </select>
+    </label>
+    {{end}}
+    <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
+  </form>
+</div>
+{{end}}
 <div class="split-layout{{if not .List}} split-single{{end}}" data-split-layout>
 {{if .List}}
   <aside class="split-list" data-split-list id="split-list" aria-label="Thread list">
@@ -1035,65 +1096,12 @@ const threadDetailBody = `
       <a class="refresh-meta" href="{{.List.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
     </div>
   </div>
-  <div class="filter-sticky">
-    <form method="get" action="/threads" class="filter-inline">
-      <input type="hidden" name="status" value="{{.List.StatusFilter}}">
-      <label class="inline-field search-field">
-        <span class="search-icon" aria-hidden="true">
-          <svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-        </span>
-        <span class="sr-only">Customer or subject</span>
-        <input type="search" name="q" value="{{.List.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
-        {{if .List.Search}}<a class="search-clear" href="{{.List.ClearSearchURL}}" aria-label="Clear search">&times;</a>{{end}}
-      </label>
-      {{if .List.ShowAssigneeUI}}
-      <label class="inline-field inline-field-compact">
-        <span class="sr-only">Assignee</span>
-        <select name="assignee" data-hx-get="/threads" aria-label="Assignee">
-          <option value="" {{if eq .List.AssigneeFilter ""}}selected{{end}}>Anyone</option>
-          <option value="me" {{if eq .List.AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
-          <option value="unassigned" {{if eq .List.AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
-          {{range .List.Users}}
-          <option value="{{.ID}}" {{if eq .ID.String $.List.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
-          {{end}}
-        </select>
-      </label>
-      {{end}}
-      {{if .List.ShowAccountUI}}
-      <label class="inline-field inline-field-compact">
-        <span class="sr-only">Account</span>
-        <select name="account" data-hx-get="/threads" aria-label="Account">
-          <option value="">All accounts</option>
-          {{range .List.Accounts}}
-          <option value="{{.ID}}" {{if eq .ID $.List.AccountFilter}}selected{{end}}>{{.Name}}</option>
-          {{end}}
-        </select>
-      </label>
-      {{end}}
-      <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
-    </form>
-  </div>
   <span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
+  {{/* No bulk bar in the pane: selection chrome plus a 5-button bar cannot fit a
+       narrow column without eating the subject. Bulk actions stay on the plain
+       inbox (/threads), which is one click away via the "/threads" nav link and
+       is the whole page below 1280px. */}}
   <div data-inbox-results>
-  {{if and .List.Threads (ne .List.StatusFilter "completed") (ne .List.StatusFilter "spam")}}
-  <form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-has-selection="false" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
-    <input type="hidden" name="return_to" value="{{.List.RefreshURL}}">
-    <label class="mobile-select-all"><input type="checkbox" data-select-all-mobile> Select all on page</label>
-    <span data-selected-count aria-live="polite"></span>
-    <div class="bulk-actions-controls">
-      <label class="inline-field">Assign selected to
-        <select name="assignee_id" aria-label="Assignee for selected conversations" data-bulk-assignee disabled aria-disabled="true">
-          <option value="">Choose assignee</option>
-          {{range .List.Users}}<option value="{{.ID}}">{{.DisplayName}}</option>{{end}}
-        </select>
-      </label>
-      <button type="submit" formaction="/threads/bulk-assign" class="btn btn-secondary btn-small" data-bulk-action="assign" disabled aria-disabled="true">Assign selected</button>
-      <button type="submit" formaction="/threads/bulk-complete" class="btn btn-secondary btn-small" data-bulk-action="complete" data-confirm="Mark selected conversations as completed and queue moves to Archive?" data-confirm-action="Complete selected" data-confirm-submit disabled aria-disabled="true">Complete selected</button>
-      <button type="submit" class="btn btn-danger btn-small" data-bulk-action="spam" data-confirm-submit disabled aria-disabled="true">Mark selected as spam</button>
-      <button type="button" class="btn btn-secondary btn-small" data-bulk-clear>Clear</button>
-    </div>
-  </form>
-  {{end}}
   {{template "inbox_table" .List}}
   {{if .List.NextURL}}<p class="older-threads"><a class="btn btn-secondary" href="{{.List.NextURL}}">Older threads</a></p>{{end}}
   </div>

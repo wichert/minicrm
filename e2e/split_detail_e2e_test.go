@@ -46,9 +46,12 @@ func TestEndToEndSplitMasterDetailAssets(t *testing.T) {
 	if !strings.Contains(css, "@media (min-width: 1280px)") {
 		t.Error("app.css must contain the 1280px split media query")
 	}
-	// The brief forbids new breakpoints: the split layout must reuse the existing
-	// 1280px query that W3 already uses for one-line rows.
-	if !strings.Contains(css, "grid-template-columns: clamp(340px, 32vw, 460px) minmax(0, 1fr)") {
+	// The brief forbids new breakpoints for the layout: the split layout must reuse
+	// the existing 1280px query that W3 already uses for one-line rows. The list
+	// column is sized from the remaining columns (subject/snippet, meta line and a
+	// slim actions cell) after the status/age/select columns were dropped from the
+	// pane table.
+	if !strings.Contains(css, "grid-template-columns: clamp(360px, 34vw, 520px) minmax(0, 1fr)") {
 		t.Error("app.css must lay out the split panes with the shared 1280px media query")
 	}
 
@@ -77,7 +80,6 @@ func TestEndToEndSplitMasterDetailAssets(t *testing.T) {
 	if strings.Contains(js, `backLink.setAttribute("aria-hidden"`) || strings.Contains(js, `back.setAttribute("aria-hidden"`) {
 		t.Error("app.js must not toggle aria-hidden on the back link; CSS owns its visibility")
 	}
-
 	// W4 defect: `.container-wide` zeroed the top margin, putting the inbox and the
 	// split view flush against the navbar. The wide variant may change the width
 	// only; vertical rhythm comes from `.container`'s 1.75rem auto margin.

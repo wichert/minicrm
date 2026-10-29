@@ -2609,16 +2609,37 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   min-width: 0;
 }
 
+/* The pane's filter row is rendered once, above the split, and is only useful
+   when the pane exists. It scrolls away with the page (not sticky) so the
+   sticky list keeps its full viewport height budget below. */
+.split-filters {
+  display: none;
+  margin-bottom: 0.6rem;
+}
+
 /* One media query is the entire layout mechanism: no reload, no JS, no state
    loss when a resize crosses 1280px. */
 @media (min-width: 1280px) {
+  .split-filters {
+    display: block;
+  }
+
+  /* Column budget: with the status/age/select columns gone from the pane table
+     the remaining columns are subject+snippet, the meta line and a 2.25rem
+     actions cell, so 360-520px is enough for a two-line row without ellipsizing
+     most subjects. The upper bound grows with the viewport because the detail
+     pane stays readable down to ~740px at 1280px wide. */
   .split-layout {
     display: grid;
-    grid-template-columns: clamp(340px, 32vw, 460px) minmax(0, 1fr);
+    grid-template-columns: clamp(360px, 34vw, 520px) minmax(0, 1fr);
     gap: 1rem;
     align-items: start;
   }
 
+  /* top/max-height are paired with the container's 1.75rem top margin: the pane
+     starts where it is rendered and is allowed to scroll to one viewport minus
+     the breathing room it keeps on both sides, so it is never clipped and never
+     floats away from the content beside it. */
   .split-list {
     display: block;
     position: sticky;
@@ -2627,11 +2648,110 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
     overflow-y: auto;
   }
 
+  /* Pane density: the bulk-select, status and age columns are not rendered (the
+     active tab implies the status and the age rides inline in the meta line), so
+     the subject and customer get the width. The actions cell overlays the row's
+     trailing edge and costs only its own icon. */
+  .split-list .threads-table-pane .actions-cell {
+    width: 1.9rem;
+    padding-left: 0;
+    padding-right: 0.15rem;
+  }
+
+  /* Two-line rows in the pane: subject — snippet on line 1, customer ·
+     assignee · age on line 2. The one-line row rule at 1280px above is tuned
+     for the full-width inbox; in a ~400px column it squeezes the subject into a
+     few characters, so the pane opts out of it. */
+  .split-list .thread-rowline {
+    display: block;
+    white-space: normal;
+  }
+
+  .split-list .thread-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+
+  .split-list .thread-link {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 0 1 auto;
+  }
+
+  .split-list .thread-meta {
+    max-width: 100%;
+    margin-top: 0.12rem;
+    text-align: left;
+  }
+
+  .split-list .threads-table th,
+  .split-list .threads-table td {
+    padding-left: 0.55rem;
+    padding-right: 0.35rem;
+  }
+
+  /* The open thread reads as selected: a left accent plus a tinted background.
+     aria-current="true" carries the same state to assistive tech. */
+  .split-list .thread-row[aria-current="true"],
+  .split-list .thread-row-current {
+    background: var(--primary-soft);
+  }
+
+  .split-list .thread-row-current td:first-child {
+    box-shadow: inset 3px 0 0 var(--primary);
+  }
+
+  .split-list .thread-row-current .thread-link {
+    color: var(--primary-strong);
+  }
+
+  /* Pane table chrome is lighter: it sits inside the column, not on the page. */
+  .split-list .threads-table {
+    border-radius: 0.5rem;
+  }
+
+  /* One column of conversation rows plus a nameless actions column: the "Thread"
+     header would be the only visible label and carries no information the tab
+     strip above does not already give. Trade-off accepted: hiding the header row
+     also drops the column/row association for assistive tech in the pane, but each
+     row is self-describing (subject, snippet, then customer · assignee · age) and
+     every control in it has its own label. The full inbox keeps its visible
+     headers, so the labelled version is one click away. */
+  .split-list .threads-table thead {
+    display: none;
+  }
+
+  /* In the inbox the sticky filter row provides the gap between the toolbar and
+     the table; in the pane that row lives above the split, so the toolbar owns
+     the gap itself. */
+  .split-list .inbox-toolbar {
+    margin-bottom: 0.55rem;
+  }
+
+  /* The pane is narrow: drop the "N threads · more available" count and keep the
+     Refresh affordance, which is the one control that acts on this column. */
+  .split-list .results-count {
+    display: none;
+  }
+
   /* W4: in split mode the list is already visible, so the back link to it is
      redundant. Hiding it is pure CSS — no aria-hidden/tabindex juggling — so it
      stays fully available to keyboard and screen-reader users below 1280px,
      including when the list was skipped (?nolist=1). */
   .split-layout:not(.split-single) .back-link {
+    display: none;
+  }
+}
+
+/* Below 1280px the detail page is today's single-pane page: the pane's
+   above-the-split filter row is hidden and the detail keeps its own chrome.
+   (The pane itself is display:none there, so nothing in it is reachable that
+   would need the filter row.) */
+@media (max-width: 1279.98px) {
+  .split-filters {
     display: none;
   }
 }

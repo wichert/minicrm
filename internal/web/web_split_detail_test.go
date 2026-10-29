@@ -72,9 +72,24 @@ func TestThreadDetailRendersSplitListPane(t *testing.T) {
 	if !strings.Contains(body, `href="/threads/`+otherID.String()+`"`) {
 		t.Error("split list pane missing row link for another thread")
 	}
-	// The pane keeps the inbox chrome (toolbar, filters) working.
+	// The pane keeps the queue selector and its filter row (rendered once, above
+	// the split, since a 400px column cannot hold four filter controls).
 	if !strings.Contains(body, `data-inbox-toolbar`) || !strings.Contains(body, `filter-inline`) {
-		t.Error("split list pane missing inbox toolbar/filter markup")
+		t.Error("detail page missing the inbox toolbar/filter markup")
+	}
+	if !strings.Contains(body, `data-split-filters`) {
+		t.Error("detail page must render the split filter row above the panes")
+	}
+	// No bulk bar in the pane: it is preserved on the full inbox.
+	if strings.Contains(body, `id="bulk-spam-form"`) {
+		t.Error("the split pane must not render the bulk-actions bar")
+	}
+	// The open thread's row reads as selected.
+	if !strings.Contains(body, `aria-current="true"`) {
+		t.Error("the open thread's pane row must be marked aria-current")
+	}
+	if !strings.Contains(body, `thread-row-current`) {
+		t.Error("the open thread's pane row must carry the current-row class")
 	}
 	// Split layout needs the wide container.
 	if !strings.Contains(body, `container-wide`) {
@@ -221,6 +236,9 @@ func TestSplitPaneRowLinksCarryInboxQuery(t *testing.T) {
 	if !strings.Contains(body2, `href="/threads/`+threadID.String()+`?status=new"`) {
 		t.Error("pane row links must keep the inbox filters across a round trip")
 	}
+	if !strings.Contains(body2, `aria-current="true"`) || !strings.Contains(body2, `thread-row-current`) {
+		t.Error("the newly opened thread's row must be the marked current row after the round trip")
+	}
 }
 
 // Legacy deep links that still address the thread as ?thread=<id> keep working:
@@ -318,11 +336,91 @@ func TestThreadDetailSplitKeepsReopenComposerAndAttachments(t *testing.T) {
 	}
 }
 
+// W4 pane density: the split-pane table drops the bulk-select, status and age
+// columns (the active tab implies the status and the age rides inline in the meta
+// line) while the full inbox keeps all three.
+func TestSplitPaneTableOmitsStatusAgeAndSelectColumns(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	otherID := uuid.New()
+	agentID := store.adminUser.ID
+	for id, subject := range map[uuid.UUID]string{threadID: "Pane open thread", otherID: "Pane other thread"} {
+		store.threads[id] = sqlc.Thread{
+			ID: id, AccountID: "support", SubjectDisplay: subject,
+			Status: sqlc.ThreadStatusNew, AssigneeID: &agentID,
+			CustomerEmail: "customer@example.com",
+			LastMessageAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			OpenedAt:      time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		}
+	}
+	emailID := uuid.New()
+	store.emails[emailID] = sqlc.Email{
+		ID: emailID, ThreadID: threadID, AccountID: "support", FromAddress: "customer@example.com",
+		Subject: "Pane open thread", BodyText: "hi", SentAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+	}
+
+	// Full inbox: everything stays.
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads?status=new", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /threads status = %d, want 200", rec.Code)
+	}
+	inbox := rec.Body.String()
+	for _, want := range []string{
+		`class="threads-table"`,
+		`<th scope="col">Status</th>`,
+		`<th scope="col">Age</th>`,
+		`class="select-cell"`,
+		`id="bulk-spam-form"`,
+	} {
+		if !strings.Contains(inbox, want) {
+			t.Errorf("full inbox must keep %q", want)
+		}
+	}
+	if strings.Contains(inbox, `threads-table-pane`) {
+		t.Error("full inbox table must not carry the pane variant class")
+	}
+
+	// Split pane: the three columns are gone, the pane variant class is present,
+	// and the age still reaches the row through the meta line.
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=new", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatalf("pane/detail markers not in expected order")
+	}
+	pane := body[paneIdx:detailIdx]
+	if !strings.Contains(pane, `threads-table-pane`) {
+		t.Error("pane table must carry the threads-table-pane variant")
+	}
+	for _, unwanted := range []string{`<th scope="col">Status</th>`, `<th scope="col">Age</th>`, `class="select-cell"`, `class="status-cell"`, `class="age-cell"`, `id="bulk-spam-form"`, `data-select-thread`} {
+		if strings.Contains(pane, unwanted) {
+			t.Errorf("pane must not render %q", unwanted)
+		}
+	}
+	// The row still shows the age inline in the meta line.
+	if !strings.Contains(pane, `<span class="wait-badge`) {
+		t.Error("pane rows must keep the age inline in the meta line")
+	}
+	// Row menus stay reachable from the pane, but without a bulk Select entry.
+	if !strings.Contains(pane, `data-row-menu`) || !strings.Contains(pane, `Complete`) {
+		t.Error("pane rows must keep the row menu with quick actions")
+	}
+	if strings.Contains(pane, `data-row-select`) {
+		t.Error("pane row menus must not offer the bulk-select entry (no bulk bar in the pane)")
+	}
+}
+
 // W4 defect: `.container-wide` overrode `.container`'s top margin with 0, so the
 // inbox and the split view sat flush against the ink navbar. The heading spacing
 // must come back from the shared `.container` rhythm, and the wide variant must
-// keep its width cap and horizontal centering (it was added to fix W2's
-// horizontal overflow, not the vertical rhythm).
+// keep its width cap and horizontal centering.
 func TestWideContainerKeepsTopSpacing(t *testing.T) {
 	css, err := static.FS.ReadFile("app.css")
 	if err != nil {
@@ -346,5 +444,58 @@ func TestWideContainerKeepsTopSpacing(t *testing.T) {
 	}
 	if regexp.MustCompile(`margin-top:\s*0[;\s]`).MatchString(rule) {
 		t.Errorf(".container-wide must not zero out the top margin: %q", rule)
+	}
+	// The pane's sticky offsets must agree with that spacing: it sticks below the
+	// viewport top and is allowed to scroll to a viewport minus the 1rem it keeps
+	// on each side.
+	if !strings.Contains(sheet, "top: 1rem;") || !strings.Contains(sheet, "max-height: calc(100vh - 2rem);") {
+		t.Error("app.css must keep the paired split-list sticky top/max-height")
+	}
+}
+
+// W4 pane density is expressed in app.css only for what the template cannot say:
+// a wider list column, two-line rows, a selected row, a slim actions cell, and the
+// wide-only filter row that replaced the pane's own duplicate chrome.
+func TestSplitPaneStylesAreWideOnly(t *testing.T) {
+	css, err := static.FS.ReadFile("app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sheet := string(css)
+
+	// The pane is wider than before (four filter controls no longer live in it and
+	// the table is three columns instead of five).
+	if !strings.Contains(sheet, "grid-template-columns: clamp(360px, 34vw, 520px) minmax(0, 1fr)") {
+		t.Error("app.css must widen the split list column")
+	}
+	// The current row reads as selected.
+	if !strings.Contains(sheet, `.split-list .thread-row[aria-current="true"]`) {
+		t.Error("app.css must style the selected pane row")
+	}
+	if !strings.Contains(sheet, ".split-list .thread-row-current td:first-child") {
+		t.Error("app.css must draw the selected row's accent on the first cell")
+	}
+	// Pane rows are two lines (the 1280px one-line rule is for the full-width inbox).
+	if !strings.Contains(sheet, ".split-list .thread-rowline {") {
+		t.Error("app.css must let the pane opt out of the one-line row rule")
+	}
+	// The pane's actions column is slimmed to the icon it holds.
+	if !strings.Contains(sheet, ".split-list .threads-table-pane .actions-cell {") {
+		t.Error("app.css must slim the pane's actions cell")
+	}
+	// The split filter row is wide-only: rendered above the split, hidden below
+	// 1280px where the pane does not exist.
+	if !strings.Contains(sheet, ".split-filters {\n  display: none;") {
+		t.Error("app.css must hide the split filter row by default (below 1280px)")
+	}
+	if !strings.Contains(sheet, "@media (max-width: 1279.98px) {\n  .split-filters {\n    display: none;") {
+		t.Error("app.css must keep an explicit below-1280px rule for .split-filters")
+	}
+	// The pane hides its own table header and the redundant results count.
+	if !strings.Contains(sheet, ".split-list .threads-table thead {") {
+		t.Error("app.css must hide the pane's table header row")
+	}
+	if !strings.Contains(sheet, ".split-list .results-count {") {
+		t.Error("app.css must drop the pane's results count")
 	}
 }

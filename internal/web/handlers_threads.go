@@ -715,6 +715,14 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 			// Row links address the thread by path and carry the current inbox query,
 			// so the pane keeps the queue's filters across detail loads.
 			list.PaneLinksBaseURL = paneBase
+			// Pane rendering: no bulk-select/status/age columns, and the open thread
+			// is marked as the current row.
+			list.PaneMode = true
+			for i := range list.Threads {
+				if list.Threads[i].Thread.ID == thread.ID {
+					list.Threads[i].IsCurrent = true
+				}
+			}
 			listData = &list
 		} else if !errors.Is(listErr, errInboxInvalidSearch) && !errors.Is(listErr, errInboxInvalidPage) {
 			// A list failure must never take down the thread page; degrade to single pane.
