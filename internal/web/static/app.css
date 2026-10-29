@@ -1312,6 +1312,14 @@ h3 {
   color: var(--text);
 }
 
+/* Pull-to-refresh feedback for touch/phone widths. The [data-refresh-status]
+   line lives inside .results-status, which is hidden below 768px, so the pull
+   gesture owns its own indicator here. Hidden on desktop; shown only while a
+   pull is in progress (JS sets data-active) or while a refresh is running. */
+.pull-indicator {
+  display: none;
+}
+
 .refresh-meta {
   margin-left: auto;
   color: var(--muted);
@@ -1338,8 +1346,13 @@ h3 {
   white-space: nowrap;
 }
 
-/* Below 900px the subject and snippet stack again (the plan's two-line row only
-   fuses them into one line where there is room). */
+/* Row density breakpoints (documented deliberately):
+   - >=1280px: true one-line row (thread-rowline flexes subject/snippet + meta).
+   - 900-1279px: two-line row. The base .thread-line already fuses subject and
+     snippet on line 1 and .thread-meta sits on line 2, so no extra rule is
+     needed; keeping the metadata on its own line avoids overflow at 1024px.
+   - <900px: subject and snippet stack again (three short lines), which is the
+     plan's "informative at 390px" layout. */
 @media (max-width: 899px) {
   .thread-line {
     display: block;
@@ -1577,16 +1590,6 @@ select:disabled {
   font-weight: 700;
   text-align: center;
   line-height: 1.45;
-}
-
-/* Customer name/account/assignee are now in .thread-meta, so the old fixed-width
-   customer column is gone; any residual cell must shrink instead of pushing the
-   status/age/actions columns out of the viewport. */
-.customer-cell {
-  max-width: 12rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .wait-badge {
@@ -2065,6 +2068,26 @@ details.message:not([open]) > .message-header {
     display: none;
   }
 
+  /* Immediate pull feedback at the top of the viewport, under the sticky filter
+     row, so a phone user sees the gesture before release. */
+  .pull-indicator[data-active="true"] {
+    display: block;
+    position: fixed;
+    z-index: 40;
+    top: calc(max(0.6rem, env(safe-area-inset-top)) + 2.75rem);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 0.3rem 0.75rem;
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.18);
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
   /* The fades indicate more tabs without covering their touch targets. */
   .tab-strip::before,
   .tab-strip::after {
@@ -2127,13 +2150,16 @@ details.message:not([open]) > .message-header {
     font-size: 0.72rem;
   }
 
-  /* Keep the filter row compact on phones: the search field shares one line with
-     the compact selects, and everything still wraps if space runs out. */
+  /* Keep the filter row on a single line on phones: the search field shares the
+     row with the compact selects, which cap at 6.4rem and ellipsize instead of
+     wrapping the sticky row into several lines. */
   .filter-inline {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 0.35rem;
     width: 100%;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .inline-field {

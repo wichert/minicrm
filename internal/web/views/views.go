@@ -906,9 +906,10 @@ const inboxBody = `
   </div>
   <div class="results-status">
     <p class="results-count">{{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}{{if .NextURL}} &middot; more available{{end}}</p>
-    <a class="refresh-meta" href="{{.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status>Refresh</span></a>
+    <a class="refresh-meta" href="{{.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
   </div>
 </div>
+<span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
 <div class="filter-sticky">
   <form method="get" action="/threads" class="filter-inline">
     <input type="hidden" name="status" value="{{.StatusFilter}}">
