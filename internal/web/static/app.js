@@ -975,11 +975,10 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!pane) {
       return;
     }
-    // The pane may still be display:none while the script runs (scripts are
-    // deferred, but layout-dependent reads like offsetParent are what we are
-    // trying to avoid relying on); clear any stale entry instead of restoring
-    // into a hidden element, and restore only through the visible path in
-    // setupSplitListScroll.
+    // Staging rather than writing scrollTop directly: the pane may still be
+    // display:none (narrow viewport) at this point, and a hidden element cannot
+    // be scrolled. The staged value is consumed in setupSplitListScroll once the
+    // pane is actually visible.
     try {
       var saved = window.sessionStorage.getItem(splitListScrollStorageKey());
       if (saved !== null) {

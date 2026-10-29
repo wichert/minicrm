@@ -294,13 +294,26 @@ func sanitizeInboxBackURL(raw, requestHost string) string {
 	}
 	u.Path = "/threads" // detail links keep only the query (?thread= identifies the thread)
 	u.Fragment = ""
-	u.RawQuery = strings.TrimPrefix(u.RawQuery, "thread=")
-	if i := strings.Index(u.RawQuery, "&thread="); i >= 0 {
-		u.RawQuery = u.RawQuery[:i] + u.RawQuery[i+len("&thread="):]
+	// Keep only the known inbox filter params (including the before/id pagination
+	// cursor and the transient before-cursor key); in particular never carry nolist=1
+	// into pane row links (it would hide the pane on the next click) or a stray
+	// thread= (the link's own ?thread= must win). Filtering preserves the original
+	// parameter order so round-tripped URLs stay stable.
+	allowed := map[string]bool{"status": true, "assignee": true, "account": true, "q": true, "before": true, "id": true}
+	var kept []string
+	for _, pair := range strings.Split(u.RawQuery, "&") {
+		key := pair
+		if i := strings.IndexByte(key, '='); i >= 0 {
+			key = key[:i]
+		}
+		if decoded, err := url.QueryUnescape(key); err == nil {
+			key = decoded
+		}
+		if allowed[key] {
+			kept = append(kept, pair)
+		}
 	}
-	if u.RawQuery == "" {
-		return "/threads"
-	}
+	u.RawQuery = strings.Join(kept, "&")
 	if u.RawQuery == "" {
 		return "/threads"
 	}
