@@ -915,16 +915,20 @@ document.addEventListener("DOMContentLoaded", function () {
     var sending = false;
     if (sendForm && sendBtn) {
       sendForm.addEventListener("submit", function () { sending = true; });
+      // Capture phase: ProseMirror binds its own Mod-Enter handler on the editor
+      // element, which would run first and split the block. Capturing on the form
+      // lets us claim the shortcut before the editor sees it.
       sendForm.addEventListener("keydown", function (event) {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.altKey && !event.shiftKey) {
           event.preventDefault();
           event.stopPropagation();
+          if (event.stopImmediatePropagation) { event.stopImmediatePropagation(); }
           if (sending || sendBtn.disabled) { return; }
           if (!bodyField || !bodyField.value.trim()) { return; }
           sending = true;
           sendBtn.click();
         }
-      });
+      }, true);
     }
   }
 
