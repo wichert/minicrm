@@ -1546,24 +1546,28 @@ func TestPreviousConversationsRespectEmailAndAccountAccess(t *testing.T) {
 	now := time.Now().UTC()
 	current := uuid.New()
 	store.threads[current] = sqlc.Thread{ID: current, AccountID: "support", SubjectDisplay: "Current case", CustomerEmail: "customer@example.com", Status: sqlc.ThreadStatusNew, LastMessageAt: now}
-	for _, item := range []struct{ account, email, subject string }{
-		{"support", "CUSTOMER@example.com", "Visible prior"},
-		{"sales", "customer@example.com", "Visible cross-account"},
-		{"secret", "customer@example.com", "Hidden private"},
-		{"support", "someone@example.com", "Hidden other customer"},
+	for _, item := range []struct{ account, email, subject, body string }{
+		{"support", "CUSTOMER@example.com", "Visible prior", "Preamble of the earlier visible conversation"},
+		{"sales", "customer@example.com", "Visible cross-account", ""},
+		{"secret", "customer@example.com", "Hidden private", "Hidden preamble"},
+		{"support", "someone@example.com", "Hidden other customer", "Hidden preamble"},
 	} {
 		id := uuid.New()
-		store.threads[id] = sqlc.Thread{ID: id, AccountID: item.account, CustomerEmail: item.email, SubjectDisplay: item.subject, Status: sqlc.ThreadStatusCompleted, LastMessageAt: now}
+		store.threads[id] = sqlc.Thread{ID: id, AccountID: item.account, CustomerEmail: item.email, SubjectDisplay: item.subject, Status: sqlc.ThreadStatusCompleted, LastMessageAt: now, LatestBodyText: item.body, MessageCount: 1}
 	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads/"+current.String(), nil))
 	body := rec.Body.String()
 	for _, want := range []string{
-		"<summary>2 earlier conversations</summary>",
+		// "Other" rather than "earlier": a customer conversation can be more
+		// recent than the one being viewed.
+		"<summary>2 other conversations</summary>",
 		"Other conversations from this email address",
 		"Visible prior",
 		"Visible cross-account",
 		`class="previous-conversation-row"`,
+		// Second row: the preamble on its own element, separate from the subject.
+		`class="previous-conversation-snippet">Preamble of the earlier visible conversation<`,
 		`target="_blank" rel="noopener"`,
 		`title="Opens in a new tab so your reply stays here."`,
 		`class="badge badge-completed">Completed<`,
@@ -1571,6 +1575,31 @@ func TestPreviousConversationsRespectEmailAndAccountAccess(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("history missing %q", want)
 		}
+	}
+	// A conversation without body text still renders the placeholder in row 2.
+	if !strings.Contains(body, `class="previous-conversation-snippet"><em>(No message text)</em>`) {
+		t.Error("history must render the empty-preamble placeholder")
+	}
+	// The timestamp is a date only: no clock time in the visible text, while the
+	// full timestamp stays available in the title attribute.
+	timeIdx := strings.Index(body, `class="muted previous-conversation-time"`)
+	if timeIdx < 0 {
+		t.Fatal("history must render the timestamp element")
+	}
+	tagEnd := strings.Index(body[timeIdx:], ">")
+	textEnd := strings.Index(body[timeIdx+tagEnd:], "</time>")
+	label := strings.TrimSpace(body[timeIdx+tagEnd+1 : timeIdx+tagEnd+textEnd])
+	if label == "" {
+		t.Fatal("history timestamp must not be empty")
+	}
+	if strings.Count(label, ":") != 0 {
+		t.Errorf("history timestamp must be a date only, got %q", label)
+	}
+	if matches, _ := regexp.MatchString(`^\d{4}-\d{2}-\d{2}$`, label); !matches {
+		t.Errorf("history timestamp must render as YYYY-MM-DD, got %q", label)
+	}
+	if !strings.Contains(body[timeIdx:timeIdx+tagEnd], `title="`) {
+		t.Error("history timestamp must keep the full timestamp in its title")
 	}
 	for _, hidden := range []string{"Hidden private", "Hidden other customer", "No other conversations found.", "Links open in a new tab so your reply stays here."} {
 		if strings.Contains(body, hidden) {
@@ -1582,7 +1611,7 @@ func TestPreviousConversationsRespectEmailAndAccountAccess(t *testing.T) {
 	singleRec := httptest.NewRecorder()
 	router.ServeHTTP(singleRec, httptest.NewRequest(http.MethodGet, "/threads/"+current.String()+"?as=single", nil))
 	singleBody := singleRec.Body.String()
-	for _, want := range []string{"<summary>1 earlier conversation</summary>", "Other conversations from this email address", "Visible prior"} {
+	for _, want := range []string{"<summary>1 other conversation</summary>", "Other conversations from this email address", "Visible prior"} {
 		if !strings.Contains(singleBody, want) {
 			t.Errorf("single-account history missing %q", want)
 		}
@@ -1599,7 +1628,7 @@ func TestPreviousConversationsRespectEmailAndAccountAccess(t *testing.T) {
 	soloRec := httptest.NewRecorder()
 	router.ServeHTTP(soloRec, httptest.NewRequest(http.MethodGet, "/threads/"+solo.String(), nil))
 	soloBody := soloRec.Body.String()
-	for _, forbidden := range []string{"previous-conversations", "Other conversations from this email address", "No other conversations found.", "earlier conversation", "Secret prior"} {
+	for _, forbidden := range []string{"previous-conversations", "Other conversations from this email address", "No other conversations found.", "earlier conversation", "other conversation", "Secret prior"} {
 		if strings.Contains(soloBody, forbidden) {
 			t.Errorf("empty history must not contain %q", forbidden)
 		}
@@ -3068,5 +3097,83 @@ func TestPaneAgeLabelShortensThreadAgeBadgeBuckets(t *testing.T) {
 	}
 	if compact != "2d" {
 		t.Fatalf("pane label for a 2-day-old thread = %q, want \"2d\"", compact)
+	}
+}
+
+// The panel was renamed from "earlier conversations" to "other conversations"
+// because a customer conversation can be more recent than the one being read.
+// This pins the ordering that makes the new title honest: the list is ordered by
+// last activity descending, so a newer sibling appears above an older one and
+// nothing filters out conversations newer than the current thread.
+func TestOtherConversationsIncludeNewerThreads(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	current := uuid.New()
+	store.threads[current] = sqlc.Thread{
+		ID: current, AccountID: "support", SubjectDisplay: "Middle case",
+		CustomerEmail: "repeat@example.com", Status: sqlc.ThreadStatusNew, LastMessageAt: base,
+	}
+	newer := uuid.New()
+	store.threads[newer] = sqlc.Thread{
+		ID: newer, AccountID: "support", SubjectDisplay: "Newer sibling",
+		CustomerEmail: "repeat@example.com", Status: sqlc.ThreadStatusNew,
+		LastMessageAt: base.Add(48 * time.Hour), LatestBodyText: "A newer question", MessageCount: 2,
+	}
+	older := uuid.New()
+	store.threads[older] = sqlc.Thread{
+		ID: older, AccountID: "support", SubjectDisplay: "Older sibling",
+		CustomerEmail: "repeat@example.com", Status: sqlc.ThreadStatusCompleted,
+		LastMessageAt: base.Add(-48 * time.Hour), LatestBodyText: "An older question", MessageCount: 1,
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads/"+current.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	// Both siblings are listed, including the one newer than the current thread.
+	for _, want := range []string{"<summary>2 other conversations</summary>", "Newer sibling", "Older sibling"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("other conversations missing %q", want)
+		}
+	}
+	newerIdx := strings.Index(body, "Newer sibling")
+	olderIdx := strings.Index(body, "Older sibling")
+	if newerIdx < 0 || olderIdx < 0 {
+		t.Fatal("both siblings must render")
+	}
+	if newerIdx > olderIdx {
+		t.Error("other conversations must be ordered by recency, newest first")
+	}
+	// The retired wording must not come back.
+	if strings.Contains(body, "earlier conversation") {
+		t.Error("the panel must not be titled 'earlier conversations'")
+	}
+}
+
+// FormatDateOnly drops the clock time and honours display_timezone, so a thread
+// timestamped just before local midnight does not show the previous UTC date.
+func TestFormatDateOnlyUsesDisplayTimezone(t *testing.T) {
+	utcLate := time.Date(2026, 5, 1, 23, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		tz   string
+		want string
+	}{
+		{"UTC stays on the same date", "UTC", "2026-05-01"},
+		{"Auckland (UTC+12) rolls over", "Pacific/Auckland", "2026-05-02"},
+		{"Los Angeles (UTC-7) stays behind", "America/Los_Angeles", "2026-05-01"},
+		{"unknown zone falls back to UTC", "Not/AZone", "2026-05-01"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := views.FormatDateOnly(utcLate, tc.tz); got != tc.want {
+				t.Fatalf("FormatDateOnly(%s, %q) = %q, want %q", utcLate, tc.tz, got, tc.want)
+			}
+		})
+	}
+	if got := views.FormatDateOnly(time.Time{}, "UTC"); got != "" {
+		t.Errorf("a zero time must render as an empty string, got %q", got)
 	}
 }

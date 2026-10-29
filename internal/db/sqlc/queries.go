@@ -568,7 +568,10 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 	return list, rows.Err()
 }
 
-// ListCustomerHistory returns only the metadata displayed in the customer history panel.
+// ListCustomerHistory returns the metadata plus the latest-message preview shown
+// in the "other conversations" panel on the thread detail page. The preview is
+// one lateral join per thread, the same shape ListThreads uses, so the panel can
+// show a preamble without a second round trip.
 func (q *Queries) ListCustomerHistory(ctx context.Context, accounts []string, email string, exclude uuid.UUID, limit int) ([]Thread, error) {
 	if len(accounts) == 0 || strings.TrimSpace(email) == "" {
 		return nil, nil
@@ -576,9 +579,26 @@ func (q *Queries) ListCustomerHistory(ctx context.Context, accounts []string, em
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := q.db.Query(ctx, `SELECT id, account_id, subject_display, status, customer_email, last_message_at
-		FROM threads WHERE account_id = ANY($1::text[]) AND customer_email = $2::citext AND id <> $3
-		ORDER BY last_message_at DESC, id DESC LIMIT $4`, accounts, email, exclude, limit)
+	rows, err := q.db.Query(ctx, `SELECT t.id, t.account_id, t.subject_display, t.status, t.customer_email, t.last_message_at,
+		       COALESCE(stats.message_count, 0),
+		       COALESCE(latest.body_text, ''),
+		       COALESCE(latest.body_html_sanitized, ''),
+		       COALESCE(latest.direction, '')
+		FROM threads t
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*)::int AS message_count
+			FROM emails e
+			WHERE e.thread_id = t.id
+		) stats ON true
+		LEFT JOIN LATERAL (
+			SELECT e.body_text, e.body_html_sanitized, e.direction
+			FROM emails e
+			WHERE e.thread_id = t.id
+			ORDER BY e.sent_at DESC, e.received_at DESC
+			LIMIT 1
+		) latest ON true
+		WHERE t.account_id = ANY($1::text[]) AND t.customer_email = $2::citext AND t.id <> $3
+		ORDER BY t.last_message_at DESC, t.id DESC LIMIT $4`, accounts, email, exclude, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -586,7 +606,8 @@ func (q *Queries) ListCustomerHistory(ctx context.Context, accounts []string, em
 	var result []Thread
 	for rows.Next() {
 		var thread Thread
-		if err := rows.Scan(&thread.ID, &thread.AccountID, &thread.SubjectDisplay, &thread.Status, &thread.CustomerEmail, &thread.LastMessageAt); err != nil {
+		if err := rows.Scan(&thread.ID, &thread.AccountID, &thread.SubjectDisplay, &thread.Status, &thread.CustomerEmail, &thread.LastMessageAt,
+			&thread.MessageCount, &thread.LatestBodyText, &thread.LatestBodyHTML, &thread.LatestDirection); err != nil {
 			return nil, err
 		}
 		result = append(result, thread)

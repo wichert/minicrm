@@ -234,6 +234,20 @@ func FormatTimestamp(t time.Time, displayTimezone string) string {
 	return t.In(loc).Format("2006-01-02 15:04")
 }
 
+// FormatDateOnly converts t into the configured IANA displayTimezone and renders
+// just the calendar date (no clock time). Compact lists use it where the exact
+// time is noise and the relative ordering is already obvious from the order.
+func FormatDateOnly(t time.Time, displayTimezone string) string {
+	if t.IsZero() {
+		return ""
+	}
+	loc, err := time.LoadLocation(displayTimezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	return t.In(loc).Format("2006-01-02")
+}
+
 // FormatTimestampFull converts t into the configured IANA displayTimezone with full seconds
 // and timezone abbreviation for hover tooltips.
 func FormatTimestampFull(t time.Time, displayTimezone string) string {
@@ -1299,17 +1313,22 @@ const threadDetailBody = `
 
   {{if .PreviousThreads}}
   <details class="previous-conversations">
-    <summary>{{len .PreviousThreads}} earlier conversation{{if ne (len .PreviousThreads) 1}}s{{end}}</summary>
+    <summary>{{len .PreviousThreads}} other conversation{{if ne (len .PreviousThreads) 1}}s{{end}}</summary>
     <p class="helper">Other conversations from this email address</p>
     <ul class="previous-conversations-list">
       {{range .PreviousThreads}}
       <li class="previous-conversation-row">
-        <a class="previous-conversation-link" href="/threads/{{.Thread.ID}}" target="_blank" rel="noopener" title="Opens in a new tab so your reply stays here.">{{.Thread.SubjectDisplay}}</a>
-        <span class="previous-conversation-meta">
-          <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
-          <time class="muted previous-conversation-time" title="{{.FullTime}}">{{.FormattedTime}}</time>
-          {{if $.ShowAccountUI}}<span class="badge badge-account">{{.AccountName}}</span>{{end}}
-        </span>
+        <div class="previous-conversation-main">
+          <div class="previous-conversation-head">
+            <a class="previous-conversation-link" href="/threads/{{.Thread.ID}}" target="_blank" rel="noopener" title="Opens in a new tab so your reply stays here.">{{.Thread.SubjectDisplay}}</a>
+            <span class="previous-conversation-meta">
+              <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
+              <time class="muted previous-conversation-time" title="{{.FullTime}}">{{.FormattedTime}}</time>
+              {{if $.ShowAccountUI}}<span class="badge badge-account">{{.AccountName}}</span>{{end}}
+            </span>
+          </div>
+          <p class="previous-conversation-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</p>
+        </div>
       </li>
       {{end}}
     </ul>

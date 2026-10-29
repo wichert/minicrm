@@ -887,10 +887,15 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 				continue
 			}
 			history = append(history, views.ThreadSummaryItem{
-				Thread:        previousThread,
-				AccountName:   s.accountName(previousThread.AccountID),
-				FormattedTime: views.FormatTimestamp(previousThread.LastMessageAt, displayTZ),
-				FullTime:      views.FormatTimestampFull(previousThread.LastMessageAt, displayTZ),
+				Thread:      previousThread,
+				AccountName: s.accountName(previousThread.AccountID),
+				// Date only: this list is ordered by recency, so the clock time adds
+				// noise without adding order. The full timestamp stays in the title.
+				FormattedTime:   views.FormatDateOnly(previousThread.LastMessageAt, displayTZ),
+				FullTime:        views.FormatTimestampFull(previousThread.LastMessageAt, displayTZ),
+				LatestSnippet:   views.ExtractEmailSnippet(previousThread.LatestBodyText, previousThread.LatestBodyHTML, 130),
+				LatestDirection: previousThread.LatestDirection,
+				MessageCount:    previousThread.MessageCount,
 			})
 		}
 		s.audit.LogDataAccess(ctx, "thread_history", thread.ID.String())
