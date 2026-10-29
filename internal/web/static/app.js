@@ -419,7 +419,13 @@ document.addEventListener("DOMContentLoaded", function () {
         if (window.getSelection && String(window.getSelection())) {
           return;
         }
-        window.location.href = row.getAttribute("data-row-href");
+        // Navigate through the row's own anchor instead of assigning a string read
+        // from the DOM: the destination stays a URL the browser resolved from the
+        // rendered markup, and no script-visible string is ever treated as a URL.
+        var link = row.querySelector("a.thread-link[href]");
+        if (link) {
+          link.click();
+        }
       });
     });
   }
