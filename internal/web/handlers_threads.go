@@ -482,7 +482,11 @@ func parseInboxListFilters(r *http.Request, user sqlc.User) (inboxListFilters, e
 // query-string semantics as the inbox page. HandleListThreads and the split-pane
 // list on the thread detail share this one code path; page chrome (title, flash,
 // navigation) is filled in by the caller.
-func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Request) (views.InboxViewData, error) {
+// loadInboxList loads the inbox list for the current request's filters. The list is
+// the page's primary content on /threads, so it audits the read; the W4 split pane
+// passes auditRead=false to avoid logging a second data-access entry for the same
+// detail page load.
+func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Request, auditRead bool) (views.InboxViewData, error) {
 	filters, err := parseInboxListFilters(r, user)
 	if err != nil {
 		return views.InboxViewData{}, err
@@ -569,7 +573,9 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 		})
 	}
 
-	s.audit.LogDataAccess(ctx, "thread_list", "inbox")
+	if auditRead {
+		s.audit.LogDataAccess(ctx, "thread_list", "inbox")
+	}
 
 	// Clearing the search keeps the active tab and other filters.
 	clearSearchQuery := r.URL.Query()
@@ -599,7 +605,7 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user, _ := auth.UserFromContext(ctx)
 
-	list, listErr := s.loadInboxList(ctx, user, r)
+	list, listErr := s.loadInboxList(ctx, user, r, true)
 	if listErr != nil {
 		switch {
 		case errors.Is(listErr, errInboxInvalidSearch):
@@ -665,7 +671,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 	// queue shown in the pane, defaulting to the open inbox.
 	var listData *views.InboxViewData
 	if r.URL.Query().Get("nolist") != "1" {
-		list, listErr := s.loadInboxList(ctx, user, r)
+		list, listErr := s.loadInboxList(ctx, user, r, false)
 		if listErr == nil {
 			list.WideLayout = false // pane chrome only; the page container is driven by the detail view
 			listData = &list

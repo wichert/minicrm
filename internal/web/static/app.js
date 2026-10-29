@@ -947,6 +947,58 @@ document.addEventListener("DOMContentLoaded", function () {
   // from a matchMedia listener — firing on change means an in-place resize across
   // 1280px updates it without a reload. Pure attribute writes: CSP forbids
   // inline styles/scripts.
+  // Scroll position of the split list survives opening another thread: the pane is
+  // re-rendered server-side on every detail load, so the offset is remembered per
+  // inbox query string (not per thread id) and restored once the pane is visible.
+  var splitListScrollKey = "minicrm:split-list-scroll:";
+
+  function splitListScrollStorageKey() {
+    // Key on the filter query only; the thread id lives in the path, so switching
+    // threads within the same queue keeps the same key.
+    return splitListScrollKey + (window.location.search || "");
+  }
+
+  function saveListScroll() {
+    var pane = document.querySelector("[data-split-list]");
+    if (!pane) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(splitListScrollStorageKey(), String(pane.scrollTop || 0));
+    } catch (err) {
+      // Private mode or a full quota: scroll restore is a nicety, never fatal.
+    }
+  }
+
+  function restoreListScroll() {
+    var pane = document.querySelector("[data-split-list]");
+    if (!pane || pane.offsetParent === null) {
+      return;
+    }
+    try {
+      var saved = window.sessionStorage.getItem(splitListScrollStorageKey());
+      if (saved !== null) {
+        pane.scrollTop = Number(saved) || 0;
+      }
+    } catch (err) {
+      // Ignore storage failures.
+    }
+  }
+
+  function setupSplitListScroll() {
+    var pane = document.querySelector("[data-split-list]");
+    if (!pane) {
+      return;
+    }
+    // Persist before leaving for a thread, and whenever the tab is hidden.
+    pane.addEventListener("click", function (event) {
+      if (event.target.closest("a[href]")) {
+        saveListScroll();
+      }
+    });
+    window.addEventListener("pagehide", saveListScroll);
+  }
+
   function setupSplitListInert() {
     var pane = document.querySelector("[data-split-list]");
     if (!pane || !window.matchMedia) {
@@ -966,12 +1018,7 @@ document.addEventListener("DOMContentLoaded", function () {
           });
         }
         pane.removeAttribute("data-inert-pane");
-        var backLink = document.querySelector(".back-link");
-        if (backLink) {
-          backLink.removeAttribute("data-inert-back");
-          backLink.removeAttribute("aria-hidden");
-          backLink.removeAttribute("tabindex");
-        }
+        saveListScroll();
       } else {
         pane.setAttribute("data-inert-pane", "true");
         if ("inert" in pane) {
@@ -985,12 +1032,8 @@ document.addEventListener("DOMContentLoaded", function () {
             }
           });
         }
-        var back = document.querySelector(".back-link");
-        if (back) {
-          back.setAttribute("data-inert-back", "true");
-          back.setAttribute("aria-hidden", "true");
-          back.setAttribute("tabindex", "-1");
-        }
+        // The back link's visibility is handled entirely by CSS (hidden >=1280px).
+        restoreListScroll();
       }
     }
     apply();
@@ -1006,6 +1049,7 @@ document.addEventListener("DOMContentLoaded", function () {
   setupBulkForm();
   setupInboxAutoRefresh();
   setupPullToRefresh();
+  setupSplitListScroll();
   setupSplitListInert();
 
   if ("serviceWorker" in navigator) {

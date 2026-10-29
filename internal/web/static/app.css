@@ -2623,13 +2623,11 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
     overflow-y: auto;
   }
 
-  /* W4: below 1280px the split list is display:none and must not be focusable;
-     in split mode the back link is shown again instead. */
-  .split-list[data-inert-pane="true"] {
+  /* W4: in split mode the list is already visible, so the back link to it is
+     redundant. Hiding it is pure CSS — no aria-hidden/tabindex juggling — so it
+     stays fully available to keyboard and screen-reader users below 1280px,
+     including when the list was skipped (?nolist=1). */
+  .split-layout .back-link {
     display: none;
-  }
-
-  .back-link[data-inert-back] {
-    display: inline-block;
   }
 }

@@ -75,6 +75,25 @@ func TestThreadDetailRendersSplitListPane(t *testing.T) {
 	if !strings.Contains(body, `container-wide`) {
 		t.Error("detail page with list pane must use the wide container")
 	}
+	// Exactly one top-level heading: the thread subject. The list pane must not
+	// contribute a second h1 (it uses an sr-only h2).
+	if got := strings.Count(body, "<h1"); got != 1 {
+		t.Errorf("detail page must have exactly one h1, got %d", got)
+	}
+	// The back link must be a plain focusable anchor in the markup; its visibility
+	// in split mode is CSS-only, so it must carry no baked-in AT suppression.
+	backIdx := strings.Index(body, `class="back-link"`)
+	if backIdx < 0 {
+		t.Fatal("detail page missing back link")
+	}
+	endIdx := strings.Index(body[backIdx:], ">")
+	if endIdx < 0 {
+		t.Fatal("malformed back link markup")
+	}
+	backTag := body[backIdx : backIdx+endIdx]
+	if strings.Contains(backTag, "aria-hidden") || strings.Contains(backTag, "tabindex") {
+		t.Errorf("back link must not hardcode aria-hidden/tabindex: %q", backTag)
+	}
 }
 
 func TestThreadDetailNolistRendersSinglePane(t *testing.T) {

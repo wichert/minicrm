@@ -982,7 +982,7 @@ const threadDetailBody = `
 <div class="split-layout" data-split-layout>
 {{if .List}}
   <aside class="split-list" data-split-list id="split-list" aria-label="Thread list">
-  <h1 class="sr-only">Threads</h1>
+  <h2 class="sr-only">Threads</h2>
   <div class="inbox-toolbar" data-inbox-toolbar>
     <div class="tab-strip" data-tab-strip>
     <nav class="tabs" aria-label="Thread status">
@@ -1043,6 +1043,7 @@ const threadDetailBody = `
       <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
     </form>
   </div>
+  <span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
   <div data-inbox-results>
   {{if and .List.Threads (ne .List.StatusFilter "completed") (ne .List.StatusFilter "spam")}}
   <form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-has-selection="false" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
@@ -1070,7 +1071,7 @@ const threadDetailBody = `
 {{end}}
   <div class="split-detail" data-split-detail>
 <div class="thread-top-bar thread-detail">
-  <a class="back-link" href="{{if .BackURL}}{{.BackURL}}{{else}}/threads{{end}}" aria-hidden="true" tabindex="-1">&larr; Back to threads</a>
+  <a class="back-link" href="{{if .BackURL}}{{.BackURL}}{{else}}/threads{{end}}">&larr; Back to threads</a>
   <a class="btn btn-secondary btn-small" href="/threads/{{.Thread.ID}}">Refresh</a>
 </div>
 <div class="card thread-header-card">
