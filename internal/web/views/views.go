@@ -68,6 +68,14 @@ type InboxViewData struct {
 	Search        string
 	NextURL       string
 	RefreshURL    string
+	// ShowAssigneeUI is true when more than one team member can be assigned, so the
+	// assignee filter is only rendered when it can change the result.
+	ShowAssigneeUI bool
+	// ClearSearchURL is the current inbox URL with the search term removed.
+	ClearSearchURL string
+	// WideLayout widens the page container for the thread list; the detail page keeps
+	// the narrower reading column.
+	WideLayout bool
 }
 
 // EmailItemView holds an email, its formatted timestamp, and its attachments.
@@ -93,6 +101,7 @@ type EventItemView struct {
 
 // ThreadDetailViewData holds data for rendering a single conversation thread.
 type ThreadDetailViewData struct {
+	WideLayout    bool
 	Title         string
 	AppName       string
 	AppShortName  string
@@ -153,6 +162,7 @@ type AuditEntryView struct {
 
 // SettingsViewData holds data for the admin settings and user management page.
 type SettingsViewData struct {
+	WideLayout      bool
 	Title           string
 	AppName         string
 	AppShortName    string
@@ -171,6 +181,7 @@ type SettingsViewData struct {
 
 // ErrorViewData holds data for the styled error page.
 type ErrorViewData struct {
+	WideLayout   bool
 	Title        string
 	AppName      string
 	AppShortName string
@@ -778,7 +789,7 @@ const layoutHeader = `<!DOCTYPE html>
       </div>
     </nav>
   </header>
-  <main id="main-content" class="container" tabindex="-1">
+  <main id="main-content" class="container{{if .WideLayout}} container-wide{{end}}" tabindex="-1">
     {{if .Flash.Message}}<div class="flash flash-{{.Flash.Kind}}" role="status">
       <span>{{.Flash.Message}}</span>
       <button type="button" class="flash-dismiss" data-flash-dismiss aria-label="Dismiss notice">×</button>
@@ -809,10 +820,7 @@ const inboxTablePartial = `
       <tr>
         {{if and (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="select-cell"><label class="select-label"><input type="checkbox" data-select-all aria-label="Select all on page"></label></th>{{end}}
         <th scope="col">Thread</th>
-        <th scope="col">Customer</th>
         <th scope="col">Status</th>
-        <th scope="col">Assignee</th>
-        {{if .ShowAccountUI}}<th scope="col">Account</th>{{end}}
         <th scope="col">Age</th>
         {{if and (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th>{{end}}
       </tr>
@@ -822,26 +830,21 @@ const inboxTablePartial = `
       <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}" data-row-href="/threads/{{.Thread.ID}}">
         {{if and (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}<td class="select-cell"><label class="select-label"><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-status="{{.Thread.Status}}" data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>{{end}}
         <td class="thread-cell">
-          <a class="thread-link" href="/threads/{{.Thread.ID}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
-          <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
-        </td>
-        <td class="customer-cell">
-          {{if .Thread.CustomerName}}
-          <span class="customer-name">{{.Thread.CustomerName}}</span>
-          {{if .Thread.CustomerEmail}}<span class="customer-email" title="{{.Thread.CustomerEmail}}">{{.Thread.CustomerEmail}}</span>{{end}}
-          {{else}}
-          <span class="customer-name"{{if .Thread.CustomerEmail}} title="{{.Thread.CustomerEmail}}"{{end}}>{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}</span>
-          {{end}}
+          <div class="thread-rowline">
+            <span class="thread-line">
+              <a class="thread-link" href="/threads/{{.Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
+              <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
+            </span>
+            <span class="thread-meta" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}{{if $.ShowAccountUI}} &middot; {{.AccountName}}{{end}} &middot; {{if .AssigneeName}}{{.AssigneeName}}{{else}}Unassigned{{end}}</span>
+          </div>
         </td>
         <td class="status-cell">
           <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
         </td>
-        <td class="assignee-cell">{{if .AssigneeName}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}</td>
-        {{if $.ShowAccountUI}}<td class="account-cell"><span class="badge badge-account">{{.AccountName}}</span></td>{{end}}
         <td class="nowrap age-cell">
           {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="Opened {{.OpenedFullTime}}">{{.WaitLabel}}</span>
+          {{else if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>
           {{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}
-          <span class="muted age-date">{{.FormattedTime}}</span>
         </td>
         {{if and (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}
         <td class="actions-cell">
@@ -883,11 +886,8 @@ const inboxTablePartial = `
 `
 
 const inboxBody = `
-<div class="page-heading page-heading-row">
-  <h1>Threads</h1>
-  <a class="btn btn-secondary btn-small" href="{{.RefreshURL}}">Refresh</a>
-</div>
-<div class="toolbar">
+<h1 class="sr-only">Threads</h1>
+<div class="inbox-toolbar" data-inbox-toolbar>
   <div class="tab-strip" data-tab-strip>
   <nav class="tabs" aria-label="Thread status">
     <a class="tab" href="/threads?status=attention&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "attention"}} aria-current="true"{{end}}>Needs attention <span class="count-pill">{{.Counts.NeedsAttention}}</span></a>
@@ -904,14 +904,26 @@ const inboxBody = `
     </details>
   </nav>
   </div>
+  <div class="results-status">
+    <p class="results-count">{{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}{{if .NextURL}} &middot; more available{{end}}</p>
+    <a class="refresh-meta" href="{{.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status>Refresh</span></a>
+  </div>
+</div>
+<div class="filter-sticky">
   <form method="get" action="/threads" class="filter-inline">
     <input type="hidden" name="status" value="{{.StatusFilter}}">
-    <label class="inline-field">Customer or subject
-      <input type="search" name="q" value="{{.Search}}">
+    <label class="inline-field search-field">
+      <span class="search-icon" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </span>
+      <span class="sr-only">Customer or subject</span>
+      <input type="search" name="q" value="{{.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
+      {{if .Search}}<a class="search-clear" href="{{.ClearSearchURL}}" aria-label="Clear search">&times;</a>{{end}}
     </label>
-    <button type="submit" class="btn btn-secondary">Search</button>
-    <label class="inline-field">Assignee
-      <select name="assignee" data-hx-get="/threads">
+    {{if .ShowAssigneeUI}}
+    <label class="inline-field inline-field-compact">
+      <span class="sr-only">Assignee</span>
+      <select name="assignee" data-hx-get="/threads" aria-label="Assignee">
         <option value="" {{if eq .AssigneeFilter ""}}selected{{end}}>Anyone</option>
         <option value="me" {{if eq .AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
         <option value="unassigned" {{if eq .AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
@@ -920,9 +932,11 @@ const inboxBody = `
         {{end}}
       </select>
     </label>
+    {{end}}
     {{if .ShowAccountUI}}
-    <label class="inline-field">Account
-      <select name="account" data-hx-get="/threads">
+    <label class="inline-field inline-field-compact">
+      <span class="sr-only">Account</span>
+      <select name="account" data-hx-get="/threads" aria-label="Account">
         <option value="">All accounts</option>
         {{range .Accounts}}
         <option value="{{.ID}}" {{if eq .ID $.AccountFilter}}selected{{end}}>{{.Name}}</option>
@@ -930,9 +944,10 @@ const inboxBody = `
       </select>
     </label>
     {{end}}
-    <noscript><button type="submit" class="btn btn-secondary">Filter</button></noscript>
+    <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
   </form>
 </div>
+<div data-inbox-results>
 {{if and .Threads (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}
 <form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-has-selection="false" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
   <input type="hidden" name="return_to" value="{{.RefreshURL}}">
@@ -951,11 +966,9 @@ const inboxBody = `
   </div>
 </form>
 {{end}}
-<p class="results-count">
-  Showing {{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}{{if .NextURL}}; more results available{{end}}
-</p>
 ` + inboxTablePartial + `
-{{if .NextURL}}<p><a class="btn btn-secondary" href="{{.NextURL}}">Older threads</a></p>{{end}}
+{{if .NextURL}}<p class="older-threads"><a class="btn btn-secondary" href="{{.NextURL}}">Older threads</a></p>{{end}}
+</div>
 `
 
 const threadDetailBody = `

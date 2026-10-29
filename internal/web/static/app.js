@@ -1,12 +1,16 @@
 /* MiniCRM progressive enhancement: filter auto-submit, confirmations, notice dismissal, frame resize */
 document.addEventListener("DOMContentLoaded", function () {
-  document.querySelectorAll("[data-hx-get]").forEach(function (el) {
-    el.addEventListener("change", function () {
-      if (el.form) {
-        el.form.submit();
-      }
+  function setupFilterAutoSubmit() {
+    document.querySelectorAll("[data-hx-get]").forEach(function (el) {
+      el.addEventListener("change", function () {
+        if (el.form) {
+          el.form.submit();
+        }
+      });
     });
-  });
+  }
+
+  setupFilterAutoSubmit();
 
   document.querySelectorAll("[data-tab-strip]").forEach(function (strip) {
     var tabs = strip.querySelector(".tabs");
@@ -82,8 +86,12 @@ document.addEventListener("DOMContentLoaded", function () {
     window.addEventListener("beforeunload", function (event) { if (!sending && (snapshot() !== saved || saving)) { event.preventDefault(); event.returnValue = ""; } });
   });
 
+  function setupBulkForm() {
   var bulkForm = document.getElementById("bulk-spam-form");
-  if (bulkForm) {
+  if (!bulkForm) {
+    return;
+  }
+  {
     var checks = Array.from(document.querySelectorAll("[data-select-thread]"));
     var selectAll = Array.from(document.querySelectorAll("[data-select-all], [data-select-all-mobile]"));
     var count = bulkForm.querySelector("[data-selected-count]");
@@ -142,6 +150,7 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     });
     refreshSelection();
+  }
   }
 
   // Confirm consequential actions in an accessible in-page dialog. When <dialog> is
@@ -371,20 +380,25 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
-  document.querySelectorAll("tr[data-row-href]").forEach(function (row) {
-    row.addEventListener("click", function (event) {
-      if (event.target.closest("a, button, input, select, label, summary, details")) {
-        return;
-      }
-      if (window.getSelection && String(window.getSelection())) {
-        return;
-      }
-      window.location.href = row.getAttribute("data-row-href");
+  function setupRowLinks() {
+    document.querySelectorAll("tr[data-row-href]").forEach(function (row) {
+      row.addEventListener("click", function (event) {
+        if (event.target.closest("a, button, input, select, label, summary, details")) {
+          return;
+        }
+        if (window.getSelection && String(window.getSelection())) {
+          return;
+        }
+        window.location.href = row.getAttribute("data-row-href");
+      });
     });
-  });
+  }
 
-  var rowMenus = Array.from(document.querySelectorAll("details[data-row-menu]"));
-  if (rowMenus.length) {
+  function setupRowMenus() {
+    var rowMenus = Array.from(document.querySelectorAll("details[data-row-menu]"));
+    if (!rowMenus.length) {
+      return;
+    }
     rowMenus.forEach(function (menu) {
       menu.addEventListener("toggle", function () {
         if (!menu.open) {
@@ -420,6 +434,231 @@ document.addEventListener("DOMContentLoaded", function () {
       });
     });
   }
+
+  /* Inbox auto-refresh: keeps the thread list current without a Refresh button.
+     Polls the current URL every 60s and swaps just the results region, pausing
+     while the tab is hidden, text is selected, a row menu or confirm <dialog> is
+     open, or an inline edit has unsaved input. Plain links keep working without
+     JavaScript. */
+  var inboxRefresh = { refresh: null, repaint: null };
+
+  function setupInboxAutoRefresh() {
+    var results = document.querySelector("[data-inbox-results]");
+    var statusEl = document.querySelector("[data-refresh-status]");
+    var refreshLink = document.querySelector("[data-refresh-link]");
+    if (!results) {
+      return;
+    }
+    var intervalMs = 60000;
+    var lastLoadedAt = Date.now();
+    var inflight = false;
+
+    function hasPendingInlineEdit() {
+      var active = document.activeElement;
+      if (!active) {
+        return false;
+      }
+      var tag = active.tagName;
+      if (tag === "TEXTAREA" || tag === "SELECT") {
+        return true;
+      }
+      if (tag === "INPUT") {
+        var type = (active.getAttribute("type") || "text").toLowerCase();
+        if (type === "checkbox" || type === "radio" || type === "submit") {
+          return false;
+        }
+        return String(active.value) !== String(active.defaultValue || "");
+      }
+      return Boolean(active.isContentEditable);
+    }
+
+    function isPaused() {
+      if (document.visibilityState === "hidden") {
+        return true;
+      }
+      if (window.getSelection && String(window.getSelection())) {
+        return true;
+      }
+      if (document.querySelector("details[data-row-menu][open]")) {
+        return true;
+      }
+      if (document.querySelector("dialog[open]")) {
+        return true;
+      }
+      // Never yank the DOM out from under a focused row action or menu trigger.
+      if (results.contains(document.activeElement)) {
+        return true;
+      }
+      return hasPendingInlineEdit();
+    }
+
+    function formatAgo(ms) {
+      var seconds = Math.max(0, Math.round(ms / 1000));
+      if (seconds < 45) {
+        return "Updated just now";
+      }
+      var minutes = Math.round(seconds / 60);
+      if (minutes < 60) {
+        return "Updated " + minutes + "m ago";
+      }
+      var hours = Math.round(minutes / 60);
+      return "Updated " + hours + "h ago";
+    }
+
+    function paintStatus() {
+      if (!statusEl) {
+        return;
+      }
+      statusEl.textContent = formatAgo(Date.now() - lastLoadedAt);
+    }
+
+    function swapResults(html) {
+      var doc = new DOMParser().parseFromString(html, "text/html");
+      var fresh = doc.querySelector("[data-inbox-results]");
+      if (!fresh) {
+        return false;
+      }
+      results.innerHTML = fresh.innerHTML;
+      var freshCount = doc.querySelector(".results-count");
+      var count = document.querySelector(".inbox-toolbar .results-count");
+      if (freshCount && count) {
+        count.innerHTML = freshCount.innerHTML;
+      }
+      var freshTabs = doc.querySelector(".tabs");
+      var tabs = document.querySelector(".inbox-toolbar .tabs");
+      if (freshTabs && tabs) {
+        tabs.innerHTML = freshTabs.innerHTML;
+      }
+      setupRowLinks();
+      setupRowMenus();
+      setupBulkForm();
+      return true;
+    }
+
+    function refresh() {
+      if (inflight) {
+        return;
+      }
+      inflight = true;
+      var url = window.location.pathname + window.location.search;
+      fetch(url, { headers: { "X-Requested-With": "fetch" }, credentials: "same-origin" })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("refresh failed");
+          }
+          return response.text();
+        })
+        .then(function (html) {
+          if (swapResults(html)) {
+            lastLoadedAt = Date.now();
+            paintStatus();
+          }
+        })
+        .catch(function () {
+          // Keep the current list; the next tick or a manual click retries.
+        })
+        .then(function () {
+          inflight = false;
+        });
+    }
+
+    if (refreshLink) {
+      refreshLink.addEventListener("click", function (event) {
+        event.preventDefault();
+        refresh();
+      });
+    }
+    inboxRefresh.refresh = refresh;
+    inboxRefresh.repaint = paintStatus;
+
+    paintStatus();
+    window.setInterval(paintStatus, 30000);
+    window.setInterval(function () {
+      if (!isPaused()) {
+        refresh();
+      }
+    }, intervalMs);
+    // Returning to the tab repaints the age label; a restored back/forward cache
+    // entry revalidates the list once (the zero-cost fallback the plan asks for).
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") {
+        paintStatus();
+      }
+    });
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted) {
+        refresh();
+      }
+    });
+  }
+
+  /* Pull-to-refresh on touch devices, on top of the browser's own overscroll
+     behaviour (which reloads the whole page and loses scroll position). Only
+     engages at the very top of the document, ignores gestures that start in a
+     paused context, and never fires while another refresh is running. */
+  function setupPullToRefresh() {
+    if (!("ontouchstart" in window) || !document.querySelector("[data-inbox-results]")) {
+      return;
+    }
+    var statusEl = document.querySelector("[data-refresh-status]");
+    var startY = null;
+    var pulled = 0;
+    var threshold = 70;
+
+    function triggerRefresh() {
+      if (inboxRefresh.refresh) {
+        inboxRefresh.refresh();
+      }
+    }
+
+    document.addEventListener(
+      "touchstart",
+      function (event) {
+        if (window.scrollY > 0 || event.touches.length !== 1 || event.target.closest("dialog, details[data-row-menu]")) {
+          startY = null;
+          return;
+        }
+        startY = event.touches[0].clientY;
+        pulled = 0;
+      },
+      { passive: true }
+    );
+
+    document.addEventListener(
+      "touchmove",
+      function (event) {
+        if (startY === null || event.touches.length !== 1) {
+          return;
+        }
+        pulled = event.touches[0].clientY - startY;
+        if (pulled > 0 && statusEl && window.scrollY === 0) {
+          statusEl.textContent = pulled >= threshold ? "Release to refresh" : "Pull to refresh";
+        }
+      },
+      { passive: true }
+    );
+
+    document.addEventListener(
+      "touchend",
+      function () {
+        var shouldRefresh = startY !== null && pulled >= threshold && window.scrollY === 0;
+        startY = null;
+        pulled = 0;
+        if (shouldRefresh) {
+          triggerRefresh();
+        } else if (inboxRefresh.repaint) {
+          inboxRefresh.repaint();
+        }
+      },
+      { passive: true }
+    );
+  }
+
+  setupRowLinks();
+  setupRowMenus();
+  setupBulkForm();
+  setupInboxAutoRefresh();
+  setupPullToRefresh();
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {

@@ -1028,6 +1028,12 @@ p.card.empty-state {
   padding-bottom: calc(3rem + env(safe-area-inset-bottom));
 }
 
+/* The thread list uses the extra desktop width; reading views keep 1120px. */
+.container-wide {
+  max-width: min(1400px, 100%);
+  margin-top: 0;
+}
+
 .page-heading-row {
   display: flex;
   align-items: center;
@@ -1125,15 +1131,30 @@ h3 {
   letter-spacing: -0.02em;
 }
 
+/* Screen-reader-only utility: keeps text in the accessibility tree without
+   spending any layout space (used for the inbox <h1> and filter labels). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ---------- Inbox toolbar & tabs ---------- */
 
-.toolbar {
+.inbox-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem 1.25rem;
-  margin-bottom: 0.9rem;
+  gap: 0.2rem 1.25rem;
+  margin-bottom: 0;
 }
 
 .tab-strip {
@@ -1145,7 +1166,7 @@ h3 {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 0.15rem;
-  padding: 0.2rem;
+  padding: 0.15rem;
   background: #e8eaf4;
   border-radius: 0.6rem;
 }
@@ -1154,11 +1175,11 @@ h3 {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  padding: 0.35rem 0.85rem;
+  padding: 0.28rem 0.75rem;
   border-radius: 0.45rem;
   color: #4b5170;
   font-weight: 600;
-  font-size: 0.9rem;
+  font-size: 0.88rem;
   text-decoration: none;
 }
 
@@ -1215,11 +1236,21 @@ h3 {
   font-weight: 600;
 }
 
+.filter-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin: 0 -0.25rem 0;
+  padding: 0.1rem 0.25rem;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
 .filter-inline {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.6rem 1rem;
+  gap: 0.4rem 0.6rem;
   margin: 0;
 }
 
@@ -1233,15 +1264,109 @@ h3 {
 }
 
 .inline-field select {
-  height: 2.25rem;
-  padding: 0 0.6rem;
+  height: 2rem;
+  padding: 0 0.55rem;
   font-weight: 500;
   color: var(--text);
 }
 
+.inline-field.search-field {
+  position: relative;
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.inline-field.search-field input[type="search"] {
+  width: 100%;
+  height: 2rem;
+  padding-left: 2rem;
+  padding-right: 1.9rem;
+}
+
+.search-icon {
+  position: absolute;
+  left: 0.6rem;
+  display: inline-flex;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.search-clear {
+  position: absolute;
+  right: 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 999px;
+  background: #eef0fa;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.search-clear:hover {
+  background: #e2e5f3;
+  color: var(--text);
+}
+
+.refresh-meta {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.refresh-meta:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.inbox-toolbar .results-status {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
+}
+
+.inbox-toolbar .results-count {
+  margin: 0;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+/* Below 900px the subject and snippet stack again (the plan's two-line row only
+   fuses them into one line where there is room). */
+@media (max-width: 899px) {
+  .thread-line {
+    display: block;
+  }
+
+  .thread-link {
+    display: inline;
+    white-space: normal;
+  }
+
+  .thread-snippet {
+    display: block;
+    margin-top: 0.1rem;
+  }
+
+  .thread-snippet::before {
+    content: none;
+  }
+
+  .thread-meta {
+    margin-top: 0.15rem;
+  }
+}
+
 /* ---------- Inbox rows ---------- */
 
-.bulk-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin: 0.75rem 0; }
+.bulk-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin: 0; padding: 0; }
 .bulk-actions-controls { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; }
 .btn:disabled,
 .btn[aria-disabled="true"],
@@ -1268,16 +1393,9 @@ select:disabled {
   padding: 0.25rem;
   cursor: pointer;
 }
-.status-cell,
-.assignee-cell,
-.account-cell {
+.status-cell {
   width: 1%;
   white-space: nowrap;
-}
-.assignee-cell {
-  max-width: 10rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .age-cell {
   width: 1%;
@@ -1394,28 +1512,53 @@ select:disabled {
 }
 
 .thread-cell {
-  max-width: 28rem;
+  min-width: 0;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+
+.thread-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
 }
 
 .thread-link {
   color: var(--text);
-  font-weight: 650;
+  font-weight: 600;
   text-decoration: none;
-}
-
-.thread-link:hover {
-  color: var(--primary-strong);
-  text-decoration: underline;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .thread-snippet {
   display: block;
-  margin-top: 0.15rem;
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+.thread-snippet::before {
+  content: "— ";
+  color: var(--border-strong);
+}
+
+.thread-meta {
+  display: block;
+  margin-top: 0.1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .snippet-you {
@@ -1436,21 +1579,14 @@ select:disabled {
   line-height: 1.45;
 }
 
+/* Customer name/account/assignee are now in .thread-meta, so the old fixed-width
+   customer column is gone; any residual cell must shrink instead of pushing the
+   status/age/actions columns out of the viewport. */
 .customer-cell {
-  max-width: 14rem;
-}
-
-.customer-cell .customer-name,
-.customer-cell .customer-email {
+  max-width: 12rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.age-cell .age-date {
-  display: block;
-  font-size: 0.8rem;
-  margin-top: 0.1rem;
 }
 
 .wait-badge {
@@ -1750,11 +1886,6 @@ details.message:not([open]) > .message-header {
 }
 
 @media (max-width: 768px) {
-  .toolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
   .message-header {
     flex-wrap: wrap;
   }
@@ -1782,25 +1913,81 @@ details.message:not([open]) > .message-header {
   }
 }
 
-/* Keep the inbox table within the container without horizontal scrolling on desktop. */
+/* Keep the inbox table within the container without horizontal scrolling on desktop.
+   The thread cell absorbs the remaining width and truncates instead of pushing the
+   status/age/actions columns out of the viewport (the old 1024px overflow). */
 .threads-table {
   min-width: 0;
   table-layout: auto;
 }
 
+.threads-table th,
+.threads-table td {
+  padding-top: 0.4rem;
+  padding-bottom: 0.4rem;
+}
+
+/* The column headers are a legend, not content: each row now carries its own
+   status pill, age badge and menu, so the header row is visually hidden (it stays
+   in the accessibility tree for table semantics) to give the space to threads. */
+.threads-table thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .thread-cell {
   width: auto;
   max-width: 0;
-  min-width: 12rem;
+  min-width: 10rem;
 }
 
 .thread-snippet {
   max-width: 100%;
 }
 
-.customer-cell {
-  width: 12rem;
-  max-width: 12rem;
+.actions-cell {
+  overflow: visible;
+}
+
+.thread-rowline {
+  display: block;
+  min-width: 0;
+}
+
+@media (min-width: 1280px) {
+  /* One-line row: subject — snippet · customer · account · assignee. */
+  .threads-table th,
+  .threads-table td {
+    padding-top: 0.42rem;
+    padding-bottom: 0.42rem;
+  }
+
+  .thread-rowline {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    white-space: nowrap;
+  }
+
+  .thread-line {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .thread-meta {
+    flex: 0 0 auto;
+    max-width: 34%;
+    margin-top: 0;
+    text-align: right;
+  }
 }
 
 /* ---------- Standalone & Mobile PWA Responsive Layout ---------- */
@@ -1859,13 +2046,23 @@ details.message:not([open]) > .message-header {
     margin-top: 1rem;
   }
 
-  .toolbar {
-    width: 100%;
-    min-width: 0;
+  /* Tabs and the result count share one row; the tab strip scrolls instead of
+     stacking, so the toolbar costs a single line of chrome. The per-tab counts
+     already state the numbers, so the separate results count is hidden on phones
+     to leave the three primary tabs room to fit at 390px. The pull gesture is the
+     manual refresh affordance here, so the muted timestamp stays desktop-only. */
+  .inbox-toolbar {
+    flex-wrap: nowrap;
   }
 
   .tab-strip {
-    width: 100%;
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+
+  .inbox-toolbar .results-status {
+    display: none;
   }
 
   /* The fades indicate more tabs without covering their touch targets. */
@@ -1911,32 +2108,67 @@ details.message:not([open]) > .message-header {
     display: none;
   }
 
+  /* Tighter tab chrome so the three primary tabs plus More fit at 390px without
+     horizontal scrolling; the strip still scrolls if counts grow, and the fade
+     indicators plus focus scrolling signal that. */
   .tab {
     flex: none;
     white-space: nowrap;
     display: inline-flex;
     align-items: center;
+    gap: 0.28rem;
+    padding: 0.26rem 0.5rem;
+    font-size: 0.84rem;
   }
 
+  .tab .count-pill {
+    min-width: 1.15rem;
+    padding: 0 0.3rem;
+    font-size: 0.72rem;
+  }
+
+  /* Keep the filter row compact on phones: the search field shares one line with
+     the compact selects, and everything still wraps if space runs out. */
   .filter-inline {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
-    gap: 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
     width: 100%;
   }
 
   .inline-field {
     display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 0.25rem;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  /* All filters share one row on phones: the search field takes whatever space
+     is left and the two compact selects keep their natural width (capped, with
+     an ellipsis) so a single line is enough down to 390px. */
+  .inline-field.search-field {
+    flex: 1 1 8rem;
+    min-width: 0;
+  }
+
+  .inline-field.inline-field-compact {
+    flex: 0 1 auto;
+    min-width: 0;
   }
 
   .inline-field select,
   .assign-form .inline-field select {
-    width: 100%;
+    width: auto;
+    max-width: 6.4rem;
     min-width: 0;
     height: 2.5rem;
+    padding: 0 0.3rem;
+    font-size: 0.82rem;
+    text-overflow: ellipsis;
+  }
+
+  .refresh-meta {
+    text-align: right;
   }
 
   .actions-group {
@@ -2017,29 +2249,58 @@ details.message:not([open]) > .message-header {
   .mobile-select-all { display: inline-flex; align-items: center; gap: 0.4rem; }
   .bulk-actions[data-has-selection="false"] .bulk-actions-controls { display: none; }
 
-  .threads-table td.select-cell {
+  /* Card order on phones: subject/snippet first, then one line of status, age,
+     actions and the selection checkbox. */
+  .threads-table td.thread-cell {
     order: 0;
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    padding: 0.1rem 0;
+  }
+
+  .threads-table td.thread-cell .thread-line {
+    display: block;
+  }
+
+  /* Keep phone cards a predictable height: long subjects wrap to at most two
+     lines, the snippet and metadata stay on one truncated line each. */
+  .threads-table td.thread-cell .thread-link {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    white-space: normal;
+  }
+
+  .threads-table td.thread-cell .thread-snippet {
+    display: block;
+    max-width: 100%;
+    margin-top: 0.1rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .threads-table td.thread-cell .thread-snippet::before {
+    content: none;
+  }
+
+  .threads-table td.thread-cell .thread-meta {
+    display: block;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .threads-table td.status-cell {
+    order: 1;
     flex: 0 0 auto;
     width: auto;
-    margin-left: -0.2rem;
-  }
-
-  .threads-table td.customer-cell {
-    order: 1;
-    flex: 1 1 0%;
-    width: auto;
-    max-width: none;
-    min-width: 0;
-  }
-
-  .threads-table td.customer-cell .customer-name {
-    display: block;
-    font-weight: 600;
-    font-size: 0.88rem;
-  }
-
-  .threads-table td.customer-cell .customer-email {
-    display: none;
   }
 
   .threads-table td.age-cell {
@@ -2051,10 +2312,6 @@ details.message:not([open]) > .message-header {
     font-size: 0.82rem;
   }
 
-  .threads-table td.age-cell .age-date {
-    display: none;
-  }
-
   .threads-table td.actions-cell {
     order: 3;
     flex: 0 0 auto;
@@ -2063,42 +2320,12 @@ details.message:not([open]) > .message-header {
     margin-right: -0.2rem;
   }
 
-  .threads-table td.thread-cell {
+  .threads-table td.select-cell {
     order: 4;
-    flex: 1 1 100%;
-    width: 100%;
-    max-width: 100%;
-    min-width: 0;
-    overflow: hidden;
-    padding: 0.1rem 0;
-  }
-
-  .threads-table td.thread-cell .thread-snippet {
-    max-width: 100%;
-  }
-
-  .threads-table td.status-cell {
-    order: 5;
     flex: 0 0 auto;
     width: auto;
-  }
-
-  .threads-table td.account-cell {
-    order: 6;
-    flex: 0 0 auto;
-    width: auto;
-  }
-
-  .threads-table td.assignee-cell {
-    order: 7;
-    flex: 0 1 auto;
-    width: auto;
-    max-width: 55%;
-    margin-left: auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-size: 0.82rem;
-    color: var(--muted);
+    padding-left: 0;
+    margin-left: -0.2rem;
   }
 }
 

@@ -515,6 +515,8 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		userNames[u.ID] = u.DisplayName
 	}
 
+	assignableUsers := assigneeFilterUsers(users, user)
+
 	items := make([]views.ThreadSummaryItem, 0, len(threads))
 	for _, th := range threads {
 		assigneeName := ""
@@ -551,6 +553,14 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Clearing the search keeps the active tab and other filters.
+	clearSearchQuery := r.URL.Query()
+	clearSearchQuery.Del("q")
+	clearSearchQuery.Del("before")
+	clearSearchQuery.Del("id")
+	clearSearchQuery.Set("status", statusStr)
+	clearSearchURL := "/threads?" + clearSearchQuery.Encode()
+
 	b := s.appBranding()
 	partial := r.Header.Get("HX-Request") == "true"
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -565,14 +575,17 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 		Counts:         counts,
 		StatusFilter:   statusStr,
 		AssigneeFilter: assigneeFilter,
-		Users:          assigneeFilterUsers(users, user),
+		Users:          assignableUsers,
 		DisplayTZ:      displayTZ,
 		ShowAccountUI:  user.HasMultipleAccounts(),
+		ShowAssigneeUI: len(assignableUsers) > 1,
 		AccountFilter:  accountFilter,
 		Accounts:       s.accessibleAccounts(user),
 		Search:         search,
+		ClearSearchURL: clearSearchURL,
 		NextURL:        nextURL,
 		RefreshURL:     refreshURL,
+		WideLayout:     true,
 	}, partial); err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not render the conversation threads.")
 	}
