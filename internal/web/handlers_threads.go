@@ -321,6 +321,24 @@ func sanitizeInboxBackURL(raw, requestHost string) string {
 	return "/threads?" + u.RawQuery
 }
 
+// threadPathWithoutSearch builds the split pane's clear-search link: the thread
+// detail path carrying the pane queue's filters with the search term (and any
+// pagination cursor) removed, so clearing the search re-renders the split view
+// with the remaining filters instead of navigating to the plain inbox.
+func threadPathWithoutSearch(paneBase string, threadID uuid.UUID) string {
+	base := views.ThreadDetailURL(paneBase, threadID)
+	u, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+	q := u.Query()
+	q.Del("q")
+	q.Del("before")
+	q.Del("id")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // renderError renders the styled application error page with the given status code.
 func (s *Server) renderError(w http.ResponseWriter, r *http.Request, status int, heading, message string) {
 	user, _ := auth.UserFromContext(r.Context())
@@ -709,6 +727,12 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	list.ActiveNav = "threads"
 	list.CurrentUser = user
 	list.WideLayout = true
+	// Row links carry the queue's filters onto the detail URL: opening a thread
+	// from a filtered list renders the split view with the same filters instead
+	// of falling back to the default open inbox. The value is the sanitized
+	// current inbox URL (same allowlist as the session copy above), and
+	// threadDetailURL appends only its query string to /threads/{id}.
+	list.PaneLinksBaseURL = sanitizeInboxBackURL(r.URL.RequestURI(), r.Host)
 	if err := views.RenderInbox(w, list, partial); err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not render the conversation threads.")
 	}
@@ -750,19 +774,36 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 	// W4 split layout: the same document also renders the inbox list pane.
 	// `?nolist=1` is the only escape hatch (never set by JS); without it the
 	// detail request's own filter params (status/assignee/account/q) select the
-	// queue shown in the pane, defaulting to the open inbox.
+	// queue shown in the pane. When the request carries no filter query (a deep
+	// link, a bookmark, or a Back reload of a bare /threads/{id}), the pane falls
+	// back to the last-visited inbox queue from the session (same source as the
+	// back link) so it shows a useful queue instead of the bare default.
 	// The pane's row links address the thread by path (/threads/{id}) and carry
 	// this inbox URL's query, so opening a thread from a filtered queue re-renders
-	// the pane with the same filters. Fall back to the last-visited inbox (same
-	// source as the back link) so a deep link without a query still shows a useful
-	// queue.
+	// the pane with the same filters.
 	paneBase := sanitizeInboxBackURL(r.URL.RequestURI(), r.Host)
-	if paneBase == "" && s.sessions != nil {
-		paneBase = sanitizeInboxBackURL(s.sessions.GetString(ctx, lastInboxURLSessionKey), r.Host)
+	filtersFromSession := false
+	if (paneBase == "" || paneBase == "/threads") && s.sessions != nil {
+		if saved := sanitizeInboxBackURL(s.sessions.GetString(ctx, lastInboxURLSessionKey), r.Host); saved != "" && saved != "/threads" {
+			paneBase = saved
+			filtersFromSession = true
+		}
 	}
 	var listData *views.InboxViewData
 	if r.URL.Query().Get("nolist") != "1" {
-		list, listErr := s.loadInboxList(ctx, user, r, false)
+		// Deep-link fallback: the queue is loaded from the saved inbox URL's query
+		// when this request has no filter params of its own. The synthetic request
+		// is used only to parse filters; page chrome below is derived from the
+		// original request.
+		listReq := r
+		if filtersFromSession {
+			if u, err := url.Parse(paneBase); err == nil {
+				synthetic := *r
+				synthetic.URL = u
+				listReq = &synthetic
+			}
+		}
+		list, listErr := s.loadInboxList(ctx, user, listReq, false)
 		if listErr == nil {
 			list.WideLayout = false // pane chrome only; the page container is driven by the detail view
 			// Row links address the thread by path and carry the current inbox query,
@@ -771,6 +812,17 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 			// Pane rendering: no bulk-select/status/age columns, and the open thread
 			// is marked as the current row.
 			list.PaneMode = true
+			// Refresh and clear-search must stay on the split view: point them at
+			// this thread's path with the queue's filters, so a no-JS refresh or
+			// search-clear re-renders detail+pane instead of navigating to the list.
+			list.RefreshURL = views.ThreadDetailURL(paneBase, thread.ID)
+			list.ClearSearchURL = threadPathWithoutSearch(paneBase, thread.ID)
+			// "Load older" pages the pane in place instead of jumping to the plain
+			// inbox: same cursor query, addressed by the thread path. No-JS keeps
+			// working because it is an ordinary link.
+			if list.NextURL != "" {
+				list.NextURL = views.ThreadDetailURL(list.NextURL, thread.ID)
+			}
 			for i := range list.Threads {
 				if list.Threads[i].Thread.ID == thread.ID {
 					list.Threads[i].IsCurrent = true
