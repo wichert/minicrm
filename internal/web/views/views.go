@@ -745,7 +745,8 @@ var (
 	inboxFullTmpl = template.Must(template.New("inbox").Funcs(templateFuncs).Parse(inboxTablePartial + layoutHeader + inboxBody + layoutFooter))
 	inboxPartTmpl = template.Must(template.New("inbox_partial").Funcs(templateFuncs).Parse(inboxTablePartial))
 	detailTmpl    = template.Must(template.New("detail").Funcs(templateFuncs).Parse(inboxTablePartial + layoutHeader + threadDetailBody + layoutFooter))
-	settingsTmpl  = template.Must(template.New("settings").Funcs(templateFuncs).Parse(layoutHeader + settingsBody + layoutFooter))
+	settingsTmpl  = template.Must(template.New("settings").Funcs(templateFuncs).Parse(layoutHeader + settingsAuditTablePartial + settingsBody + layoutFooter))
+	activityTmpl  = template.Must(template.New("activity").Funcs(templateFuncs).Parse(layoutHeader + settingsAuditTablePartial + activityBody + layoutFooter))
 	errorTmpl     = template.Must(template.New("error").Funcs(templateFuncs).Parse(layoutHeader + errorBody + layoutFooter))
 	emailBodyTmpl = template.Must(template.New("email_body").Funcs(templateFuncs).Parse(isolatedEmailBodyHTML))
 )
@@ -766,6 +767,31 @@ func RenderThreadDetail(w io.Writer, data ThreadDetailViewData) error {
 // RenderSettings renders the admin settings and user management view.
 func RenderSettings(w io.Writer, data SettingsViewData) error {
 	return settingsTmpl.Execute(w, data)
+}
+
+// ActivityViewData holds data for the admin full-activity page.
+type ActivityViewData struct {
+	WideLayout   bool
+	Title        string
+	AppName      string
+	AppShortName string
+	Flash        Flash
+	ActiveNav    string
+	CurrentUser  sqlc.User
+	AuditLogs    []AuditEntryView
+	// Page is the 1-based page number being shown.
+	Page int
+	// HasPrev/HasNext drive the pagination controls.
+	HasPrev bool
+	HasNext bool
+	// PagePrev/PageNext are the target page numbers for the links.
+	PagePrev int
+	PageNext int
+}
+
+// RenderActivity renders the admin full-activity page.
+func RenderActivity(w io.Writer, data ActivityViewData) error {
+	return activityTmpl.Execute(w, data)
 }
 
 // RenderError renders the styled error page.
@@ -1394,13 +1420,20 @@ const settingsBody = `
   <h1>Settings</h1>
 </div>
 
+<nav class="settings-section-nav" aria-label="Settings sections">
+  <a href="#settings-routing">Routing &amp; display</a>
+  <a href="#settings-folders">Folders</a>
+  <a href="#settings-team">Team</a>
+  <a href="#settings-activity">Activity</a>
+</nav>
+
 {{if .Errors}}
 <div class="form-errors" role="alert">
   <ul>{{range .Errors}}<li>{{.}}</li>{{end}}</ul>
 </div>
 {{end}}
 
-<form method="post" action="/settings" class="card">
+<form method="post" action="/settings" class="card" id="settings-routing">
   <h2>Routing &amp; display</h2>
   {{range .AccountSettings}}
   <fieldset>
@@ -1432,7 +1465,7 @@ const settingsBody = `
       <span class="helper">Open threads older than this appear in Needs attention.</span>
     </label>
   </div>
-  <fieldset>
+  <fieldset id="settings-folders">
     <legend>IMAP folder mapping</legend>
   <div class="form-grid">
     <label class="field">IMAP INBOX folder
@@ -1452,10 +1485,10 @@ const settingsBody = `
   <button type="submit" class="btn btn-primary">Save settings</button>
 </form>
 
-<h2>Team members</h2>
+<h2 id="settings-team">Team members</h2>
 <div class="card">
   <div class="table-wrap">
-    <table>
+    <table class="settings-table settings-users-table">
       <thead>
         <tr>
           <th scope="col">Name</th>
@@ -1468,17 +1501,17 @@ const settingsBody = `
       <tbody>
         {{range .Users}}
         <tr>
-          <td>{{.DisplayName}}</td>
-          <td>{{.Email}}</td>
-          <td>{{roleLabel .Role}}</td>
-          <td>
+          <td data-label="Name" class="settings-user-name"><span class="settings-user-name-text">{{.DisplayName}}</span>{{if .IsActive}}<span class="badge badge-active">Active</span>{{else}}<span class="badge badge-inactive">Inactive</span>{{end}}<span class="badge badge-role">{{roleLabel .Role}}</span></td>
+          <td data-label="Email" class="settings-user-email">{{.Email}}</td>
+          <td data-label="Role" class="settings-user-role">{{roleLabel .Role}}</td>
+          <td data-label="Account access" class="settings-user-accounts">
             {{if .AllowedAccounts}}
-              {{range $index, $account := .AllowedAccounts}}{{if $index}}, {{end}}{{index $.AccountNames $account}}{{end}}
+              {{range .AllowedAccounts}}<span class="account-chip">{{index $.AccountNames .}}</span>{{end}}
             {{else}}
               <span class="muted">No account access</span>
             {{end}}
           </td>
-          <td>{{if .IsActive}}<span class="badge badge-active">Active</span>{{else}}<span class="badge badge-inactive">Inactive</span>{{end}}</td>
+          <td data-label="Status" class="settings-user-status">{{if .IsActive}}Active{{else}}Inactive{{end}}</td>
         </tr>
         {{else}}
         <tr><td colspan="5" class="empty-state">No team members yet.</td></tr>
@@ -1515,31 +1548,63 @@ const settingsBody = `
   <button type="submit" class="btn btn-primary">Create user</button>
 </form>
 
-<h2>Recent activity</h2>
+<h2 id="settings-activity">Recent activity</h2>
+<div class="card settings-recent">
+  <div class="table-wrap">
+    {{template "settings_audit_table" .AuditLogs}}
+  </div>
+  <div class="settings-activity-footer">
+    <a class="settings-activity-link" href="/settings/activity">View full activity</a>
+  </div>
+</div>
+`
+
+// settingsAuditTablePartial is the single source of truth for the recent-activity
+// table, shared by the settings page (bounded render) and /settings/activity
+// (paginated). On mobile the same markup transforms into stacked cards via CSS:
+// each td carries data-label and status/role also appear inside the name cell
+// (line 1), so the transformation stays CSS-only per the W6 plan.
+const settingsAuditTablePartial = `{{define "settings_audit_table"}}
+<table class="settings-table settings-audit-table">
+  <thead>
+    <tr>
+      <th scope="col">Time</th>
+      <th scope="col">Actor</th>
+      <th scope="col">Event</th>
+      <th scope="col">Target</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .}}
+    <tr>
+      <td data-label="Time" class="nowrap"><time title="{{.FullTime}}">{{.FormattedTime}}</time></td>
+      <td data-label="Actor">{{.ActorName}}</td>
+      <td data-label="Event">{{.Label}}</td>
+      <td data-label="Target">{{if .TargetName}}{{.TargetName}}{{else}}<span class="muted">—</span>{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="4" class="empty-state">No activity recorded yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}`
+
+// activityBody is the admin full-activity page: the shared audit table plus
+// pagination links. Admin-only route (requireAdmin in router.go).
+const activityBody = `
+<div class="page-heading page-heading-row">
+  <h1>Full activity</h1>
+  <a class="btn btn-ghost btn-small" href="/settings">Back to settings</a>
+</div>
+
 <div class="card">
   <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th scope="col">Time</th>
-          <th scope="col">Actor</th>
-          <th scope="col">Event</th>
-          <th scope="col">Target</th>
-        </tr>
-      </thead>
-      <tbody>
-        {{range .AuditLogs}}
-        <tr>
-          <td class="nowrap"><time title="{{.FullTime}}">{{.FormattedTime}}</time></td>
-          <td>{{.ActorName}}</td>
-          <td>{{.Label}}</td>
-          <td>{{if .TargetName}}{{.TargetName}}{{else}}<span class="muted">—</span>{{end}}</td>
-        </tr>
-        {{else}}
-        <tr><td colspan="4" class="empty-state">No activity recorded yet.</td></tr>
-        {{end}}
-      </tbody>
-    </table>
+    {{template "settings_audit_table" .AuditLogs}}
+  </div>
+  <div class="activity-pagination">
+    {{if .HasPrev}}<a class="btn btn-ghost btn-small" href="/settings/activity?page={{.PagePrev}}">&larr; Newer</a>{{else}}<span></span>{{end}}
+    <span class="activity-page-label muted">Page {{.Page}}</span>
+    {{if .HasNext}}<a class="btn btn-ghost btn-small" href="/settings/activity?page={{.PageNext}}">Older &rarr;</a>{{else}}<span></span>{{end}}
   </div>
 </div>
 `

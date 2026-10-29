@@ -67,6 +67,7 @@ type HandlerStore interface {
 	GetSystemSettings(ctx context.Context) (sqlc.SystemSettings, error)
 	UpsertSystemSettings(ctx context.Context, s sqlc.SystemSettings) (sqlc.SystemSettings, error)
 	ListAuditLogs(ctx context.Context, limit int) ([]sqlc.AuditLog, error)
+	ListAuditLogsPage(ctx context.Context, limit, offset int) ([]sqlc.AuditLog, error)
 	GetAccountSettings(ctx context.Context, accountID string) (sqlc.AccountSettings, error)
 	ListAccountSettings(ctx context.Context) ([]sqlc.AccountSettings, error)
 	UpsertAccountSettings(ctx context.Context, s sqlc.AccountSettings) (sqlc.AccountSettings, error)

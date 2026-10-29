@@ -79,6 +79,7 @@ func NewRouter(srv *Server, authSvc *auth.Service, sessions *scs.SessionManager)
 		authed.Group(func(admin chi.Router) {
 			admin.Use(srv.requireAdmin)
 			admin.Get("/settings", srv.HandleGetSettings)
+			admin.Get("/settings/activity", srv.HandleGetActivity)
 			admin.Post("/settings", srv.HandleUpdateSettings)
 			admin.Post("/settings/users", srv.HandlePrecreateUser)
 		})

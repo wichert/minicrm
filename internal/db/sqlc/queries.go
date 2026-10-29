@@ -283,6 +283,31 @@ func (q *Queries) ListAuditLogs(ctx context.Context, limit int) ([]AuditLog, err
 	return logs, rows.Err()
 }
 
+// ListAuditLogsPage returns one page of audit log entries, newest first.
+// offset is the number of newest entries to skip; limit caps the page size.
+func (q *Queries) ListAuditLogsPage(ctx context.Context, limit, offset int) ([]AuditLog, error) {
+	const query = `
+		SELECT id, actor_user_id, target_user_id, event_type, COALESCE(ip_address, ''), COALESCE(user_agent, ''),
+		       COALESCE(old_value, 'null'::jsonb), COALESCE(new_value, 'null'::jsonb), occurred_at
+		FROM audit_logs
+		ORDER BY occurred_at DESC, id DESC
+		LIMIT $1 OFFSET $2`
+	rows, err := q.db.Query(ctx, query, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var logs []AuditLog
+	for rows.Next() {
+		var l AuditLog
+		if err := rows.Scan(&l.ID, &l.ActorUserID, &l.TargetUserID, &l.EventType, &l.IPAddress, &l.UserAgent, &l.OldValue, &l.NewValue, &l.OccurredAt); err != nil {
+			return nil, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, rows.Err()
+}
+
 // InsertThreadEvent records an immutable thread event in thread_events.
 func (q *Queries) InsertThreadEvent(ctx context.Context, ev ThreadEvent) error {
 	const query = `
