@@ -2627,7 +2627,7 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
      redundant. Hiding it is pure CSS — no aria-hidden/tabindex juggling — so it
      stays fully available to keyboard and screen-reader users below 1280px,
      including when the list was skipped (?nolist=1). */
-  .split-layout .back-link {
+  .split-layout:not(.split-single) .back-link {
     display: none;
   }
 }

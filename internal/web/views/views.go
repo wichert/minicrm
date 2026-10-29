@@ -76,6 +76,11 @@ type InboxViewData struct {
 	// WideLayout widens the page container for the thread list; the detail page keeps
 	// the narrower reading column.
 	WideLayout bool
+	// PaneLinksBaseURL is the inbox URL whose query string the split pane appends to
+	// every row link. It is set only on the detail page's pane (W4) so that opening
+	// a thread keeps the queue's filters in the link, and the pane re-renders with
+	// the same filters instead of falling back to the default open inbox.
+	PaneLinksBaseURL string
 }
 
 // EmailItemView holds an email, its formatted timestamp, and its attachments.
@@ -701,6 +706,23 @@ var templateFuncs = template.FuncMap{
 	"isViewableAttachment": IsViewableAttachment,
 	"hasImageAttachments":  HasImageAttachments,
 	"attachmentKind":       AttachmentKindLabel,
+	"threadDetailURL":      threadDetailURL,
+}
+
+// threadDetailURL builds a thread detail link from a base inbox URL (whose query
+// string carries the pane's filters) and the thread id. With an empty base —
+// the plain inbox page — the link is the bare /threads/{id}; otherwise the
+// inbox query is appended so the split pane re-renders with the same filters.
+func threadDetailURL(base string, threadID fmt.Stringer) string {
+	id := threadID.String()
+	if base == "" {
+		return "/threads/" + id
+	}
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	return base + sep + "thread=" + id
 }
 
 var (
@@ -829,13 +851,13 @@ const inboxTablePartial = `{{define "inbox_table"}}
       </tr>
     </thead>
     <tbody>
-      {{range .Threads}}
-      <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}" data-row-href="/threads/{{.Thread.ID}}">
+      {{$paneBase := .PaneLinksBaseURL}}{{range .Threads}}
+      <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}" data-row-href="{{threadDetailURL $paneBase .Thread.ID}}">
         {{if and (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}<td class="select-cell"><label class="select-label"><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-status="{{.Thread.Status}}" data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>{{end}}
         <td class="thread-cell">
           <div class="thread-rowline">
             <span class="thread-line">
-              <a class="thread-link" href="/threads/{{.Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
+              <a class="thread-link" href="{{threadDetailURL $paneBase .Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
               <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
             </span>
             <span class="thread-meta" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}{{if $.ShowAccountUI}} &middot; {{.AccountName}}{{end}} &middot; {{if .AssigneeName}}{{.AssigneeName}}{{else}}Unassigned{{end}}</span>
@@ -979,7 +1001,7 @@ const inboxBody = `
 `
 
 const threadDetailBody = `
-<div class="split-layout" data-split-layout>
+<div class="split-layout{{if not .List}} split-single{{end}}" data-split-layout>
 {{if .List}}
   <aside class="split-list" data-split-list id="split-list" aria-label="Thread list">
   <h2 class="sr-only">Threads</h2>

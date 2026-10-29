@@ -972,13 +972,19 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function restoreListScroll() {
     var pane = document.querySelector("[data-split-list]");
-    if (!pane || pane.offsetParent === null) {
+    if (!pane) {
       return;
     }
+    // The pane may still be display:none while the script runs (scripts are
+    // deferred, but layout-dependent reads like offsetParent are what we are
+    // trying to avoid relying on); clear any stale entry instead of restoring
+    // into a hidden element, and restore only through the visible path in
+    // setupSplitListScroll.
     try {
       var saved = window.sessionStorage.getItem(splitListScrollStorageKey());
       if (saved !== null) {
-        pane.scrollTop = Number(saved) || 0;
+        window.sessionStorage.removeItem(splitListScrollStorageKey());
+        pane.setAttribute("data-restore-scroll", saved);
       }
     } catch (err) {
       // Ignore storage failures.
@@ -997,6 +1003,33 @@ document.addEventListener("DOMContentLoaded", function () {
       }
     });
     window.addEventListener("pagehide", saveListScroll);
+    // Restore the remembered offset once the pane is actually visible. A load
+    // that happens while the pane is hidden (narrow) leaves the flag set so a
+    // later resize to wide — the matchMedia change branch — can consume it.
+    function consumeRestoreFlag() {
+      var pending = pane.getAttribute("data-restore-scroll");
+      if (pending !== null && pane.offsetParent !== null) {
+        pane.removeAttribute("data-restore-scroll");
+        pane.scrollTop = Number(pending) || 0;
+      }
+    }
+    if (window.matchMedia) {
+      var scrollQuery = window.matchMedia("(min-width: 1280px)");
+      if (scrollQuery.matches) {
+        consumeRestoreFlag();
+      } else {
+        var onScrollQueryChange = function (event) {
+          if (event.matches) {
+            consumeRestoreFlag();
+          }
+        };
+        if (typeof scrollQuery.addEventListener === "function") {
+          scrollQuery.addEventListener("change", onScrollQueryChange);
+        } else if (typeof scrollQuery.addListener === "function") {
+          scrollQuery.addListener(onScrollQueryChange);
+        }
+      }
+    }
   }
 
   function setupSplitListInert() {
@@ -1018,7 +1051,9 @@ document.addEventListener("DOMContentLoaded", function () {
           });
         }
         pane.removeAttribute("data-inert-pane");
-        saveListScroll();
+        // Same DOM node across a resize, so scrollTop survives natively here; only
+        // a fresh document load needs its saved offset back.
+        restoreListScroll();
       } else {
         pane.setAttribute("data-inert-pane", "true");
         if ("inert" in pane) {
@@ -1033,7 +1068,6 @@ document.addEventListener("DOMContentLoaded", function () {
           });
         }
         // The back link's visibility is handled entirely by CSS (hidden >=1280px).
-        restoreListScroll();
       }
     }
     apply();

@@ -289,8 +289,17 @@ func sanitizeInboxBackURL(raw, requestHost string) string {
 			return ""
 		}
 	}
-	if u.Path != "/threads" {
+	if u.Path != "/threads" && !strings.HasPrefix(u.Path, "/threads/") {
 		return ""
+	}
+	u.Path = "/threads" // detail links keep only the query (?thread= identifies the thread)
+	u.Fragment = ""
+	u.RawQuery = strings.TrimPrefix(u.RawQuery, "thread=")
+	if i := strings.Index(u.RawQuery, "&thread="); i >= 0 {
+		u.RawQuery = u.RawQuery[:i] + u.RawQuery[i+len("&thread="):]
+	}
+	if u.RawQuery == "" {
+		return "/threads"
 	}
 	if u.RawQuery == "" {
 		return "/threads"
@@ -643,7 +652,13 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user, _ := auth.UserFromContext(ctx)
-	threadID, err := uuid.Parse(chi.URLParam(r, "id"))
+	// W4 split-pane row links append the pane's inbox query as ?thread=<id>. When
+	// present, that — not the path segment — identifies the thread.
+	id := chi.URLParam(r, "id")
+	if t := r.URL.Query().Get("thread"); t != "" {
+		id = t
+	}
+	threadID, err := uuid.Parse(id)
 	if err != nil {
 		s.renderError(w, r, http.StatusBadRequest, "Invalid thread", "That conversation link is not valid.")
 		return
@@ -669,11 +684,22 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 	// `?nolist=1` is the only escape hatch (never set by JS); without it the
 	// detail request's own filter params (status/assignee/account/q) select the
 	// queue shown in the pane, defaulting to the open inbox.
+	// The pane's row links append this inbox URL's query (?thread=<id> identifies
+	// the thread), so opening a thread from a filtered queue re-renders the pane
+	// with the same filters. Fall back to the last-visited inbox (same source as
+	// the back link) so a deep link without a query still shows a useful queue.
+	paneBase := sanitizeInboxBackURL(r.URL.RequestURI(), r.Host)
+	if paneBase == "" && s.sessions != nil {
+		paneBase = sanitizeInboxBackURL(s.sessions.GetString(ctx, lastInboxURLSessionKey), r.Host)
+	}
 	var listData *views.InboxViewData
 	if r.URL.Query().Get("nolist") != "1" {
 		list, listErr := s.loadInboxList(ctx, user, r, false)
 		if listErr == nil {
 			list.WideLayout = false // pane chrome only; the page container is driven by the detail view
+			// Row links carry the current inbox query (?thread=<id> identifies the
+			// thread), so the pane keeps the queue's filters across detail loads.
+			list.PaneLinksBaseURL = paneBase
 			listData = &list
 		} else if !errors.Is(listErr, errInboxInvalidSearch) && !errors.Is(listErr, errInboxInvalidPage) {
 			// A list failure must never take down the thread page; degrade to single pane.

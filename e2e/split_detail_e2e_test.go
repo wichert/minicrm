@@ -71,8 +71,8 @@ func TestEndToEndSplitMasterDetailAssets(t *testing.T) {
 	// The back link must stay available in single-pane mode: hiding it in split mode
 	// is a CSS rule, and neither the template nor the script may set aria-hidden or
 	// tabindex on it (that would strand keyboard and screen-reader users on mobile).
-	if !strings.Contains(css, ".split-layout .back-link") {
-		t.Error("app.css must hide the back link in split mode via `.split-layout .back-link`")
+	if !strings.Contains(css, ".split-layout:not(.split-single) .back-link") {
+		t.Error("app.css must hide the back link only in split mode via `.split-layout:not(.split-single) .back-link`")
 	}
 	if strings.Contains(js, `backLink.setAttribute("aria-hidden"`) || strings.Contains(js, `back.setAttribute("aria-hidden"`) {
 		t.Error("app.js must not toggle aria-hidden on the back link; CSS owns its visibility")
