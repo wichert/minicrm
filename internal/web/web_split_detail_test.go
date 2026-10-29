@@ -3,6 +3,7 @@ package web_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/wichert/minicrm/internal/auth"
 	sqlc "github.com/wichert/minicrm/internal/db/sqlc"
 	web "github.com/wichert/minicrm/internal/web"
+	"github.com/wichert/minicrm/internal/web/static"
 )
 
 // Render-level coverage for the W4 split master-detail document. Only markup
@@ -313,5 +315,36 @@ func TestThreadDetailSplitKeepsReopenComposerAndAttachments(t *testing.T) {
 	}
 	if !strings.Contains(body, `sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"`) {
 		t.Error("split detail page lost the sandboxed email iframe")
+	}
+}
+
+// W4 defect: `.container-wide` overrode `.container`'s top margin with 0, so the
+// inbox and the split view sat flush against the ink navbar. The heading spacing
+// must come back from the shared `.container` rhythm, and the wide variant must
+// keep its width cap and horizontal centering (it was added to fix W2's
+// horizontal overflow, not the vertical rhythm).
+func TestWideContainerKeepsTopSpacing(t *testing.T) {
+	css, err := static.FS.ReadFile("app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sheet := string(css)
+
+	if !strings.Contains(sheet, ".container {\n  width: 100%;\n  max-width: 1120px;\n  margin: 1.75rem auto;") {
+		t.Error("app.css must keep the shared .container top-margin rhythm (1.75rem)")
+	}
+	wideIdx := strings.Index(sheet, ".container-wide {")
+	if wideIdx < 0 {
+		t.Fatal("app.css is missing .container-wide")
+	}
+	rule := sheet[wideIdx:]
+	if end := strings.Index(rule, "}"); end >= 0 {
+		rule = rule[:end]
+	}
+	if !strings.Contains(rule, "max-width: min(1400px, 100%)") {
+		t.Errorf(".container-wide must keep its width cap: %q", rule)
+	}
+	if regexp.MustCompile(`margin-top:\s*0[;\s]`).MatchString(rule) {
+		t.Errorf(".container-wide must not zero out the top margin: %q", rule)
 	}
 }
