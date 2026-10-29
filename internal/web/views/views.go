@@ -76,8 +76,9 @@ type InboxViewData struct {
 	// WideLayout widens the page container for the thread list; the detail page keeps
 	// the narrower reading column.
 	WideLayout bool
-	// PaneLinksBaseURL is the inbox URL whose query string the split pane appends to
-	// every row link. It is set only on the detail page's pane (W4) so that opening
+	// PaneLinksBaseURL is the inbox URL whose query string the split pane carries on
+	// every row link (the thread id itself always travels in the path, see
+	// threadDetailURL). It is set only on the detail page's pane (W4) so that opening
 	// a thread keeps the queue's filters in the link, and the pane re-renders with
 	// the same filters instead of falling back to the default open inbox.
 	PaneLinksBaseURL string
@@ -710,19 +711,26 @@ var templateFuncs = template.FuncMap{
 }
 
 // threadDetailURL builds a thread detail link from a base inbox URL (whose query
-// string carries the pane's filters) and the thread id. With an empty base —
-// the plain inbox page — the link is the bare /threads/{id}; otherwise the
-// inbox query is appended so the split pane re-renders with the same filters.
+// string carries the pane's filters) and the thread id. The thread is always
+// addressed by path — /threads/{id} is the only route that renders the detail
+// (GET /threads/{id} -> HandleViewThread); addressing it as /threads?thread={id}
+// matched GET /threads instead, which re-rendered the list and made pane rows
+// dead links. With an empty base the link is the bare /threads/{id}; otherwise
+// the base's query string (never its path) is carried along, so opening a thread
+// from a filtered queue keeps the queue's filters.
 func threadDetailURL(base string, threadID fmt.Stringer) string {
-	id := threadID.String()
-	if base == "" {
-		return "/threads/" + id
+	link := "/threads/" + threadID.String()
+	query := ""
+	if i := strings.IndexByte(base, '?'); i >= 0 {
+		query = base[i+1:]
+	} else if base != "" {
+		// Base without a query (a bare "/threads"): nothing to carry.
+		return link
 	}
-	sep := "?"
-	if strings.Contains(base, "?") {
-		sep = "&"
+	if query == "" {
+		return link
 	}
-	return base + sep + "thread=" + id
+	return link + "?" + query
 }
 
 var (

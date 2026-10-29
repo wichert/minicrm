@@ -65,9 +65,9 @@ func TestThreadDetailRendersSplitListPane(t *testing.T) {
 	if !strings.Contains(body, "Split pane thread") {
 		t.Error("detail page missing the open thread")
 	}
-	// The list pane is really rendered: it must contain a row link for another thread
-	// (row links carry the pane base query: ?thread=<id> identifies the thread).
-	if !strings.Contains(body, `thread=`+otherID.String()) {
+	// The list pane is really rendered: it must contain a row link for another thread,
+	// addressed by path (the only route that renders a detail).
+	if !strings.Contains(body, `href="/threads/`+otherID.String()+`"`) {
 		t.Error("split list pane missing row link for another thread")
 	}
 	// The pane keeps the inbox chrome (toolbar, filters) working.
@@ -144,8 +144,10 @@ func TestThreadDetailNolistRendersSinglePane(t *testing.T) {
 }
 
 // Spec W4 §4: row links in the pane must carry the current inbox query so a
-// filtered queue survives opening a thread; the ?thread=<id> query parameter —
-// not the path segment — identifies the thread on such links.
+// filtered queue survives opening a thread, and must address the thread by PATH
+// (/threads/{id}). Addressing it as /threads?thread=<id> matched GET /threads
+// instead of GET /threads/{id}, so a pane row click re-rendered the list and the
+// pane never opened the thread.
 func TestSplitPaneRowLinksCarryInboxQuery(t *testing.T) {
 	_, store, router, admin, _ := buildAccountTestServer(t)
 	threadID := uuid.New()
@@ -181,30 +183,67 @@ func TestSplitPaneRowLinksCarryInboxQuery(t *testing.T) {
 		t.Fatalf("GET detail with query status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	wantHref := `href="/threads?status=new&amp;thread=` + otherID.String() + `"`
+	wantHref := `href="/threads/` + otherID.String() + `?status=new"`
 	if !strings.Contains(body, wantHref) {
-		t.Errorf("pane row links must carry the inbox query; missing %s in detail page", wantHref)
+		t.Errorf("pane row links must address the thread by path and carry the inbox query; missing %s in detail page", wantHref)
 	}
-	if strings.Contains(body, `href="/threads/`+otherID.String()+`"`) {
-		t.Error("pane row links must not use the bare /threads/{id} form when a pane base is set")
+	// The row's data-row-href (the click target in app.js) must use the same form.
+	if !strings.Contains(body, `data-row-href="/threads/`+otherID.String()+`?status=new"`) {
+		t.Error("pane row data-row-href must address the thread by path and carry the inbox query")
+	}
+	// The broken addressing mechanism must never come back: /threads?thread=<id>
+	// matched the list route, so clicking a pane row reloaded the inbox.
+	if strings.Contains(body, "/threads?status=new&amp;thread="+otherID.String()) {
+		t.Error("pane row links must not address the thread as /threads?...&thread=<id>")
+	}
+	if strings.Contains(body, "thread="+otherID.String()) {
+		t.Errorf("pane row links must not put the thread id in the query: %s", body)
 	}
 
-	// Follow the appended link: ?thread= must route to the right thread and the
-	// response must render that thread's detail (not the anchor's).
-	req2 := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=new&thread="+otherID.String(), nil)
+	// The emitted link must round-trip: following it renders the OTHER thread's
+	// detail and keeps the filter in the pane (same path-addressed shape again).
+	req2 := httptest.NewRequest(http.MethodGet, "/threads/"+otherID.String()+"?status=new", nil)
 	req2 = req2.WithContext(auth.WithUser(req2.Context(), admin))
 	req2 = web.WithChiParam(req2, "id", threadID.String())
 	rec2 := httptest.NewRecorder()
 	router.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusOK {
-		t.Fatalf("GET ?thread= status = %d, want 200", rec2.Code)
+		t.Fatalf("GET pane row link status = %d, want 200", rec2.Code)
 	}
 	body2 := rec2.Body.String()
-	if !strings.Contains(body2, "Linked row thread") {
-		t.Error("?thread= query must identify the rendered thread")
+	if !strings.Contains(body2, "<h1>Linked row thread") {
+		t.Error("following a pane row link must render that thread's detail")
 	}
-	if strings.Count(body2, "Anchor thread") > strings.Count(body2, "Linked row thread") && !strings.Contains(body2, "<h1>Linked row thread") {
-		t.Error("?thread= must override the path segment as the thread source")
+	// Round-trip: the pane on the new page still shows status=new and the anchor
+	// thread is linkable from it (with the filter preserved).
+	if !strings.Contains(body2, `href="/threads/`+threadID.String()+`?status=new"`) {
+		t.Error("pane row links must keep the inbox filters across a round trip")
+	}
+}
+
+// Legacy deep links that still address the thread as ?thread=<id> keep working:
+// the override is no longer how row links work, but old URLs must not break.
+func TestViewThreadKeepsThreadQueryOverride(t *testing.T) {
+	_, store, router, admin, _ := buildAccountTestServer(t)
+	pathID := uuid.New()
+	queryID := uuid.New()
+	for id, subject := range map[uuid.UUID]string{pathID: "Path thread", queryID: "Query thread"} {
+		store.threads[id] = sqlc.Thread{
+			ID: id, AccountID: "support", SubjectDisplay: subject,
+			Status: sqlc.ThreadStatusNew, CustomerEmail: "c@example.com",
+			LastMessageAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+pathID.String()+"?thread="+queryID.String(), nil)
+	req = req.WithContext(auth.WithUser(req.Context(), admin))
+	req = web.WithChiParam(req, "id", pathID.String())
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET with ?thread= override status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "<h1>Query thread") {
+		t.Error("the legacy ?thread= override must still identify the rendered thread")
 	}
 }
 

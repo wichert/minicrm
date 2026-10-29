@@ -665,8 +665,9 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user, _ := auth.UserFromContext(ctx)
-	// W4 split-pane row links append the pane's inbox query as ?thread=<id>. When
-	// present, that — not the path segment — identifies the thread.
+	// Legacy deep links and pre-W4 split-pane links addressed the thread as
+	// ?thread=<id> on /threads/{id}. Pane rows now use the path segment instead,
+	// but the override still identifies the thread when it is present.
 	id := chi.URLParam(r, "id")
 	if t := r.URL.Query().Get("thread"); t != "" {
 		id = t
@@ -697,10 +698,11 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 	// `?nolist=1` is the only escape hatch (never set by JS); without it the
 	// detail request's own filter params (status/assignee/account/q) select the
 	// queue shown in the pane, defaulting to the open inbox.
-	// The pane's row links append this inbox URL's query (?thread=<id> identifies
-	// the thread), so opening a thread from a filtered queue re-renders the pane
-	// with the same filters. Fall back to the last-visited inbox (same source as
-	// the back link) so a deep link without a query still shows a useful queue.
+	// The pane's row links address the thread by path (/threads/{id}) and carry
+	// this inbox URL's query, so opening a thread from a filtered queue re-renders
+	// the pane with the same filters. Fall back to the last-visited inbox (same
+	// source as the back link) so a deep link without a query still shows a useful
+	// queue.
 	paneBase := sanitizeInboxBackURL(r.URL.RequestURI(), r.Host)
 	if paneBase == "" && s.sessions != nil {
 		paneBase = sanitizeInboxBackURL(s.sessions.GetString(ctx, lastInboxURLSessionKey), r.Host)
@@ -710,8 +712,8 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		list, listErr := s.loadInboxList(ctx, user, r, false)
 		if listErr == nil {
 			list.WideLayout = false // pane chrome only; the page container is driven by the detail view
-			// Row links carry the current inbox query (?thread=<id> identifies the
-			// thread), so the pane keeps the queue's filters across detail loads.
+			// Row links address the thread by path and carry the current inbox query,
+			// so the pane keeps the queue's filters across detail loads.
 			list.PaneLinksBaseURL = paneBase
 			listData = &list
 		} else if !errors.Is(listErr, errInboxInvalidSearch) && !errors.Is(listErr, errInboxInvalidPage) {
