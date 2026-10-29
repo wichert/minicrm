@@ -79,9 +79,26 @@ type InboxViewData struct {
 	// WideLayout widens the page container for the thread list; the detail page keeps
 	// the narrower reading column.
 	WideLayout bool
-	// PaneLinksBaseURL is the inbox URL whose query string the split pane carries on
-	// every row link (the thread id itself always travels in the path, see
-	// threadDetailURL). It is set only on the detail page's pane (W4) so that opening
+	// AssignableUsers maps thread UUID (string) to the users who may be assigned
+	// that thread: only active users with access to the thread's account. The row
+	// menu renders "Assign to…" entries from this server-filtered list; filtering
+	// by account access always happens server-side (AGENTS.md invariant 5).
+	AssignableUsers map[string][]sqlc.User
+	// Sort is the allow-listed sort key of the current list ("newest" or
+	// "oldest_open"); unknown query values collapse to "newest".
+	Sort string
+	// NextSortURL is the inbox URL that toggles to the other sort while keeping
+	// every other filter; empty when unavailable.
+	NextSortURL string
+	// SortTruncated is true when the oldest_open sort was capped at the page limit
+	// without cursor pagination; the view renders a truncation notice.
+	SortTruncated bool
+	// TotalCount, when > 0, is the total number of matching threads known to the
+	// handler; the pagination footer shows "N Threads · Load older". Zero means
+	// the total is unknown and the footer falls back to "More threads".
+	TotalCount int
+	// PaneLinksBaseURL is the inbox URL whose query string the split pane appends to
+	// every row link. It is set only on the detail page's pane (W4) so that opening
 	// a thread keeps the queue's filters in the link, and the pane re-renders with
 	// the same filters instead of falling back to the default open inbox.
 	PaneLinksBaseURL string
@@ -897,7 +914,7 @@ const inboxTablePartial = `{{define "inbox_table"}}
       </tr>
     </thead>
     <tbody>
-      {{$paneBase := .PaneLinksBaseURL}}{{range .Threads}}
+      {{$paneBase := .PaneLinksBaseURL}}{{$refreshURL := .RefreshURL}}{{$assignable := .AssignableUsers}}{{range .Threads}}{{$row := .}}{{$rowUsers := index $assignable .Thread.ID.String}}
       {{/* The open thread reads as selected in the pane: aria-current for assistive
            tech plus a background/border-left in app.css. */}}
       <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}{{if and $.PaneMode .IsCurrent}} thread-row-current{{end}}" data-row-href="{{threadDetailURL $paneBase .Thread.ID}}"{{if and $.PaneMode .IsCurrent}} aria-current="true"{{end}}>
@@ -929,22 +946,47 @@ const inboxTablePartial = `{{define "inbox_table"}}
             <div class="row-menu-popover">
               {{/* Bulk selection stays on the full inbox; the pane has no bulk bar. */}}
               {{if not $.PaneMode}}<button type="button" class="row-menu-item" data-row-select aria-label="Select {{.Thread.SubjectDisplay}} for bulk actions">Select</button>{{end}}
+              {{if eq .Thread.Status "new"}}
+              <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form">
+                <input type="hidden" name="status" value="in_progress">
+                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                <button type="submit" class="row-menu-item" aria-label="Start working on {{.Thread.SubjectDisplay}}">Start working</button>
+              </form>
+              {{end}}
               {{if .CanAssignToMe}}<form method="post" action="/threads/{{.Thread.ID}}/assign" class="row-menu-form">
                 <input type="hidden" name="assignee_id" value="{{$.CurrentUser.ID}}">
                 <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
                 <button type="submit" class="row-menu-item" aria-label="Assign {{.Thread.SubjectDisplay}} to me">Assign to me</button>
               </form>{{end}}
-              <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as completed and move its messages to Archive?" data-confirm-action="Complete thread">
-                <input type="hidden" name="status" value="completed">
-                {{if eq .Thread.Status "new"}}<input type="hidden" name="complete_from_new" value="1">{{end}}
-                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
-                <button type="submit" class="row-menu-item" aria-label="Complete {{.Thread.SubjectDisplay}}">Complete</button>
-              </form>
-              <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as spam and move its messages to Junk?" data-confirm-action="Mark as spam">
-                <input type="hidden" name="status" value="spam">
-                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
-                <button type="submit" class="row-menu-item row-menu-item-danger" aria-label="Mark {{.Thread.SubjectDisplay}} as spam">Mark as spam</button>
-              </form>
+              {{if $rowUsers}}
+              <details class="row-menu-submenu">
+                <summary class="row-menu-item" aria-label="Assign {{.Thread.SubjectDisplay}} to a team member">Assign to&hellip;</summary>
+                <div class="row-menu-popover row-menu-submenu-popover">
+                  {{range $rowUsers}}
+                  <form method="post" action="/threads/{{$row.Thread.ID}}/assign" class="row-menu-form">
+                    <input type="hidden" name="assignee_id" value="{{.ID}}">
+                    <input type="hidden" name="return_to" value="{{$refreshURL}}">
+                    <button type="submit" class="row-menu-item" aria-label="Assign {{$row.Thread.SubjectDisplay}} to {{.DisplayName}}">{{.DisplayName}}</button>
+                  </form>
+                  {{end}}
+                </div>
+              </details>
+              {{end}}
+              {{if or (eq .Thread.Status "new") (eq .Thread.Status "in_progress")}}
+              <div class="row-quick-actions" aria-label="Quick actions">
+                <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as completed and move its messages to Archive?" data-confirm-action="Complete thread">
+                  <input type="hidden" name="status" value="completed">
+                  {{if eq .Thread.Status "new"}}<input type="hidden" name="complete_from_new" value="1">{{end}}
+                  <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                  <button type="submit" class="row-quick-btn row-quick-complete" aria-label="Complete {{.Thread.SubjectDisplay}}" title="Complete"><span aria-hidden="true">&#10003;</span></button>
+                </form>
+                <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as spam and move its messages to Junk?" data-confirm-action="Mark as spam">
+                  <input type="hidden" name="status" value="spam">
+                  <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                  <button type="submit" class="row-quick-btn row-quick-spam" aria-label="Mark {{.Thread.SubjectDisplay}} as spam" title="Mark as spam"><span aria-hidden="true">&#10005;</span></button>
+                </form>
+              </div>
+              {{end}}
             </div>
           </details>
           {{end}}
@@ -981,7 +1023,7 @@ const inboxBody = `
   </nav>
   </div>
   <div class="results-status">
-    <p class="results-count">{{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}{{if .NextURL}} &middot; more available{{end}}</p>
+    <p class="results-count">{{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}</p>
     <a class="refresh-meta" href="{{.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
   </div>
 </div>
@@ -1021,6 +1063,13 @@ const inboxBody = `
       </select>
     </label>
     {{end}}
+    <label class="inline-field inline-field-compact">
+      <span class="sr-only">Sort</span>
+      <select name="sort" data-hx-get="/threads" aria-label="Sort threads">
+        <option value="newest" {{if ne .Sort "oldest_open"}}selected{{end}}>Newest</option>
+        <option value="oldest_open" {{if eq .Sort "oldest_open"}}selected{{end}}>Oldest open</option>
+      </select>
+    </label>
     <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
   </form>
 </div>
@@ -1045,7 +1094,8 @@ const inboxBody = `
 </form>
 {{end}}
 {{template "inbox_table" .}}
-{{if .NextURL}}<p class="older-threads"><a class="btn btn-secondary" href="{{.NextURL}}">Older threads</a></p>{{end}}
+{{if .SortTruncated}}<p class="list-truncated">Oldest open shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
+{{if .NextURL}}<p class="list-footer"><span class="list-footer-count">{{if .TotalCount}}{{.TotalCount}} threads{{else}}More threads{{end}}</span> <a class="btn btn-secondary" href="{{.NextURL}}">Load older</a></p>{{end}}
 </div>
 `
 
@@ -1092,6 +1142,13 @@ const threadDetailBody = `
       </select>
     </label>
     {{end}}
+    <label class="inline-field inline-field-compact">
+      <span class="sr-only">Sort</span>
+      <select name="sort" data-hx-get="/threads" aria-label="Sort threads">
+        <option value="newest" {{if ne .List.Sort "oldest_open"}}selected{{end}}>Newest</option>
+        <option value="oldest_open" {{if eq .List.Sort "oldest_open"}}selected{{end}}>Oldest open</option>
+      </select>
+    </label>
     <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
   </form>
 </div>
@@ -1118,9 +1175,54 @@ const threadDetailBody = `
     </nav>
     </div>
     <div class="results-status">
-      <p class="results-count">{{len .List.Threads}} thread{{if ne (len .List.Threads) 1}}s{{end}}{{if .List.NextURL}} &middot; more available{{end}}</p>
+      <p class="results-count">{{len .List.Threads}} thread{{if ne (len .List.Threads) 1}}s{{end}}</p>
       <a class="refresh-meta" href="{{.List.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
     </div>
+  </div>
+  <div class="filter-sticky">
+    <form method="get" action="/threads" class="filter-inline">
+      <input type="hidden" name="status" value="{{.List.StatusFilter}}">
+      <label class="inline-field search-field">
+        <span class="search-icon" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </span>
+        <span class="sr-only">Customer or subject</span>
+        <input type="search" name="q" value="{{.List.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
+        {{if .List.Search}}<a class="search-clear" href="{{.List.ClearSearchURL}}" aria-label="Clear search">&times;</a>{{end}}
+      </label>
+      {{if .List.ShowAssigneeUI}}
+      <label class="inline-field inline-field-compact">
+        <span class="sr-only">Assignee</span>
+        <select name="assignee" data-hx-get="/threads" aria-label="Assignee">
+          <option value="" {{if eq .List.AssigneeFilter ""}}selected{{end}}>Anyone</option>
+          <option value="me" {{if eq .List.AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
+          <option value="unassigned" {{if eq .List.AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
+          {{range .List.Users}}
+          <option value="{{.ID}}" {{if eq .ID.String $.List.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
+          {{end}}
+        </select>
+      </label>
+      {{end}}
+      {{if .List.ShowAccountUI}}
+      <label class="inline-field inline-field-compact">
+        <span class="sr-only">Account</span>
+        <select name="account" data-hx-get="/threads" aria-label="Account">
+          <option value="">All accounts</option>
+          {{range .List.Accounts}}
+          <option value="{{.ID}}" {{if eq .ID $.List.AccountFilter}}selected{{end}}>{{.Name}}</option>
+          {{end}}
+        </select>
+      </label>
+      {{end}}
+      <label class="inline-field inline-field-compact">
+        <span class="sr-only">Sort</span>
+        <select name="sort" data-hx-get="/threads" aria-label="Sort threads">
+          <option value="newest" {{if ne .List.Sort "oldest_open"}}selected{{end}}>Newest</option>
+          <option value="oldest_open" {{if eq .List.Sort "oldest_open"}}selected{{end}}>Oldest open</option>
+        </select>
+      </label>
+      <noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
+    </form>
   </div>
   <span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
   {{/* No bulk bar in the pane: selection chrome plus a 5-button bar cannot fit a
@@ -1129,7 +1231,8 @@ const threadDetailBody = `
        is the whole page below 1280px. */}}
   <div data-inbox-results>
   {{template "inbox_table" .List}}
-  {{if .List.NextURL}}<p class="older-threads"><a class="btn btn-secondary" href="{{.List.NextURL}}">Older threads</a></p>{{end}}
+  {{if .List.SortTruncated}}<p class="list-truncated">Oldest open shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
+  {{if .List.NextURL}}<p class="list-footer"><span class="list-footer-count">{{if .List.TotalCount}}{{.List.TotalCount}} threads{{else}}More threads{{end}}</span> <a class="btn btn-secondary" href="{{.List.NextURL}}">Load older</a></p>{{end}}
   </div>
   </aside>
 {{end}}

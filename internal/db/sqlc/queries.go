@@ -439,9 +439,13 @@ type ListThreadsFilter struct {
 	Search          string
 	CustomerEmail   string
 	ExcludeThreadID *uuid.UUID
-	BeforeTime      *time.Time
-	BeforeID        *uuid.UUID
-	Limit           int
+	// Sort is the allow-listed ordering: "newest" (default) orders by
+	// last_message_at DESC; "oldest_open" orders by opened_at ASC. Only these two
+	// constants are accepted — callers must never interpolate raw strings.
+	Sort       string
+	BeforeTime *time.Time
+	BeforeID   *uuid.UUID
+	Limit      int
 }
 
 // CountThreadsByTab computes all inbox tab counts in a single aggregate query scoped to
@@ -476,8 +480,9 @@ func (q *Queries) CountThreadsByTab(ctx context.Context, f CountThreadsFilter) (
 	return out, err
 }
 
-// ListThreads returns threads matching the given filter ordered by last_message_at DESC,
-// enriched with latest-message preview metadata and message count.
+// ListThreads returns threads matching the given filter, ordered by the
+// allow-listed Sort field ("newest" = last_message_at DESC, "oldest_open" =
+// opened_at ASC), enriched with latest-message preview metadata and message count.
 func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Thread, error) {
 	if f.Limit <= 0 {
 		f.Limit = 100
@@ -522,9 +527,14 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		  AND ($11::uuid IS NULL OR t.id <> $11)
 		  -- Inclusive <= attention cutoff, matching the count query above.
 		  AND (NOT $13::boolean OR (t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $14::timestamptz))
-		ORDER BY t.last_message_at DESC, t.id DESC
+		ORDER BY
+			CASE WHEN $15::text = 'oldest_open'
+			     THEN ROW(COALESCE(stats.opened_at, t.last_message_at), t.id)
+			     ELSE ROW(t.last_message_at, t.id) END
 		LIMIT $12`
-	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.CustomerEmail, f.ExcludeThreadID, f.Limit, f.NeedsAttention, f.AttentionCutoff)
+	// The allow-listed Sort is folded into the fixed ORDER BY expression via a
+	// bound parameter ($15) — no string interpolation of user input reaches SQL.
+	rows, err := q.db.Query(ctx, query, f.Status, f.AssigneeID, f.Unassigned, f.AccountID, f.AllowedAccounts, f.OpenOnly, f.Search, f.BeforeTime, f.BeforeID, f.CustomerEmail, f.ExcludeThreadID, f.Limit, f.NeedsAttention, f.AttentionCutoff, f.Sort)
 	if err != nil {
 		return nil, err
 	}

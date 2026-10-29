@@ -1077,6 +1077,126 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
+  /* W7 keyboard navigation: j/k move the active row, Enter/o open it, x toggles
+     selection, c completes, s marks spam, / focuses search, Escape clears the
+     active row. Bound once at document level; the active row is tracked via a
+     class re-resolved after every fragment swap, so new rows keep working. */
+  var kbActiveRow = null;
+  function kbRows() {
+    return Array.prototype.slice.call(document.querySelectorAll("tr[data-row-href]"));
+  }
+  function kbSetActive(row) {
+    if (kbActiveRow) {
+      kbActiveRow.classList.remove("kb-active");
+    }
+    kbActiveRow = row || null;
+    if (kbActiveRow) {
+      kbActiveRow.classList.add("kb-active");
+      if (typeof kbActiveRow.scrollIntoView === "function") {
+        kbActiveRow.scrollIntoView({ block: "nearest" });
+      }
+    }
+  }
+  function setupKeyboardNav() {
+    document.addEventListener("keydown", function (event) {
+      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) {
+        return;
+      }
+      var target = event.target;
+      if (target.closest("input, textarea, select, [contenteditable], dialog, details[data-row-menu]")) {
+        return;
+      }
+      var rows = kbRows();
+      if (!rows.length) {
+        return;
+      }
+      if (event.key === "/") {
+        var search = document.querySelector(".filter-inline input[type=search]");
+        if (search) {
+          event.preventDefault();
+          search.focus();
+        }
+        return;
+      }
+      if (event.key === "Escape") {
+        if (kbActiveRow) {
+          kbSetActive(null);
+        }
+        return;
+      }
+      var index = kbActiveRow ? rows.indexOf(kbActiveRow) : -1;
+      if (event.key === "j" || event.key === "k") {
+        event.preventDefault();
+        var next = event.key === "j" ? Math.min(index + 1, rows.length - 1) : Math.max(index - 1, 0);
+        if (index < 0 && event.key === "k") {
+          next = rows.length - 1;
+        }
+        kbSetActive(rows[next]);
+        return;
+      }
+      if (!kbActiveRow) {
+        return;
+      }
+      if (event.key === "Enter" || event.key === "o") {
+        event.preventDefault();
+        var link = kbActiveRow.querySelector("a.thread-link[href]");
+        if (link) {
+          link.click();
+        }
+        return;
+      }
+      if (event.key === "x") {
+        event.preventDefault();
+        var check = kbActiveRow.querySelector("input[data-select-thread]");
+        if (check && !check.disabled) {
+          check.checked = !check.checked;
+          check.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return;
+      }
+      if (event.key === "c" || event.key === "s") {
+        var status = event.key === "c" ? "completed" : "spam";
+        // Prefer the matching quick-action form; the menu forms are equivalent.
+        var transitionForms = kbActiveRow.querySelectorAll('form[action$="/transition"]');
+        var chosen = null;
+        transitionForms.forEach(function (f) {
+          var input = f.querySelector('input[name="status"]');
+          if (input && input.value === status && (!chosen || f.closest(".row-quick-actions"))) {
+            chosen = f;
+          }
+        });
+        if (chosen) {
+          event.preventDefault();
+          var btn = chosen.querySelector("button[type=submit]");
+          if (btn) {
+            btn.click();
+          } else {
+            chosen.submit();
+          }
+        }
+        return;
+      }
+    });
+    // Re-resolve the active row after fragment swaps: re-match by thread id so
+    // the highlight survives auto-refresh swaps.
+    var resultsEl = document.querySelector("[data-inbox-results]");
+    if (resultsEl && typeof MutationObserver === "function") {
+      new MutationObserver(function () {
+        if (!kbActiveRow || !kbActiveRow.isConnected) {
+          return;
+        }
+        var check = kbActiveRow.querySelector("input[data-select-thread]");
+        var id = check ? check.value : null;
+        if (!id) {
+          kbSetActive(null);
+          return;
+        }
+        var fresh = document.querySelector('tr[data-row-href] input[data-select-thread][value="' + id + '"]');
+        kbSetActive(fresh ? fresh.closest("tr[data-row-href]") : null);
+      }).observe(resultsEl, { childList: true });
+    }
+  }
+
   setupRowLinks();
   setupRowMenus();
   setupBulkForm();
@@ -1084,6 +1204,7 @@ document.addEventListener("DOMContentLoaded", function () {
   setupPullToRefresh();
   setupSplitListScroll();
   setupSplitListInert();
+  setupKeyboardNav();
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {

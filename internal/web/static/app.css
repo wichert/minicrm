@@ -2950,3 +2950,122 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
 .activity-page-label {
   font-size: 0.88rem;
 }
+
+/* W7: inbox list footer + sort truncation notice */
+.list-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.list-footer-count {
+  font-size: 0.88rem;
+  color: var(--text-muted, #5b5b6b);
+}
+
+.list-truncated {
+  margin-top: 0.75rem;
+  font-size: 0.88rem;
+  color: var(--text-muted, #5b5b6b);
+}
+
+/* W7: per-thread "Assign to…" submenu inside the row menu popover */
+.row-menu-submenu {
+  position: static;
+}
+
+.row-menu-submenu > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.row-menu-submenu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.row-menu-submenu-popover {
+  position: static;
+  box-shadow: none;
+  border: 0;
+  padding: 0;
+  margin: 0 0 0 0.75rem;
+  min-width: 0;
+}
+
+/* W7: hover quick-actions beside the ⋯ trigger; keyboard-reachable via
+   :focus-within so the buttons are usable without a pointer. Hidden below
+   768px where the row menu is the primary affordance. */
+.row-quick-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.row-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--text-muted, #5b5b6b);
+  cursor: pointer;
+}
+
+.row-quick-btn:hover {
+  background: var(--surface-soft, #eef0f4);
+}
+
+.row-quick-btn:focus-visible {
+  outline: 2px solid var(--accent, #6366f1);
+  outline-offset: 1px;
+}
+
+.row-quick-complete:hover {
+  color: var(--ok, #15803d);
+}
+
+.row-quick-spam:hover {
+  color: var(--danger, #b91c1c);
+}
+
+.actions-cell .row-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.actions-cell .row-quick-actions,
+.actions-cell .row-menu-submenu {
+  display: none;
+}
+
+.thread-row:hover .actions-cell .row-quick-actions,
+.thread-row:focus-within .actions-cell .row-quick-actions,
+.actions-cell .row-quick-actions:focus-within,
+.thread-row:hover .actions-cell .row-menu-submenu,
+.thread-row:focus-within .actions-cell .row-menu-submenu {
+  display: inline-flex;
+}
+
+.thread-row:hover .actions-cell .row-menu-submenu {
+  display: block;
+}
+
+/* W7: keyboard navigation highlight */
+.thread-row.kb-active {
+  background: var(--surface-soft, #eef0f4);
+  outline: 2px solid var(--accent, #6366f1);
+  outline-offset: -2px;
+}
+
+@media (max-width: 767px) {
+  .actions-cell .row-quick-actions,
+  .actions-cell .row-menu-submenu {
+    display: none !important;
+  }
+}
