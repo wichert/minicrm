@@ -697,3 +697,70 @@ func TestSplitPaneStylesAreWideOnly(t *testing.T) {
 		t.Error("app.css must drop the pane's results count")
 	}
 }
+
+// On the completed/spam tabs there is no wait badge (ThreadAgeBadge returns an
+// empty label for those statuses), so the pane's trailing age is a relative
+// age. That string is short enough to fit the pane-age badge's max-width;
+// the previous absolute timestamp ("2026-01-15 10:00") overflowed the space
+// the preamble reserves for it and drew under the snippet's last line.
+func TestSplitPaneTrailingAgeStaysCompactWithoutWaitBadge(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Completed pane thread",
+		Status:         sqlc.ThreadStatusCompleted,
+		CustomerName:   "Ann Lee",
+		LastMessageAt:  time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		OpenedAt:       time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC),
+		MessageCount:   2,
+		LatestBodyText: "Completed thread preamble text",
+	}
+	store.emails[uuid.New()] = sqlc.Email{
+		ID: uuid.New(), ThreadID: threadID, AccountID: "support", FromAddress: "ann@example.com",
+		Subject: "Completed pane thread", BodyText: "Completed thread preamble text",
+		SentAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=completed", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET completed detail status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatalf("pane/detail markers not in expected order")
+	}
+	pane := body[paneIdx:detailIdx]
+
+	if strings.Contains(pane, `class="wait-badge`) {
+		t.Error("a completed thread must not render a wait badge in the pane")
+	}
+	// The trailing age element must still be present and must be a relative
+	// age, not an absolute timestamp that overflows the reserved space.
+	ageMarker := `class="pane-age"`
+	ageIdx := strings.Index(pane, ageMarker)
+	if ageIdx < 0 {
+		t.Fatal("a completed pane row must still render a trailing age element")
+	}
+	tagEnd := strings.Index(pane[ageIdx:], ">")
+	if tagEnd < 0 {
+		t.Fatal("malformed pane-age element")
+	}
+	textEnd := strings.Index(pane[ageIdx+tagEnd:], "</time>")
+	if textEnd < 0 {
+		t.Fatal("malformed pane-age element: missing closing tag")
+	}
+	label := strings.TrimSpace(pane[ageIdx+tagEnd+1 : ageIdx+tagEnd+textEnd])
+	if label == "" {
+		t.Fatal("the pane-age element must not be empty")
+	}
+	if strings.Contains(label, ":") {
+		t.Errorf("the pane's trailing age must stay compact, got an absolute timestamp %q", label)
+	}
+	if !strings.Contains(label, "ago") && label != "Just now" {
+		t.Errorf("the pane's trailing age must be a relative age, got %q", label)
+	}
+}

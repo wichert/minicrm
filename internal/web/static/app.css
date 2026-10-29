@@ -2725,13 +2725,21 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
 
   /* Compact age: label only, anchored to the end of row 2. The wait-badge
      colours still carry the urgency (fresh/warning/urgent); only the words the
-     pane cannot afford are dropped, and the full text stays in the title. */
+     pane cannot afford are dropped, and the full text stays in the title.
+     Clamp to the same 3.4rem budget the snippet reserves (2.2rem padding +
+     gap) so a longer label can never overrun the preamble's last line; the
+     title keeps the untruncated text. Completed/spam tabs fall back to a
+     relative age ("3d ago"), which fits. */
   .split-list .pane-age {
     position: absolute;
     right: 0.35rem;
     bottom: 0.15rem;
+    max-width: 3.4rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
     padding: 0.06rem 0.4rem;
     font-size: 0.75rem;
+    white-space: nowrap;
   }
 
   .split-list .threads-table th,

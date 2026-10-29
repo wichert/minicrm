@@ -950,7 +950,7 @@ const inboxTablePartial = `{{define "inbox_table"}}
               <a class="thread-link" href="{{threadDetailURL $paneBase .Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
               <span class="pane-customer" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}</span>
             </div>
-            <p class="pane-row-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}{{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}} pane-age" title="Opened {{.OpenedFullTime}}">{{paneAgeLabel .WaitLabel}}</span>{{else}}<time class="pane-age" title="{{.FullTime}}">{{.FormattedTime}}</time>{{end}}</p>
+            <p class="pane-row-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}{{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}} pane-age" title="Opened {{.OpenedFullTime}}">{{paneAgeLabel .WaitLabel}}</span>{{else}}<time class="pane-age" title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}</p>
           </div>
           {{else}}
           <div class="thread-rowline">
