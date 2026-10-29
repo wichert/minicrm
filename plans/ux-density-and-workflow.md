@@ -269,20 +269,26 @@ Expected result: ~56 px rows, ~150 px of chrome → 8–10 threads at 1440×900.
 
 ### W4 (P2) — Master–detail on wide viewports
 
-Targets desktop ≥ 1280 px. Below that, keep the current full-page detail (no change) so risk is contained.
+Targets desktop ≥ 1280 px. The split↔single switch is **CSS-triggered** at that breakpoint, not a server-side viewport hint: the server always renders the same document, and CSS decides which pane is visible. A resize in either direction therefore switches layout immediately, with no reload, no JS, and no state loss.
 
 1. **Layout:** two panes — list `clamp(340px, 32vw, 460px)` + detail pane filling the rest. List pane keeps all W1/W2/W3 behaviour (tabs, filters, selection) but in a single column with the two-line row content.
-2. **Routing without breaking links:** keep `/threads/{id}` as the canonical detail route (deep links, bookmarks, e2e tests). In split mode, rows link to `/threads/{id}?layout=split` or plain `/threads/{id}`, and the server renders the list *and* the detail in one document when the viewport hint says wide — do **not** move to client-side routing. Simplest safe approach: server renders both panes when `Accept`/cookie/`?view=split` says wide, with `<a href>` fallbacks intact so the no-JS path still works as today.
-3. **Detail pane:** reuse `threadDetailBody` unchanged except for container width; add a `Back to threads` that is only shown in single-pane mode.
-4. **Preserve list state** (filters, scroll position) when navigating between threads: keep the filter row interactive in the list pane and re-render the list on each detail load, or store scroll offset in `sessionStorage` keyed on the current query string.
-5. **Deferred-until-measured:** if the double-render cost or code complexity is judged too high on review, ship a narrower first step — a persistent list column at ≥ 1600 px only — and treat full split view as a follow-up. State the chosen option in the PR description.
+2. **Routing without breaking links:** keep `/threads/{id}` as the canonical detail route (deep links, bookmarks, e2e tests) — **no new query parameter for layout**. Rows keep their real `<a href="/threads/{id}">`, so the no-JS path is unchanged and no client-side routing is introduced. `HandleViewThread` additionally renders the inbox list beside the thread in the same document (see 2a). The server never decides the layout; it only decides whether the list markup is worth emitting at all.
+   1. **What the server renders:** the detail document contains a `<div class="split-layout" data-split-layout>` wrapper holding `[data-split-list]` (the same `inboxTablePartial` + toolbar/filters markup the inbox uses, already shared) and `[data-split-detail]` (the existing `threadDetailBody`). Above 1280 px CSS lays them out side by side and shows both; at or below 1280 px `[data-split-list]` is hidden (`display: none`, plus `inert` per 2c) and the detail pane is the full-width single-pane page it is today. The single media query, not a request-time hint, is the entire mechanism.
+   2. **Avoiding the cost on every detail load:** the list is a rendering-cost optimisation only, never a layout switch — so it is emitted by default, and a bare `?nolist=1` lets a caller skip it. That escape hatch exists for the e2e single-pane assertion and for links followed from a context known to be narrow; it must never be set automatically by JS, and omitting the list must leave an otherwise identical single-pane page. Keep the rendered rows to the current page size; do not paginate the pane server-side beyond `NextURL`.
+   3. **Hidden-pane hygiene:** the collapsed list stays in the DOM but must not be reachable when hidden — set `inert` (or `aria-hidden` + `tabindex="-1"` fallback) on `[data-split-list]` below the breakpoint via a `matchMedia("(min-width: 1280px)")` listener in app.js, toggled on `change` so an in-place resize updates it too. Keyboard and screen-reader users must never tab into an invisible list; `display: none` alone is not sufficient because the pane could otherwise remain in the tab order during a transition.
+3. **Detail pane:** reuse `threadDetailBody` unchanged except for container width; add a `Back to threads` that is only shown in single-pane mode (CSS-driven: hidden ≥1280 px).
+4. **Preserve list state** (filters, scroll position) when navigating between threads: because the list is re-rendered per detail load, keep the filter query string in the split-pane links (append the current inbox query to `/threads/{id}` via a `return_to`-style parameter already supported by `BackURL`), and restore the list scroll offset from `sessionStorage` keyed on that query string. Opening a thread must not reset the pane's scroll position.
+5. **Resize correctness is a hard acceptance criterion,** not a deferred nice-to-have: resizing from 1440 → 1024 → 1440 in one page session must show split → single → split without a reload, without losing the entered reply draft, and without re-running list fetches. No `orientationchange`/`resize` JS is needed for the layout itself; only the `inert` toggling and scroll restore use JS.
+6. **Deferred-until-measured:** if the double-render cost or code complexity is judged too high on review, ship a narrower first step — a persistent list column at ≥ 1600 px only — and treat full split view as a follow-up. State the chosen option in the PR description. The CSS-triggered switch requirement is unchanged by that fallback.
 
 **Acceptance**
 
 - At 1440 and 1920 the list and the open thread are visible simultaneously; opening a second thread does not lose the list.
 - Below 1280 the behaviour is byte-for-byte the current single-pane flow.
+- **Resizing across 1280 px in either direction swaps split and single layouts in place — no reload, no navigation, draft preserved, and the hidden pane is not focusable.**
 - Deep links and `← Back to threads` still work; `BackURL`/`resolveInboxBackURL` semantics unchanged.
 - No regression in the Reopen & Merge banner, draft restore, attachment rendering or iframe isolation.
+- The split document still renders correctly with JavaScript disabled (both panes in the DOM, CSS alone choosing which is visible; the hidden pane is simply unreachable).
 
 ---
 
@@ -353,7 +359,7 @@ Small, independent items; can be split across contributors.
 | 2 | W2 chrome + rows | W1 (counts, tiers) | Low–Medium (template/CSS; pull-to-refresh + auto-refresh need care with scroll/focus and confirm dialogs) | M |
 | 3 | W3 contextual bulk bar | W2 sticky filter row | Low–Medium (fixed positioning vs. sticky, confirm dialogs) | S |
 | 4 | W5 mobile detail + sticky reply | — (independent) | Medium (composer reuse, mobile viewport units) | M |
-| 5 | W4 master–detail ≥1280 | W1–W3 (list rendering final) | **High** (dual rendering, back/draft/state preservation) | L |
+| 5 | W4 master–detail ≥1280 | W1–W3 (list rendering final) | **High** (dual rendering, hidden-pane `inert`/focus, draft/state preservation across a CSS-triggered switch — no server round-trip to change layout) | L |
 | 6 | W6 settings | — | Low | S |
 | 7 | W7 parity/sort/pagination/keyboard | W1 (description of age), W3 (selection) | Low–Medium (cursor-per-sort) | M |
 
@@ -362,6 +368,7 @@ Notes for the implementer:
 - **Do W1 before W2's count pills and tier swap**, otherwise the strip will show counts for a tab that does not exist and the badge will still use minute-level tiers.
 - Keep every change **progressive**: the app must keep working without JS (the `noscript` submit buttons exist for a reason), and every link must remain a real `<a href>` so W4 can be introduced without rewriting navigation.
 - Do not move rows' click handling off `tr[data-row-href]` (`app.js:374-386`) without a keyboard alternative; if rows become JS-routed, add `tabindex` + `role` and `Enter` handling in the same change.
+- **W4 layout is chosen by CSS, never by the server or by a resize listener.** One document serves both widths; the breakpoint alone decides split vs single. Server-side or cookie-based viewport hints are explicitly rejected — they cannot follow a resize without a reload, which the acceptance criteria forbid. JS is only allowed to keep the hidden pane out of the tab order (`inert`) and to restore the list scroll offset.
 - Screenshot-diff risk: the existing e2e suite asserts on some labels ("Showing N threads", `Older threads`, "Select conversations to assign…"). Grep `e2e/` before deleting copy, and update assertions in the same PR.
 
 ---
@@ -377,7 +384,7 @@ Plus, per workstream:
 
 - **W1:** unit tests for the three badge cases (`new`, `in_progress`, `completed`/`spam`) including a zero `opened_at` fallback; boundary tests for the tiers (today, 1d/7d edge, 8d) across a non-UTC `display_timezone` and across midnight; a query test asserting counts match rows and that `Needs attention` respects `AllowedAccounts`; a test that `status=attention` cannot leak other accounts' threads.
 - **W2/W3/W6:** functional e2e only — no-JS render parity, every `More ▾` entry returns the correct thread set, the bulk endpoints still work, and auto-refresh skips while a dialog/selection is active. **Layout, density and overflow are verified visually** by a human at 390 / 768 / 1024 / 1280 / 1440 / 1920 px against the acceptance criteria; do not add CSS-presence or geometry assertions.
-- **W4:** e2e for deep-link → detail with list present at 1440, single-pane at 1024, back-link behaviour, draft restore across pane switches.
+- **W4:** e2e for deep-link → detail with list present at 1440, single-pane at 1024 (`?nolist=1` path), back-link behaviour, draft restore across pane switches, and a resize test that sets the viewport to 1440, types into the reply draft, resizes to 1024 and back to 1440, then asserts the list is visible again and the draft text is intact. Assert on `visibility`/`offsetParent`-based "is this pane shown", never on computed pixel geometry.
 - **W5:** e2e for composer reachability, send → DB row + `append_to_sent` job, draft persistence, `Cmd/Ctrl+Enter` single submit.
 - **W7:** cursor-pagination tests per sort order; keyboard e2e (`j`/`k`/`x`/`c`/`s`/`/`); row-menu parity test comparing action labels to the detail page's for each status.
 

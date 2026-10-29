@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -52,6 +53,7 @@ type testWebStore struct {
 	// countThreadsErr, when set, makes CountThreadsByTab fail so tests can pin the
 	// handler's degraded-but-working behaviour on tab-count failures.
 	countThreadsErr error
+	outbox          []sqlc.OutboxEmail
 }
 
 func newTestWebStore() *testWebStore {
@@ -390,6 +392,18 @@ func (s *testWebStore) TouchThreadLastMessageAt(_ context.Context, id uuid.UUID,
 	return nil
 }
 
+// outboxStoreAdapter adapts testWebStore to mail.OutboxStore, which expects a
+// time.Time signature for TouchThreadLastMessageAt while workflow.Store takes
+// a source thread.
+type outboxStoreAdapter struct{ *testWebStore }
+
+func (s outboxStoreAdapter) TouchThreadLastMessageAt(_ context.Context, id uuid.UUID, ts time.Time) error {
+	t := s.threads[id]
+	t.LastMessageAt = ts
+	s.threads[id] = t
+	return nil
+}
+
 func (s *testWebStore) ListEmailsByThread(_ context.Context, threadID uuid.UUID) ([]sqlc.Email, error) {
 	var out []sqlc.Email
 	for _, em := range s.emails {
@@ -450,6 +464,44 @@ func (s *testWebStore) ListThreadEvents(_ context.Context, threadID uuid.UUID) (
 
 func (s *testWebStore) ListAuditLogs(_ context.Context, _ int) ([]sqlc.AuditLog, error) {
 	return s.auditLogs, nil
+}
+
+func (s *testWebStore) EnqueueOutboxEmail(_ context.Context, emailID, senderUserID uuid.UUID) (sqlc.OutboxEmail, error) {
+	item := sqlc.OutboxEmail{ID: uuid.New(), EmailID: emailID, SenderUserID: senderUserID, Status: "pending", EnqueuedAt: time.Now().UTC()}
+	s.outbox = append(s.outbox, item)
+	return item, nil
+}
+
+func (s *testWebStore) ClaimNextOutboxEmail(_ context.Context) (sqlc.OutboxEmail, error) {
+	for i := range s.outbox {
+		if s.outbox[i].Status == "pending" {
+			s.outbox[i].Status = "sending"
+			s.outbox[i].Attempts++
+			return s.outbox[i], nil
+		}
+	}
+	return sqlc.OutboxEmail{}, pgx.ErrNoRows
+}
+
+func (s *testWebStore) CompleteOutboxEmail(_ context.Context, id uuid.UUID) error {
+	for i := range s.outbox {
+		if s.outbox[i].ID == id {
+			s.outbox[i].Status = "sent"
+		}
+	}
+	return nil
+}
+
+func (s *testWebStore) FailOutboxEmail(_ context.Context, id uuid.UUID, attempts int, errMsg string, nextRun time.Time) error {
+	for i := range s.outbox {
+		if s.outbox[i].ID == id {
+			s.outbox[i].Status = "failed"
+			s.outbox[i].Attempts = attempts
+			s.outbox[i].LastError = &errMsg
+			s.outbox[i].NextRunAt = nextRun
+		}
+	}
+	return nil
 }
 
 func (s *testWebStore) EnqueueIMAPJob(_ context.Context, job sqlc.IMAPJob) (sqlc.IMAPJob, error) {
@@ -717,7 +769,7 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 		t.Fatalf("NewStore: %v", err)
 	}
 	wfSvc := workflow.NewService(store, auditLogger, nil)
-	outbox := mail.NewOutboxWorker(nil, attStore, []mail.AccountSenderConfig{
+	outbox := mail.NewOutboxWorker(outboxStoreAdapter{store}, attStore, []mail.AccountSenderConfig{
 		{AccountID: "support", FromAddress: "support@example.com", FromName: "Support", Transport: &noopSMTP{}},
 	}, auditLogger, "example.com", nil, nil)
 	sm := auth.NewSessionManager(false)
@@ -1138,6 +1190,9 @@ func TestThreadDetailSemanticsAndNoInlineStyles(t *testing.T) {
 		`<details class="card message message-inbound" open>`,
 		`sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"`,
 		`From</dt><dd>Customer Support &lt;support@example.com&gt;`,
+		`reply-context-details`,
+		`data-open-reply-sheet`,
+		`data-close-reply-sheet`,
 		`>Customer<`,
 	} {
 		if !strings.Contains(body, want) {
@@ -2847,5 +2902,103 @@ func TestNeedsAttentionFilterAndTabCounts(t *testing.T) {
 	}
 	if !strings.Contains(body4d, `Needs attention <span class="count-pill">1</span></a>`) {
 		t.Fatalf("expected Needs attention count pill of 1 after threshold update: %s", body4d)
+	}
+}
+
+// srvOutboxProcess drains the test server's pending outbox via a worker wired
+// to the same test store, so SMTP/append_to_sent side effects are observable.
+func srvOutboxProcess(store *testWebStore) (int, error) {
+	attStore, err := storage.NewStore(os.TempDir()+"/minicrm-test-outbox", nil)
+	if err != nil {
+		return 0, err
+	}
+	worker := mail.NewOutboxWorker(outboxStoreAdapter{store}, attStore, []mail.AccountSenderConfig{
+		{AccountID: "support", FromAddress: "support@example.com", FromName: "Support", Transport: &noopSMTP{}},
+	}, audit.NewLogger(store, nil), "example.com", nil, nil)
+	return worker.ProcessPending(context.Background())
+}
+
+func TestReplySendsExactlyOneAppendToSentJob(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", Status: sqlc.ThreadStatusNew, CustomerEmail: "bob@customer.example",
+		LastMessageAt: time.Now().UTC(),
+	}
+	form := url.Values{"body_text": {"A single reply"}, "draft_revision": {uuid.Nil.String()}}
+	req := httptest.NewRequest(http.MethodPost, "/threads/"+threadID.String()+"/reply", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected redirect after reply, got %d: %s", rec.Code, rec.Body.String())
+	}
+	sent, err := srvOutboxProcess(store)
+	if err != nil {
+		t.Fatalf("ProcessPending: %v", err)
+	}
+	if sent != 1 {
+		t.Fatalf("expected exactly 1 sent outbox email, got %d", sent)
+	}
+	var emails int
+	for _, em := range store.emails {
+		if em.ThreadID == threadID && em.Direction == "outbound" {
+			emails++
+		}
+	}
+	if emails != 1 {
+		t.Fatalf("expected exactly 1 outbound email row, got %d", emails)
+	}
+	emailIDs := map[uuid.UUID]bool{}
+	for _, em := range store.emails {
+		if em.ThreadID == threadID {
+			emailIDs[em.ID] = true
+		}
+	}
+	var sentJobs int
+	for _, job := range store.jobs {
+		if !emailIDs[job.EmailID] {
+			continue
+		}
+		if job.JobType != "append_to_sent" {
+			t.Fatalf("unexpected job type for reply: %+v", job)
+		}
+		if job.AccountID != "support" {
+			t.Fatalf("job must carry the owning account: %+v", job)
+		}
+		sentJobs++
+	}
+	if sentJobs != 1 {
+		t.Fatalf("expected exactly 1 append_to_sent imap_job, got %d", sentJobs)
+	}
+}
+
+func TestReplyContextDetailsRenderOpenForDesktopParity(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", Status: sqlc.ThreadStatusNew, CustomerName: "Bob", CustomerEmail: "bob@customer.example",
+		LastMessageAt: time.Now().UTC(),
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<details class="reply-context-details" open>`) {
+		t.Fatalf("expected reply-context-details rendered open: %s", body)
+	}
+	// Draft textarea must survive a rejected send (sheet open/close keeps the card mounted).
+	form := url.Values{"body_text": {"   "}}
+	req := httptest.NewRequest(http.MethodPost, "/threads/"+threadID.String()+"/reply", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec2 := httptest.NewRecorder()
+	router.ServeHTTP(rec2, req)
+	if rec2.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", rec2.Code)
+	}
+	if !strings.Contains(rec2.Body.String(), `class="card reply-card"`) {
+		t.Fatalf("expected reply card still rendered after failed send: %s", rec2.Body.String())
 	}
 }
