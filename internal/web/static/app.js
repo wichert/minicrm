@@ -914,7 +914,16 @@ document.addEventListener("DOMContentLoaded", function () {
     var bodyField = replyCard.querySelector("textarea[name=body_text]");
     var sending = false;
     if (sendForm && sendBtn) {
-      sendForm.addEventListener("submit", function () { sending = true; });
+      // Only latch once the submit actually proceeds: the draft module's submit
+      // listener may preventDefault (draft still saving/conflicted), and latching
+      // there would leave Cmd/Ctrl+Enter dead until the next navigation.
+      sendForm.addEventListener("submit", function (event) {
+        if (event.defaultPrevented) {
+          sending = false;
+          return;
+        }
+        sending = true;
+      });
       // Capture phase: ProseMirror binds its own Mod-Enter handler on the editor
       // element, which would run first and split the block. Capturing on the form
       // lets us claim the shortcut before the editor sees it.
