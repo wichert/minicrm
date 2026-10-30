@@ -2,23 +2,10 @@
 <h1 class="sr-only">Threads</h1>
 <div class="inbox-toolbar" data-inbox-toolbar>
   <div class="tab-strip" data-tab-strip>
-  <nav class="tabs" aria-label="Thread status">
-    <a class="tab" href="/threads?status=attention&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "attention"}} aria-current="true"{{end}}>Needs attention <span class="count-pill">{{.Counts.NeedsAttention}}</span></a>
-    <a class="tab" href="/threads?status=new&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "new"}} aria-current="true"{{end}}>New <span class="count-pill">{{.Counts.New}}</span></a>
-    <a class="tab" href="/threads?status=open&amp;assignee=me&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if and (eq .StatusFilter "open") (eq .AssigneeFilter "me")}} aria-current="true"{{end}}>Mine <span class="count-pill">{{.Counts.Mine}}</span></a>
-    <details class="row-menu tab-more" data-row-menu{{if or (eq .StatusFilter "in_progress") (eq .StatusFilter "completed") (eq .StatusFilter "spam") (eq .StatusFilter "all")}} data-active-more="true"{{end}}>
-      <summary class="tab tab-more-trigger">More{{if eq .StatusFilter "in_progress"}}: In progress <span class="count-pill">{{.Counts.InProgress}}</span>{{else if eq .StatusFilter "completed"}}: Completed <span class="count-pill">{{.Counts.Completed}}</span>{{else if eq .StatusFilter "spam"}}: Spam <span class="count-pill">{{.Counts.Spam}}</span>{{else if eq .StatusFilter "all"}}: All <span class="count-pill">{{.Counts.All}}</span>{{end}}</summary>
-      <div class="row-menu-popover tab-more-popover">
-        <a class="row-menu-item tab-more-item" href="/threads?status=in_progress&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "in_progress"}} aria-current="true"{{end}}><span>In progress</span> <span class="count-pill">{{.Counts.InProgress}}</span></a>
-        <a class="row-menu-item tab-more-item" href="/threads?status=completed&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "completed"}} aria-current="true"{{end}}><span>Completed</span> <span class="count-pill">{{.Counts.Completed}}</span></a>
-        <a class="row-menu-item tab-more-item" href="/threads?status=spam&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "spam"}} aria-current="true"{{end}}><span>Spam</span> <span class="count-pill">{{.Counts.Spam}}</span></a>
-        <a class="row-menu-item tab-more-item" href="/threads?status=all&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "all"}} aria-current="true"{{end}}><span>All</span> <span class="count-pill">{{.Counts.All}}</span></a>
-      </div>
-    </details>
-  </nav>
+  {{template "inbox_tabs" .}}
   </div>
   <div class="results-status">
-    <p class="results-count">{{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}</p>
+    {{template "inbox_results_count" .}}
     <a class="refresh-meta" href="{{.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
   </div>
 </div>
@@ -26,27 +13,4 @@
 <div class="filter-sticky">
   {{template "inbox_filter_form" (inboxFilterForm . "/threads" .ClearSearchURL)}}
 </div>
-<div data-inbox-results>
-{{if and .Threads (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}
-<form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-has-selection="false" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
-  <input type="hidden" name="return_to" value="{{.RefreshURL}}">
-  <label class="mobile-select-all"><input type="checkbox" data-select-all-mobile> Select all on page</label>
-  <span data-selected-count aria-live="polite"></span>
-  <div class="bulk-actions-controls">
-    <label class="inline-field">Assign selected to
-      <select name="assignee_id" aria-label="Assignee for selected conversations" data-bulk-assignee disabled aria-disabled="true">
-        <option value="">Choose assignee</option>
-        {{range .Users}}<option value="{{.ID}}">{{.DisplayName}}</option>{{end}}
-      </select>
-    </label>
-    <button type="submit" formaction="/threads/bulk-assign" class="btn btn-secondary btn-small" data-bulk-action="assign" disabled aria-disabled="true">Assign selected</button>
-    <button type="submit" formaction="/threads/bulk-complete" class="btn btn-secondary btn-small" data-bulk-action="complete" data-confirm="Mark selected conversations as completed and queue moves to Archive?" data-confirm-action="Complete selected" data-confirm-submit disabled aria-disabled="true">Complete selected</button>
-    <button type="submit" class="btn btn-danger btn-small" data-bulk-action="spam" data-confirm-submit disabled aria-disabled="true">Mark selected as spam</button>
-    <button type="button" class="btn btn-secondary btn-small" data-bulk-clear>Clear</button>
-  </div>
-</form>
-{{end}}
-{{template "inbox_table" .}}
-{{if .SortTruncated}}<p class="list-truncated">Longest waiting shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
-{{if .NextURL}}<p class="list-footer"><span class="list-footer-count">{{if .TotalCount}}{{.TotalCount}} threads{{else}}More threads{{end}}</span> <a class="btn btn-secondary" href="{{.NextURL}}">Load older</a></p>{{end}}
-</div>
+{{template "inbox_results_region" .}}

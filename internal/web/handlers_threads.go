@@ -295,14 +295,24 @@ func sanitizeInboxBackURL(raw, requestHost string) string {
 	}
 	u.Path = "/threads" // detail links keep only the query (?thread= identifies the thread)
 	u.Fragment = ""
-	// Keep only the known inbox filter params (including the before/id pagination
-	// cursor and the transient before-cursor key); in particular never carry nolist=1
-	// into pane row links (it would hide the pane on the next click) or a stray
-	// thread= (the link's own ?thread= must win). Filtering preserves the original
-	// parameter order so round-tripped URLs stay stable.
+	u.RawQuery = inboxFilterQuery(u.RawQuery)
+	if u.RawQuery == "" {
+		return "/threads"
+	}
+	return "/threads?" + u.RawQuery
+}
+
+// inboxFilterQuery reduces a raw query string to the known inbox filter params
+// (including the before/id pagination cursor); every other key is dropped. In
+// particular it never carries nolist=1 into pane row links (it would hide the
+// pane on the next click) or a stray thread= (the link's own ?thread= must win).
+// Filtering keeps the original parameter order so round-tripped URLs stay stable.
+// The result is assembled from an allowlist of parameter names, never from the
+// caller's path, so callers can safely use it to build local URLs.
+func inboxFilterQuery(rawQuery string) string {
 	allowed := map[string]bool{"status": true, "assignee": true, "account": true, "q": true, "sort": true, "before": true, "id": true}
 	var kept []string
-	for _, pair := range strings.Split(u.RawQuery, "&") {
+	for _, pair := range strings.Split(rawQuery, "&") {
 		key := pair
 		if i := strings.IndexByte(key, '='); i >= 0 {
 			key = key[:i]
@@ -314,11 +324,7 @@ func sanitizeInboxBackURL(raw, requestHost string) string {
 			kept = append(kept, pair)
 		}
 	}
-	u.RawQuery = strings.Join(kept, "&")
-	if u.RawQuery == "" {
-		return "/threads"
-	}
-	return "/threads?" + u.RawQuery
+	return strings.Join(kept, "&")
 }
 
 // threadPathWithoutSearch builds the split pane's clear-search link: the thread
@@ -690,6 +696,12 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 	data.ClearSearchURL = "/threads?" + clearSearchQuery.Encode()
 	data.NextURL = nextURL
 	data.RefreshURL = r.URL.RequestURI()
+	// The htmx endpoints default to the current URL: HandleListThreads returns the
+	// results fragment for it, so a poll or a filter change re-runs exactly the
+	// query the page was rendered from. The split pane overrides both with its own
+	// endpoint (see renderThreadDetail), which returns the pane's region.
+	data.PartialURL = r.URL.RequestURI()
+	data.FilterURL = r.URL.Path
 	return data, nil
 }
 
@@ -718,7 +730,6 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := s.appBranding()
-	partial := r.Header.Get("HX-Request") == "true"
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	list.Title = "Threads"
 	list.AppName = b.Name
@@ -733,7 +744,16 @@ func (s *Server) HandleListThreads(w http.ResponseWriter, r *http.Request) {
 	// current inbox URL (same allowlist as the session copy above), and
 	// threadDetailURL appends only its query string to /threads/{id}.
 	list.PaneLinksBaseURL = sanitizeInboxBackURL(r.URL.RequestURI(), r.Host)
-	if err := views.RenderInbox(w, list, partial); err != nil {
+	// A request from htmx asks for the results region only (poll or filter change);
+	// a normal navigation gets the whole page. The fragment carries the region plus
+	// out-of-band results-count and tab-strip updates.
+	if r.Header.Get("HX-Request") == "true" {
+		if err := views.RenderInboxResults(w, list); err != nil {
+			s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not render the conversation threads.")
+		}
+		return
+	}
+	if err := views.RenderInbox(w, list); err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Inbox unavailable", "We could not render the conversation threads.")
 	}
 }
@@ -765,6 +785,126 @@ func (s *Server) HandleViewThread(w http.ResponseWriter, r *http.Request) {
 	s.renderThreadDetail(w, r, user, thread, http.StatusOK, nil, nil, "")
 }
 
+// loadSplitPaneList loads the queue shown in the split view's list pane for an
+// already-authorized thread. It returns nil when the pane is suppressed
+// (?nolist=1) or when the list cannot be loaded at all — a list failure must
+// never take down the thread page, so the detail view then degrades to a single
+// pane.
+//
+// The pane's filter semantics: this request's own filter query wins; a deep link
+// or a bare /threads/{id} falls back to the last-visited inbox queue from the
+// session, so the pane shows a useful queue instead of the bare default. The
+// pane's URLs (refresh, clear-search, load-older) are rewritten onto the thread
+// path so a no-JS refresh or filter change re-renders detail+pane in place.
+func (s *Server) loadSplitPaneList(ctx context.Context, user sqlc.User, r *http.Request, thread sqlc.Thread) *views.InboxViewData {
+	paneBase := sanitizeInboxBackURL(r.URL.RequestURI(), r.Host)
+	filtersFromSession := false
+	if (paneBase == "" || paneBase == "/threads") && s.sessions != nil {
+		if saved := sanitizeInboxBackURL(s.sessions.GetString(ctx, lastInboxURLSessionKey), r.Host); saved != "" && saved != "/threads" {
+			paneBase = saved
+			filtersFromSession = true
+		}
+	}
+	if r.URL.Query().Get("nolist") == "1" {
+		return nil
+	}
+	// Deep-link fallback: the queue is loaded from the saved inbox URL's query
+	// when this request has no filter params of its own. The synthetic request is
+	// used only to parse filters; page chrome is derived from the original request.
+	listReq := r
+	if filtersFromSession {
+		if u, err := url.Parse(paneBase); err == nil {
+			synthetic := *r
+			synthetic.URL = u
+			listReq = &synthetic
+		}
+	}
+	list, listErr := s.loadInboxList(ctx, user, listReq, false)
+	if listErr != nil {
+		if !errors.Is(listErr, errInboxInvalidSearch) && !errors.Is(listErr, errInboxInvalidPage) {
+			slog.ErrorContext(ctx, "split_list_load_failed", slog.String("error", listErr.Error()))
+		}
+		return nil
+	}
+	list.WideLayout = false // pane chrome only; the page container is driven by the detail view
+	// Row links address the thread by path and carry the current inbox query, so
+	// the pane keeps the queue's filters across detail loads.
+	list.PaneLinksBaseURL = paneBase
+	// Pane rendering: no bulk-select/status/age columns, and the open thread is
+	// marked as the current row.
+	list.PaneMode = true
+	// Refresh and clear-search stay on the split view: point them at this thread's
+	// path with the queue's filters, so a no-JS refresh or search-clear re-renders
+	// detail+pane instead of navigating to the list.
+	list.RefreshURL = views.ThreadDetailURL(paneBase, thread.ID)
+	list.ClearSearchURL = threadPathWithoutSearch(paneBase, thread.ID)
+	// The pane's htmx endpoint is its own route, addressed by thread path with the
+	// queue's filters: a poll swaps the pane region without re-rendering the whole
+	// conversation, and a filter change re-runs the same query server-side.
+	list.PartialURL = list.RefreshURL
+	list.FilterURL = "/threads/" + thread.ID.String() + "/list"
+	// "Load older" pages the pane in place instead of jumping to the plain inbox:
+	// same cursor query, addressed by the thread path. No-JS keeps working because
+	// it is an ordinary link.
+	if list.NextURL != "" {
+		list.NextURL = views.ThreadDetailURL(list.NextURL, thread.ID)
+	}
+	for i := range list.Threads {
+		if list.Threads[i].Thread.ID == thread.ID {
+			list.Threads[i].IsCurrent = true
+		}
+	}
+	return &list
+}
+
+// HandleThreadList renders just the split view's thread-list pane for htmx, so
+// the pane can poll and take filter changes in place instead of re-rendering the
+// whole conversation document.
+//
+// Access is the same check as the detail page: the thread must exist and the
+// user must have access to its mail account (404 otherwise), because the pane
+// leaks the queue around that thread. Any other request (a plain navigation to
+// this URL) is redirected to the thread page so the endpoint never becomes a
+// second, divergent way to read a list.
+func (s *Server) HandleThreadList(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	user, _ := auth.UserFromContext(ctx)
+	threadID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		s.renderError(w, r, http.StatusBadRequest, "Invalid thread", "That conversation link is not valid.")
+		return
+	}
+	thread, err := s.loadAuthorizedThread(ctx, user, threadID)
+	if err != nil {
+		s.renderError(w, r, http.StatusNotFound, "Thread not found", "This conversation does not exist or you do not have access to its mail account.")
+		return
+	}
+	if r.Header.Get("HX-Request") != "true" {
+		// Rebuild the target from the route parameter plus allowlisted filter
+		// params instead of redirecting to the raw request URI: a request line such
+		// as `GET //other.example/...` parses as protocol-relative, so echoing the
+		// URI would make this an open redirect.
+		target := "/threads/" + thread.ID.String()
+		if q := inboxFilterQuery(r.URL.RawQuery); q != "" {
+			target += "?" + q
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther) // #nosec G710 -- target is built from the uuid route param and a query allowlist.
+		return
+	}
+	listData := s.loadSplitPaneList(ctx, user, r, thread)
+	if listData == nil {
+		// The pane is suppressed or unloadable: answer with an empty region so htmx
+		// leaves the current DOM alone rather than swapping in an error page.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := views.RenderInboxResults(w, *listData); err != nil {
+		slog.ErrorContext(ctx, "render_split_pane_failed", slog.String("error", err.Error()))
+	}
+}
+
 // renderThreadDetail loads a thread's messages and activity and renders the detail page.
 // headerErrors render in the thread header card (transition/assign/merge failures); replyErrors
 // render next to the reply field so a reply failure is never shown twice.
@@ -781,59 +921,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 	// The pane's row links address the thread by path (/threads/{id}) and carry
 	// this inbox URL's query, so opening a thread from a filtered queue re-renders
 	// the pane with the same filters.
-	paneBase := sanitizeInboxBackURL(r.URL.RequestURI(), r.Host)
-	filtersFromSession := false
-	if (paneBase == "" || paneBase == "/threads") && s.sessions != nil {
-		if saved := sanitizeInboxBackURL(s.sessions.GetString(ctx, lastInboxURLSessionKey), r.Host); saved != "" && saved != "/threads" {
-			paneBase = saved
-			filtersFromSession = true
-		}
-	}
-	var listData *views.InboxViewData
-	if r.URL.Query().Get("nolist") != "1" {
-		// Deep-link fallback: the queue is loaded from the saved inbox URL's query
-		// when this request has no filter params of its own. The synthetic request
-		// is used only to parse filters; page chrome below is derived from the
-		// original request.
-		listReq := r
-		if filtersFromSession {
-			if u, err := url.Parse(paneBase); err == nil {
-				synthetic := *r
-				synthetic.URL = u
-				listReq = &synthetic
-			}
-		}
-		list, listErr := s.loadInboxList(ctx, user, listReq, false)
-		if listErr == nil {
-			list.WideLayout = false // pane chrome only; the page container is driven by the detail view
-			// Row links address the thread by path and carry the current inbox query,
-			// so the pane keeps the queue's filters across detail loads.
-			list.PaneLinksBaseURL = paneBase
-			// Pane rendering: no bulk-select/status/age columns, and the open thread
-			// is marked as the current row.
-			list.PaneMode = true
-			// Refresh and clear-search must stay on the split view: point them at
-			// this thread's path with the queue's filters, so a no-JS refresh or
-			// search-clear re-renders detail+pane instead of navigating to the list.
-			list.RefreshURL = views.ThreadDetailURL(paneBase, thread.ID)
-			list.ClearSearchURL = threadPathWithoutSearch(paneBase, thread.ID)
-			// "Load older" pages the pane in place instead of jumping to the plain
-			// inbox: same cursor query, addressed by the thread path. No-JS keeps
-			// working because it is an ordinary link.
-			if list.NextURL != "" {
-				list.NextURL = views.ThreadDetailURL(list.NextURL, thread.ID)
-			}
-			for i := range list.Threads {
-				if list.Threads[i].Thread.ID == thread.ID {
-					list.Threads[i].IsCurrent = true
-				}
-			}
-			listData = &list
-		} else if !errors.Is(listErr, errInboxInvalidSearch) && !errors.Is(listErr, errInboxInvalidPage) {
-			// A list failure must never take down the thread page; degrade to single pane.
-			slog.ErrorContext(ctx, "split_list_load_failed", slog.String("error", listErr.Error()))
-		}
-	}
+	listData := s.loadSplitPaneList(ctx, user, r, thread)
 	var reopensThread *sqlc.Thread
 	reopenCompletedAt := ""
 	reopenCompletedBy := ""

@@ -71,6 +71,14 @@ type InboxViewData struct {
 	Search        string
 	NextURL       string
 	RefreshURL    string
+	// PartialURL is the htmx endpoint that returns just the results region for
+	// this list (the current URL on /threads, the pane endpoint on the split
+	// view). The region's polling contract and the filter selects both use it.
+	PartialURL string
+	// FilterURL is the htmx endpoint the filter selects call with the form's
+	// fields. It is a bare path (no query) because htmx appends the included
+	// form fields as query parameters for a GET.
+	FilterURL string
 	// ShowAssigneeUI is true when more than one team member can be assigned, so the
 	// assignee filter is only rendered when it can change the result.
 	ShowAssigneeUI bool
@@ -824,21 +832,28 @@ func inboxFilterFormArgs(data any, action, clearSearchURL string) inboxFilterFor
 // former string constants did, so rendered output is byte-identical. Markup lives
 // in templates/*.html (embedded by templates.go) so it gets editor support back.
 var (
-	inboxFullTmpl = mustTemplates("inbox", "inbox_filter_form.html", "inbox_table.html", "layout_header.html", "inbox_body.html", "layout_footer.html")
-	inboxPartTmpl = mustTemplates("inbox_partial", "inbox_filter_form.html", "inbox_table.html")
-	detailTmpl    = mustTemplates("detail", "inbox_filter_form.html", "inbox_table.html", "layout_header.html", "thread_detail.html", "layout_footer.html")
+	inboxFullTmpl = mustTemplates("inbox", "inbox_filter_form.html", "inbox_table.html", "inbox_tabs.html", "inbox_results.html", "layout_header.html", "inbox_body.html", "layout_footer.html")
+	inboxPartTmpl = mustTemplates("inbox_partial", "inbox_filter_form.html", "inbox_table.html", "inbox_tabs.html", "inbox_results.html")
+	detailTmpl    = mustTemplates("detail", "inbox_filter_form.html", "inbox_table.html", "inbox_tabs.html", "inbox_results.html", "layout_header.html", "thread_detail.html", "layout_footer.html")
 	settingsTmpl  = mustTemplates("settings", "layout_header.html", "settings_audit_table.html", "settings_body.html", "layout_footer.html")
 	activityTmpl  = mustTemplates("activity", "layout_header.html", "settings_audit_table.html", "activity_body.html", "layout_footer.html")
 	errorTmpl     = mustTemplates("error", "layout_header.html", "error_body.html", "layout_footer.html")
 	emailBodyTmpl = mustTemplates("email_body", "email_body.html")
 )
 
-// RenderInbox renders either the full inbox page or the partial thread table.
-func RenderInbox(w io.Writer, data InboxViewData, partialOnly bool) error {
-	if partialOnly {
-		return inboxPartTmpl.ExecuteTemplate(w, "inbox_table", data)
-	}
+// RenderInbox renders the full inbox page.
+func RenderInbox(w io.Writer, data InboxViewData) error {
 	return inboxFullTmpl.Execute(w, data)
+}
+
+// RenderInboxResults renders the htmx fragment for an in-place list swap: the
+// contents of the results region (bulk bar unless the list is the split pane,
+// the table, and the pagination footer), followed by out-of-band updates for the
+// results count and the status tab strip so the pills stay current without
+// re-rendering the toolbar. It is what GET /threads and GET /threads/{id}/list
+// return when the request carries the HX-Request header.
+func RenderInboxResults(w io.Writer, data InboxViewData) error {
+	return inboxPartTmpl.ExecuteTemplate(w, "inbox_results_fragment", data)
 }
 
 // RenderThreadDetail renders the thread detail view including sandboxed email iframes and reopen banner.

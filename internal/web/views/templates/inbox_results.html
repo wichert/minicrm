@@ -1,0 +1,60 @@
+{{/*
+inbox_results is everything inside the results region: the bulk action bar, the
+thread table, and the truncation/pagination footer. It is the single definition
+used by the full inbox page and by the split view's list pane, so the two lists
+cannot drift apart.
+
+The bulk bar is suppressed in PaneMode because selection chrome plus a
+five-button bar cannot fit the narrow pane without eating the subject; bulk
+actions stay on the plain inbox (/threads), one click away via the nav link.
+*/}}
+{{define "inbox_bulk_bar"}}
+{{if and .Threads (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}
+<form id="bulk-spam-form" method="post" action="/threads/bulk-spam" class="bulk-actions" data-has-selection="false" data-confirm="Mark selected conversations as spam and queue moves to Junk?" data-confirm-action="Mark as spam">
+  <input type="hidden" name="return_to" value="{{.RefreshURL}}">
+  <label class="mobile-select-all"><input type="checkbox" data-select-all-mobile> Select all on page</label>
+  <span data-selected-count aria-live="polite"></span>
+  <div class="bulk-actions-controls">
+    <label class="inline-field">Assign selected to
+      <select name="assignee_id" aria-label="Assignee for selected conversations" data-bulk-assignee disabled aria-disabled="true">
+        <option value="">Choose assignee</option>
+        {{range .Users}}<option value="{{.ID}}">{{.DisplayName}}</option>{{end}}
+      </select>
+    </label>
+    <button type="submit" formaction="/threads/bulk-assign" class="btn btn-secondary btn-small" data-bulk-action="assign" disabled aria-disabled="true">Assign selected</button>
+    <button type="submit" formaction="/threads/bulk-complete" class="btn btn-secondary btn-small" data-bulk-action="complete" data-confirm="Mark selected conversations as completed and queue moves to Archive?" data-confirm-action="Complete selected" data-confirm-submit disabled aria-disabled="true">Complete selected</button>
+    <button type="submit" class="btn btn-danger btn-small" data-bulk-action="spam" data-confirm-submit disabled aria-disabled="true">Mark selected as spam</button>
+    <button type="button" class="btn btn-secondary btn-small" data-bulk-clear>Clear</button>
+  </div>
+</form>
+{{end}}
+{{end}}
+{{define "inbox_results"}}
+{{if not .PaneMode}}{{template "inbox_bulk_bar" .}}{{end}}
+{{template "inbox_table" .}}
+{{if .SortTruncated}}<p class="list-truncated">Longest waiting shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
+{{if .NextURL}}<p class="list-footer"><span class="list-footer-count">{{if .TotalCount}}{{.TotalCount}} threads{{else}}More threads{{end}}</span> <a class="btn btn-secondary" href="{{.NextURL}}">Load older</a></p>{{end}}
+{{end}}
+{{/* inbox_results_region is the swapped element itself: the region contents plus
+     the polling contract. It lives in the template (rather than only in the page)
+     because the fragment response replaces the whole element (hx-swap="outerHTML"),
+     so the re-inserted copy must carry the same hx-* attributes and the same id.
+
+     hx-push-url is deliberately "false": a poll must not touch the address bar.
+     Filter changes push their own URL (see inbox_filter_form), so a reload or a
+     bookmark reproduces the list the user is looking at. */}}
+{{define "inbox_results_region"}}
+<div data-inbox-results id="{{if .PaneMode}}split-{{end}}inbox-results-region"
+     hx-get="{{.PartialURL}}"
+     hx-trigger="every 60s, refresh from:body"
+     hx-target="this"
+     hx-swap="outerHTML"
+     hx-push-url="false">
+{{template "inbox_results" .}}
+</div>
+{{end}}
+{{/* inbox_results_fragment is the complete htmx response for a list refresh: the
+     region (the primary swap, outerHTML) followed by out-of-band replacements for
+     the results count and the status tab strip. Those two live in the toolbar,
+     outside the swapped element, which is why they need OOB at all. */}}
+{{define "inbox_results_fragment"}}{{template "inbox_results_region" .}}{{template "inbox_results_count_oob" .}}{{template "inbox_tabs_oob" .}}{{end}}

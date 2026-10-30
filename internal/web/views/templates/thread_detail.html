@@ -16,23 +16,10 @@
   <h2 class="sr-only">Threads</h2>
   <div class="inbox-toolbar" data-inbox-toolbar>
     <div class="tab-strip" data-tab-strip>
-    <nav class="tabs" aria-label="Thread status">
-      <a class="tab" href="/threads?status=attention&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "attention"}} aria-current="true"{{end}}>Needs attention <span class="count-pill">{{.List.Counts.NeedsAttention}}</span></a>
-      <a class="tab" href="/threads?status=new&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "new"}} aria-current="true"{{end}}>New <span class="count-pill">{{.List.Counts.New}}</span></a>
-      <a class="tab" href="/threads?status=open&assignee=me&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if and (eq .List.StatusFilter "open") (eq .List.AssigneeFilter "me")}} aria-current="true"{{end}}>Mine <span class="count-pill">{{.List.Counts.Mine}}</span></a>
-      <details class="row-menu tab-more" data-row-menu{{if or (eq .List.StatusFilter "in_progress") (eq .List.StatusFilter "completed") (eq .List.StatusFilter "spam") (eq .List.StatusFilter "all")}} data-active-more="true"{{end}}>
-        <summary class="tab tab-more-trigger">More{{if eq .List.StatusFilter "in_progress"}}: In progress <span class="count-pill">{{.List.Counts.InProgress}}</span>{{else if eq .List.StatusFilter "completed"}}: Completed <span class="count-pill">{{.List.Counts.Completed}}</span>{{else if eq .List.StatusFilter "spam"}}: Spam <span class="count-pill">{{.List.Counts.Spam}}</span>{{else if eq .List.StatusFilter "all"}}: All <span class="count-pill">{{.List.Counts.All}}</span>{{end}}</summary>
-        <div class="row-menu-popover tab-more-popover">
-          <a class="row-menu-item tab-more-item" href="/threads?status=in_progress&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "in_progress"}} aria-current="true"{{end}}><span>In progress</span> <span class="count-pill">{{.List.Counts.InProgress}}</span></a>
-          <a class="row-menu-item tab-more-item" href="/threads?status=completed&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "completed"}} aria-current="true"{{end}}><span>Completed</span> <span class="count-pill">{{.List.Counts.Completed}}</span></a>
-          <a class="row-menu-item tab-more-item" href="/threads?status=spam&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "spam"}} aria-current="true"{{end}}><span>Spam</span> <span class="count-pill">{{.List.Counts.Spam}}</span></a>
-          <a class="row-menu-item tab-more-item" href="/threads?status=all&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "all"}} aria-current="true"{{end}}><span>All</span> <span class="count-pill">{{.List.Counts.All}}</span></a>
-        </div>
-      </details>
-    </nav>
+    {{template "inbox_tabs" .List}}
     </div>
     <div class="results-status">
-      <p class="results-count">{{len .List.Threads}} thread{{if ne (len .List.Threads) 1}}s{{end}}</p>
+      {{template "inbox_results_count" .List}}
       <a class="refresh-meta" href="{{.List.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
     </div>
   </div>
@@ -46,15 +33,9 @@
     {{template "inbox_filter_form" (inboxFilterForm .List (threadDetailURL "" .Thread.ID) .List.ClearSearchURL)}}
   </div>
   <span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
-  {{/* No bulk bar in the pane: selection chrome plus a 5-button bar cannot fit a
-       narrow column without eating the subject. Bulk actions stay on the plain
-       inbox (/threads), which is one click away via the "/threads" nav link and
-       is the whole page below 1280px. */}}
-  <div data-inbox-results>
-  {{template "inbox_table" .List}}
-  {{if .List.SortTruncated}}<p class="list-truncated">Longest waiting shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
-  {{if .List.NextURL}}<p class="list-footer"><span class="list-footer-count">{{if .List.TotalCount}}{{.List.TotalCount}} threads{{else}}More threads{{end}}</span> <a class="btn btn-secondary" href="{{.List.NextURL}}">Load older</a></p>{{end}}
-  </div>
+  {{/* No bulk bar in the pane (PaneMode): selection chrome plus a 5-button bar
+       cannot fit a narrow column without eating the subject. */}}
+  {{template "inbox_results_region" .List}}
   </aside>
 {{end}}
   <div class="split-detail" data-split-detail>

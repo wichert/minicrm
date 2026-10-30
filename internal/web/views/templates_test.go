@@ -30,9 +30,9 @@ func TestEmbeddedTemplatesParse(t *testing.T) {
 
 	used := map[string]bool{}
 	for _, set := range [][]string{
-		{"inbox_filter_form.html", "inbox_table.html", "layout_header.html", "inbox_body.html", "layout_footer.html"},
-		{"inbox_filter_form.html", "inbox_table.html"},
-		{"inbox_filter_form.html", "inbox_table.html", "layout_header.html", "thread_detail.html", "layout_footer.html"},
+		{"inbox_filter_form.html", "inbox_table.html", "inbox_tabs.html", "inbox_results.html", "layout_header.html", "inbox_body.html", "layout_footer.html"},
+		{"inbox_filter_form.html", "inbox_table.html", "inbox_tabs.html", "inbox_results.html"},
+		{"inbox_filter_form.html", "inbox_table.html", "inbox_tabs.html", "inbox_results.html", "layout_header.html", "thread_detail.html", "layout_footer.html"},
 		{"layout_header.html", "settings_audit_table.html", "settings_body.html", "layout_footer.html"},
 		{"layout_header.html", "settings_audit_table.html", "activity_body.html", "layout_footer.html"},
 		{"layout_header.html", "error_body.html", "layout_footer.html"},
@@ -52,11 +52,16 @@ func TestEmbeddedTemplatesParse(t *testing.T) {
 	}
 }
 
-// TestPartialTemplatesSelfContained asserts that the partial-only sets render the
-// fragments the htmx list swap depends on: the table itself plus its template
-// definition. This is the contract RenderInbox(partialOnly) exposes.
+// TestPartialTemplatesSelfContained asserts that the partial-only set defines the
+// fragments the htmx list swap depends on: the results region (the swapped
+// element), the region contents, the full fragment response, and the two
+// out-of-band toolbar pieces. This is the contract RenderInboxResults exposes.
 func TestPartialTemplatesSelfContained(t *testing.T) {
-	for _, name := range []string{"inbox_table", "inbox_filter_form", "settings_audit_table"} {
+	for _, name := range []string{
+		"inbox_table", "inbox_filter_form", "settings_audit_table",
+		"inbox_results", "inbox_results_region", "inbox_results_fragment",
+		"inbox_results_count_oob", "inbox_tabs_oob",
+	} {
 		if inboxPartTmpl.Lookup(name) == nil && settingsTmpl.Lookup(name) == nil {
 			t.Errorf("template %q is not defined in any parsed set", name)
 		}

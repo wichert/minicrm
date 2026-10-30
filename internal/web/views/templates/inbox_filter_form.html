@@ -5,7 +5,19 @@ pane's sticky bar. Action selects where the plain GET form submits (no-JS
 path): the full inbox posts to /threads, the split bars post to the open
 thread's path so applying a filter re-renders the split view in place.
 */}}{{define "inbox_filter_form"}}
+{{/* Each select swaps the results region in place through htmx: hx-get is the
+     placement's bare fragment path, hx-include carries the rest of the form
+     (status, search, the other selects), and hx-target is the results region so
+     only the list re-renders. The data-hx-get attribute keeps the no-JS/legacy
+     target for app.js and the tests. Without JS the form submits to .Action and
+     <noscript> supplies the Filter button.
+
+     On /threads the new URL is pushed into the address bar so a reload or a
+     bookmark reproduces the filtered list. In the split pane pushing is off: the
+     pane endpoint (/threads/{id}/list) is not a page URL, and the detail page's
+     own Refresh link already carries the queue's filters. */}}
 <form method="get" action="{{.Action}}" class="filter-inline">
+
 	<input type="hidden" name="status" value="{{.Data.StatusFilter}}">
 	<label class="inline-field search-field">
 		<span class="search-icon" aria-hidden="true">
@@ -18,7 +30,7 @@ thread's path so applying a filter re-renders the split view in place.
 	{{if .Data.ShowAssigneeUI}}
 	<label class="inline-field inline-field-compact">
 		<span class="sr-only">Assignee</span>
-		<select name="assignee" data-hx-get="{{.Action}}" aria-label="Assignee">
+		<select name="assignee" hx-get="{{.Data.FilterURL}}" data-hx-get="{{.Action}}" hx-include="closest form" hx-target="#{{if .Data.PaneMode}}split-{{end}}inbox-results-region" hx-swap="outerHTML" hx-push-url="{{if .Data.PaneMode}}false{{else}}true{{end}}" aria-label="Assignee">
 			<option value="" {{if eq .Data.AssigneeFilter ""}}selected{{end}}>Anyone</option>
 			<option value="me" {{if eq .Data.AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
 			<option value="unassigned" {{if eq .Data.AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
@@ -31,7 +43,7 @@ thread's path so applying a filter re-renders the split view in place.
 	{{if .Data.ShowAccountUI}}
 	<label class="inline-field inline-field-compact">
 		<span class="sr-only">Account</span>
-		<select name="account" data-hx-get="{{.Action}}" aria-label="Account">
+		<select name="account" hx-get="{{.Data.FilterURL}}" data-hx-get="{{.Action}}" hx-include="closest form" hx-target="#{{if .Data.PaneMode}}split-{{end}}inbox-results-region" hx-swap="outerHTML" hx-push-url="{{if .Data.PaneMode}}false{{else}}true{{end}}" aria-label="Account">
 			<option value="">All accounts</option>
 			{{range .Data.Accounts}}
 			<option value="{{.ID}}" {{if eq .ID $.Data.AccountFilter}}selected{{end}}>{{.Name}}</option>
@@ -41,7 +53,7 @@ thread's path so applying a filter re-renders the split view in place.
 	{{end}}
 	<label class="inline-field inline-field-compact">
 		<span class="sr-only">Sort</span>
-		<select name="sort" data-hx-get="{{.Action}}" aria-label="Sort threads">
+		<select name="sort" hx-get="{{.Data.FilterURL}}" data-hx-get="{{.Action}}" hx-include="closest form" hx-target="#{{if .Data.PaneMode}}split-{{end}}inbox-results-region" hx-swap="outerHTML" hx-push-url="{{if .Data.PaneMode}}false{{else}}true{{end}}" aria-label="Sort threads">
 			<option value="newest" {{if ne .Data.Sort "longest_waiting"}}selected{{end}}>Newest</option>
 			<option value="longest_waiting" {{if eq .Data.Sort "longest_waiting"}}selected{{end}}>Longest waiting</option>
 		</select>

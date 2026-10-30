@@ -1,6 +1,6 @@
 # Plan — Frontend Hypermedia Refactor: adopt htmx, modularize app.js, embed templates
 
-**Status:** Partially complete — WS-C (template embed) landed; WS-A/WS-B/WS-D pending
+**Status:** Partially complete — WS-C (template embed) and WS-A (htmx swap) landed; WS-B/WS-D pending
 **Date:** 2026-10-30
 **Scope:** Browser UI only (`internal/web/`, `frontend/`, `docs/`). No changes to workflow state machine, IMAP/SMTP workers, storage, auth, or security middleware — all invariants in `AGENTS.md` are untouched.
 **Motivation:** The frontend is architecturally correct (SSR + progressive enhancement, no SPA) but currently hand-implements hypermedia swapping (`swapResults()` in `app.js`) while the codebase and `docs/architecture.md` claim htmx is in use. The `HX-Request` partial path exists but has no real client. This plan finishes that migration, modularizes the JS, and moves templates out of Go string literals.
@@ -47,16 +47,17 @@
 - Keep the existing `HX-Request` branch in `handlers_threads.go:721`; it becomes load-bearing instead of vestigial. Add tests asserting the partial response contains both the table and the OOB fragments (extend `web_test.go:1330`).
 
 **A3. Client: declare the swap.**
-- Replace `swapResults()`/`refresh()`/`paintStatus()` polling loop with:
+- Replaced `swapResults()`/`refresh()`/`paintStatus()` polling loop with the region partial (implemented in `inbox_results.html`):
   ```html
-  <div id="inbox-results"
-       hx-get="{{.RefreshURL}}"
-       hx-trigger="every 60s [canAutoRefresh()], refresh from:body"
-       hx-swap="innerHTML"
-       hx-swap-oob="none">
+  <div data-inbox-results id="inbox-results-region"
+       hx-get="{{.PartialURL}}"
+       hx-trigger="every 60s, refresh from:body"
+       hx-target="this"
+       hx-swap="outerHTML"
+       hx-push-url="false">
   ```
-  plus `hx-swap-oob="true"` markers on the count/tabs fragments.
-- Port `isPaused()` (visibility, text selection, open menus/dialogs, checked rows, focus inside results, dirty inline edits — `app.js:~650-676`) into a small `window.canAutoRefresh` function; htmx evaluates trigger conditions via `htmx.config.allowEval`-free custom event or a named function reference registered on load. Keep the "Updated Xm ago" label logic in JS, repainted on a 30 s interval as today.
+  plus `hx-swap-oob="true"` on the count and tab-strip fragments in the same response.
+- **Eval-free gating (deviation from the original sketch, and a CSP requirement):** trigger *filters* (`[cond]`) are compiled with `new Function` and are blocked by `script-src 'self'` (`security_headers.go:13-15`). The trigger is therefore unconditional (`every 60s, refresh from:body`) and the pause logic moved into a `htmx:beforeRequest` listener that calls `event.preventDefault()` when `isPaused()` returns true. `window.htmx` is never handed an expression to evaluate, so `htmx.config.allowEval` stays at its default `false`. Keep the "Updated Xm ago" label logic in JS, repainted on a 30 s interval as today.
 - Pull-to-refresh triggers the same swap via `htmx.trigger(document.body, "refresh")`; the manual Refresh link becomes `hx-trigger="click"` on the anchor (keep the plain `href` for no-JS).
 - Selection preservation across swaps: re-apply checked IDs via `htmx.on("htmx:afterSwap")` — one hook replaces `setupRowLinks/setupRowMenus/setupBulkForm/refreshBulkSelection` re-runs (htmx re-initializes new content automatically; delete the `dataset.*Ready` idempotency flags).
 - Delete: `swapResults`, hand region-copying, per-swap re-setup calls, guard flags. Estimated −250 lines from `app.js`.
@@ -65,6 +66,14 @@
 - `data-hx-get` selects (`views.go:1109,1122,1132`) become real htmx: `hx-get="{{.Action}}" hx-target="#inbox-results" hx-include="closest form" hx-push-url="true"`. Keep `<noscript>` submit buttons.
 - Transition/assign/reopen forms keep **plain POST + full navigation** (they already redirect-with-flash correctly; htmx adds nothing). Only the *list region* swaps.
 - Keep the `data-confirm` `<dialog>` flow by leaving those forms as normal forms; do not convert them to htmx (documented decision, §2 principle 6).
+
+**Implemented (landed):**
+- `internal/web/static/htmx.min.js` is htmx **2.0.4** (50,917 bytes, SHA-256 `e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447`), pinned with provenance in `internal/web/static/vendor/README.md`; `sw.js` precaches it and bumps to `minicrm-shell-v3`.
+- New templates `inbox_tabs.html` and `inbox_results.html` hold the shared tab strip, results count, bulk bar, table, footer and the swapped `inbox_results_region` / `inbox_results_fragment` definitions, so the inbox and the split pane render the list from one definition (`{{if .PaneMode}}` drops the bulk bar and prefixes ids with `split-`). `RenderInbox` lost its `partialOnly` parameter; `RenderInboxResults` renders the fragment (region + OOB count + OOB tabs).
+- The split pane needed its own fragment endpoint (the pane's old `RefreshURL` was the *detail* document, so an htmx poll would have swapped a whole page into the `<aside>`): new `GET /threads/{id}/list` → `HandleThreadList`, rendering the pane region for `HX-Request` and `303`-redirecting plain navigations to the thread page. `InboxViewData` gained `PartialURL` (swap target) and `FilterURL` (filter form action) so the inbox and the pane each poll/filter their own endpoint.
+- The redirect is built from the route uuid plus an allowlist of filter params (`inboxFilterQuery`) rather than the raw request URI, so `GET //other.example/...` cannot become an open redirect (gosec G710).
+- Selection survives swaps through one `htmx:afterSwap` hook that re-applies checked ids, `data-selection-mode`, row links/menus, the bulk form and the tab strips; `htmx:beforeRequest` also captures the selection before the swap. `hx-get` on the filter selects is real now (plain form + `<noscript>` submit retained). Transition/assign/reopen/reply forms stay plain POSTs, and the `data-confirm` `<dialog>` flow is untouched.
+- Tests: `internal/web/web_htmx_test.go` covers the fragment shape (region + OOB, no page chrome), progressive filter markup and script order, the pane endpoint (fragment, 303 redirect, 404 unknown thread, 404 inaccessible account), the pane polling its own endpoint, and the non-htmx redirect target.
 
 **Acceptance:** 60 s auto-refresh, manual refresh, pull-to-refresh, filter changes, and pagination all swap only the list region; selection, scroll position, and open menu/dialog state survive swaps; all of it still works with JS disabled. Go tests cover partial rendering incl. OOB fragments.
 
@@ -115,8 +124,8 @@ WS-D (docs)                 ─┘  last, reflects reality
 
 Suggested commits (Conventional Commits, per `docs/release.md`):
 
-1. `refactor(web): move templates to go:embed html files` (WS-C)
-2. `feat(web): adopt htmx for inbox list swaps and filters` (WS-A)
+1. `refactor(web): move templates to go:embed html files` (WS-C) — **landed** (e4a0a4c)
+2. `feat(web): adopt htmx for inbox list swaps and filters` (WS-A) — **landed**
 3. `refactor(web): split app.js into modules and unit-test draft autosave` (WS-B)
 4. `docs: document htmx-based frontend architecture` (WS-D)
 

@@ -1,0 +1,39 @@
+{{/*
+inbox_tabs is the status tab strip, shared by the full inbox toolbar and the
+split view's list pane. It reads InboxViewData directly in both placements (the
+full page passes the page data, the pane passes .List) because the two shapes
+share the filter/count fields; no adapter type is needed.
+
+inbox_tabs_oob is the same strip plus hx-swap-oob="true": the htmx list refresh
+returns it so the count pills stay current without re-rendering the toolbar.
+Keeping the wrapper separate means full page renders carry no inert htmx
+attributes.
+
+The tab links are ordinary anchors: they work with JS disabled, and changing a
+tab is a plain navigation (which also resets the pagination cursor). */}}
+{{define "inbox_tabs_links"}}
+    <a class="tab" href="/threads?status=attention&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "attention"}} aria-current="true"{{end}}>Needs attention <span class="count-pill">{{.Counts.NeedsAttention}}</span></a>
+    <a class="tab" href="/threads?status=new&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "new"}} aria-current="true"{{end}}>New <span class="count-pill">{{.Counts.New}}</span></a>
+    <a class="tab" href="/threads?status=open&amp;assignee=me&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if and (eq .StatusFilter "open") (eq .AssigneeFilter "me")}} aria-current="true"{{end}}>Mine <span class="count-pill">{{.Counts.Mine}}</span></a>
+    <details class="row-menu tab-more" data-row-menu{{if or (eq .StatusFilter "in_progress") (eq .StatusFilter "completed") (eq .StatusFilter "spam") (eq .StatusFilter "all")}} data-active-more="true"{{end}}>
+      <summary class="tab tab-more-trigger">More{{if eq .StatusFilter "in_progress"}}: In progress <span class="count-pill">{{.Counts.InProgress}}</span>{{else if eq .StatusFilter "completed"}}: Completed <span class="count-pill">{{.Counts.Completed}}</span>{{else if eq .StatusFilter "spam"}}: Spam <span class="count-pill">{{.Counts.Spam}}</span>{{else if eq .StatusFilter "all"}}: All <span class="count-pill">{{.Counts.All}}</span>{{end}}</summary>
+      <div class="row-menu-popover tab-more-popover">
+        <a class="row-menu-item tab-more-item" href="/threads?status=in_progress&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "in_progress"}} aria-current="true"{{end}}><span>In progress</span> <span class="count-pill">{{.Counts.InProgress}}</span></a>
+        <a class="row-menu-item tab-more-item" href="/threads?status=completed&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "completed"}} aria-current="true"{{end}}><span>Completed</span> <span class="count-pill">{{.Counts.Completed}}</span></a>
+        <a class="row-menu-item tab-more-item" href="/threads?status=spam&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "spam"}} aria-current="true"{{end}}><span>Spam</span> <span class="count-pill">{{.Counts.Spam}}</span></a>
+        <a class="row-menu-item tab-more-item" href="/threads?status=all&amp;assignee={{.AssigneeFilter}}&amp;account={{.AccountFilter}}&amp;q={{.Search}}"{{if eq .StatusFilter "all"}} aria-current="true"{{end}}><span>All</span> <span class="count-pill">{{.Counts.All}}</span></a>
+      </div>
+    </details>
+{{end}}
+{{define "inbox_tabs"}}
+  <nav class="tabs" id="{{if .PaneMode}}split-{{end}}inbox-tabs" aria-label="Thread status">{{template "inbox_tabs_links" .}}
+  </nav>
+{{end}}
+{{define "inbox_tabs_oob"}}
+  <nav class="tabs" id="{{if .PaneMode}}split-{{end}}inbox-tabs" aria-label="Thread status" hx-swap-oob="true">{{template "inbox_tabs_links" .}}
+  </nav>
+{{end}}
+{{define "inbox_results_count"}}<p class="results-count" id="{{if .PaneMode}}split-{{end}}inbox-results-count">{{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}</p>{{end}}
+{{define "inbox_results_count_oob"}}
+    <p class="results-count" id="{{if .PaneMode}}split-{{end}}inbox-results-count" hx-swap-oob="true">{{len .Threads}} thread{{if ne (len .Threads) 1}}s{{end}}</p>
+{{end}}

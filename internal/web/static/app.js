@@ -4,7 +4,13 @@ document.addEventListener("DOMContentLoaded", function () {
   // app.css is scoped under html.js so the no-JS experience stays as today.
   document.documentElement.classList.add("js");
 
+  // Without htmx these selects would be inert: fall back to a plain form submit
+  // so the filter still applies. With htmx present the library owns the change
+  // (hx-get/hx-include in the markup), so binding here would double-fire.
   function setupFilterAutoSubmit() {
+    if (window.htmx) {
+      return;
+    }
     document.querySelectorAll("[data-hx-get]").forEach(function (el) {
       el.addEventListener("change", function () {
         if (el.form) {
@@ -125,7 +131,7 @@ document.addEventListener("DOMContentLoaded", function () {
   // scope). Null when the page has no bulk bar.
   var bulkFormRef = null;
 
-  function setupBulkForm() {
+  function setupBulkForm(root) {
     refreshBulkSelection = null;
     bulkFormRef = null;
     var bulkForm = document.getElementById("bulk-spam-form");
@@ -133,8 +139,11 @@ document.addEventListener("DOMContentLoaded", function () {
       return;
     }
     bulkFormRef = bulkForm;
-    var checks = Array.from(document.querySelectorAll("[data-select-thread]"));
-    var selectAll = Array.from(document.querySelectorAll("[data-select-all], [data-select-all-mobile]"));
+    // Root-scoped so a region swap re-binds only the fresh rows, never duplicating
+    // listeners on the rows that survived (the bulk form itself is replaced too).
+    var scope = root || document;
+    var checks = Array.from(scope.querySelectorAll("[data-select-thread]"));
+    var selectAll = Array.from(scope.querySelectorAll("[data-select-all], [data-select-all-mobile]"));
     var count = bulkForm.querySelector("[data-selected-count]");
     var assigneeSelect = bulkForm.querySelector("[data-bulk-assignee]");
     var bulkButtons = Array.from(bulkForm.querySelectorAll("[data-bulk-action]"));
@@ -193,7 +202,7 @@ document.addEventListener("DOMContentLoaded", function () {
     // Row "Select" buttons live inside the table's row menus, not in this
     // form, so bind them document-wide; swapResults() re-runs setupBulkForm()
     // after every fragment swap, which re-binds the recreated buttons.
-    document.querySelectorAll("[data-row-select]").forEach(function (button) {
+    scope.querySelectorAll("[data-row-select]").forEach(function (button) {
       button.addEventListener("click", function (event) {
         event.preventDefault();
         var menu = button.closest("details[data-row-menu]");
@@ -591,12 +600,17 @@ document.addEventListener("DOMContentLoaded", function () {
      open, a bulk selection exists, or an inline edit has unsaved input. Plain
      links keep working without JavaScript.
 
-     The fetch stays a full-page GET on purpose: the server's HX-Request partial
-     (inboxTablePartial) contains only the table, while this loop also refreshes
-     the .results-count and .tabs toolbar regions from next to it. Fetching the
-     full document keeps those three regions correct with one request and no
-     duplicated template; the cost is a page-sized response every 60s on the
-     inbox only. */
+     The swap itself is htmx's: the results region carries
+     hx-trigger="every 60s, refresh from:body" and hx-swap="outerHTML", and the
+     server answers with the region plus out-of-band updates for the results
+     count and the tab strip. This module keeps only the app-specific concerns
+     htmx cannot know about: when a swap is unsafe (isPaused), preserving an
+     in-progress bulk selection across the swap, and the "Updated 3m ago" label.
+
+     Why not a trigger filter such as every 60s [canRefresh()]: htmx evaluates
+     trigger filters with new Function, and the CSP is script-src 'self' with no
+     unsafe-eval, so such a filter would be blocked. Gating in htmx:beforeRequest
+     is eval-free and identical in effect. */
   var inboxRefresh = { refresh: null, repaint: null };
 
   function setupInboxAutoRefresh() {
@@ -606,10 +620,7 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!results) {
       return;
     }
-    var intervalMs = 60000;
     var lastLoadedAt = Date.now();
-    var inflight = false;
-
     function hasPendingInlineEdit() {
       var active = document.activeElement;
       if (!active) {
@@ -688,79 +699,98 @@ document.addEventListener("DOMContentLoaded", function () {
       statusEl.textContent = formatAgo(Date.now() - lastLoadedAt);
     }
 
+    function resultsEl() {
+      return document.querySelector("[data-inbox-results]");
+    }
+
     // Contract: preserving the selection across the swap is mandatory even
-    // though isPaused() normally prevents a swap while rows are checked. Re-apply
-    // the checked IDs that still exist after the swap, then recount the bulk bar.
-    function swapResults(html) {
-      var doc = new DOMParser().parseFromString(html, "text/html");
-      var fresh = doc.querySelector("[data-inbox-results]");
-      if (!fresh) {
-        return false;
+    // though isPaused() normally prevents a swap while rows are checked. htmx
+    // replaces the region wholesale, so re-apply the checked ids that still exist
+    // afterwards, keep selection mode, then recount the bulk bar.
+    function restoreSelection() {
+      var region = resultsEl();
+      if (!region) {
+        return;
       }
-      var selected = checkedThreadIDs();
-      var selectionMode = results.getAttribute("data-selection-mode");
-      results.innerHTML = fresh.innerHTML;
-      // Keep selection mode across the swap so long-press-selected rows stay visible.
       if (selectionMode) {
-        results.setAttribute("data-selection-mode", selectionMode);
+        region.setAttribute("data-selection-mode", selectionMode);
       }
-      if (selected.length) {
+      var selected = pendingSelection;
+      pendingSelection = null;
+      if (selected && selected.length) {
         var wanted = new Set(selected);
-        results.querySelectorAll("[data-select-thread]").forEach(function (check) {
+        region.querySelectorAll("[data-select-thread]").forEach(function (check) {
           if (wanted.has(check.value)) {
             check.checked = true;
           }
         });
       }
-      var freshCount = doc.querySelector(".results-count");
-      var count = document.querySelector(".inbox-toolbar .results-count");
-      if (freshCount && count) {
-        count.innerHTML = freshCount.innerHTML;
-      }
-      var freshTabs = doc.querySelector(".tabs");
-      var tabs = document.querySelector(".inbox-toolbar .tabs");
-      if (freshTabs && tabs) {
-        tabs.innerHTML = freshTabs.innerHTML;
-        setupTabStrips(document.querySelector(".inbox-toolbar"));
-      }
       setupRowLinks();
       setupRowMenus();
-      setupBulkForm();
+      setupBulkForm(region);
+      setupTabStrips(document.querySelector(".inbox-toolbar"));
       if (refreshBulkSelection) {
         refreshBulkSelection();
       }
-      return true;
     }
 
-    function refresh() {
-      if (inflight) {
+    var selectionMode = null;
+    var pendingSelection = null;
+
+    if (window.htmx) {
+      // htmx has no way to know that a swap would destroy work in progress, so the
+      // gate lives here. preventDefault() on the event cancels the request, which
+      // is exactly the semantics a trigger filter would have had.
+      document.body.addEventListener("htmx:beforeRequest", function (event) {
+        var elt = event.detail && event.detail.elt;
+        var region = resultsEl();
+        if (!region || !elt || !(elt === region || region.contains(elt))) {
+          return;
+        }
+        if (isPaused()) {
+          event.preventDefault();
+          return;
+        }
+        // Capture the selection and selection mode before the region is replaced:
+        // htmx swaps the element's subtree wholesale, so this is the only chance.
+        pendingSelection = checkedThreadIDs();
+        selectionMode = region.getAttribute("data-selection-mode");
+      });
+      document.body.addEventListener("htmx:afterSwap", function (event) {
+        var region = resultsEl();
+        if (!region || !event.detail || event.detail.target !== region) {
+          return;
+        }
+        lastLoadedAt = Date.now();
+        paintStatus();
+        restoreSelection();
+      });
+      document.body.addEventListener("htmx:responseError", function (event) {
+        // Keep the current list on a failed poll; the next tick or a manual
+        // refresh retries. A 204 means the pane is suppressed: nothing to do.
+        if (event.detail && event.detail.xhr && event.detail.xhr.status === 204) {
+          return;
+        }
+      });
+    }
+
+    // Explicit refresh (the Refresh link, pageshow, pull-to-refresh) asks htmx to
+    // re-run the region's own hx-get. The link stays a plain anchor without JS.
+    var refresh = function () {
+      var region = resultsEl();
+      if (!region || !window.htmx) {
         return;
       }
-      inflight = true;
-      var url = window.location.pathname + window.location.search;
-      fetch(url, { headers: { "X-Requested-With": "fetch" }, credentials: "same-origin" })
-        .then(function (response) {
-          if (!response.ok) {
-            throw new Error("refresh failed");
-          }
-          return response.text();
-        })
-        .then(function (html) {
-          if (swapResults(html)) {
-            lastLoadedAt = Date.now();
-            paintStatus();
-          }
-        })
-        .catch(function () {
-          // Keep the current list; the next tick or a manual click retries.
-        })
-        .then(function () {
-          inflight = false;
-        });
-    }
-
+      if (isPaused()) {
+        return;
+      }
+      window.htmx.trigger(region, "refresh");
+    };
     if (refreshLink) {
       refreshLink.addEventListener("click", function (event) {
+        if (!window.htmx) {
+          return; // no JS hypermedia layer: let the anchor navigate
+        }
         event.preventDefault();
         refresh();
       });
@@ -769,12 +799,9 @@ document.addEventListener("DOMContentLoaded", function () {
     inboxRefresh.repaint = paintStatus;
 
     paintStatus();
+    // The 60s poll itself is htmx's (hx-trigger="every 60s" in the markup); this
+    // only keeps the age label ticking.
     window.setInterval(paintStatus, 30000);
-    window.setInterval(function () {
-      if (!isPaused()) {
-        refresh();
-      }
-    }, intervalMs);
     // Returning to the tab repaints the age label; a restored back/forward cache
     // entry revalidates the list once (the zero-cost fallback the plan asks for).
     document.addEventListener("visibilitychange", function () {
