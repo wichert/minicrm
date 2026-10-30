@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#14142b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="{{if .AppShortName}}{{.AppShortName}}{{else if .AppName}}{{.AppName}}{{else}}MiniCRM{{end}}">
+  <meta name="referrer" content="no-referrer">
+  <title>{{if .Title}}{{.Title}} — {{end}}{{if .AppName}}{{.AppName}}{{else}}MiniCRM{{end}}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/editor.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header>
+    <nav class="navbar" aria-label="Main">
+      <a class="navbar-brand" href="/threads"><svg class="brand-mark" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" fill="#6366f1"/><path d="M7 11.5h18v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="m7.5 12 8.5 6.5L24.5 12" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>{{if .AppShortName}}{{.AppShortName}}{{else if .AppName}}{{.AppName}}{{else}}MiniCRM{{end}}</span></a>
+      <ul class="nav-links">
+        <li><a href="/threads"{{if eq .ActiveNav "threads"}} aria-current="page"{{end}}>Threads</a></li>
+        {{if eq .CurrentUser.Role "admin"}}<li><a href="/settings"{{if eq .ActiveNav "settings"}} aria-current="page"{{end}}>Settings</a></li>{{end}}
+      </ul>
+      <div class="navbar-user">
+        <span class="navbar-user-name">{{.CurrentUser.DisplayName}}</span>
+        <span class="navbar-user-email">{{.CurrentUser.Email}}</span>
+        <form method="post" action="/auth/logout">
+          <button type="submit" class="btn btn-ghost btn-small">Log out</button>
+        </form>
+      </div>
+    </nav>
+  </header>
+  <main id="main-content" class="container{{if .WideLayout}} container-wide{{end}}" tabindex="-1">
+    {{if .Flash.Message}}<div class="flash flash-{{.Flash.Kind}}" role="status">
+      <span>{{.Flash.Message}}</span>
+      <button type="button" class="flash-dismiss" data-flash-dismiss aria-label="Dismiss notice">×</button>
+    </div>{{end}}

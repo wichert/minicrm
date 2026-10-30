@@ -2,9 +2,12 @@
   "name": "minicrm-editor",
   "version": "1.0.0",
   "private": true,
-  "description": "Reproducible build for the MiniCRM reply editor",
+  "description": "Reproducible builds for the MiniCRM reply editor and frontend app bundle",
   "scripts": {
-    "build": "esbuild editor.js --bundle --minify --legal-comments=external --outfile=../internal/web/static/editor.js"
+    "build": "npm run build:editor && npm run build:app",
+    "build:editor": "esbuild editor.js --bundle --minify --legal-comments=external --outfile=../internal/web/static/editor.js",
+    "build:app": "esbuild src/app.js --bundle --minify --legal-comments=external --target=es2019 --outfile=../internal/web/static/app.js",
+    "test": "vitest run"
   },
   "dependencies": {
     "prosemirror-commands": "1.7.2",
@@ -15,6 +18,9 @@
     "prosemirror-view": "1.42.8"
   },
   "devDependencies": {
-    "esbuild": "0.28.2"
-  }
+    "esbuild": "0.28.2",
+    "jsdom": "27.0.1",
+    "vitest": "3.2.4"
+  },
+  "type": "module"
 }

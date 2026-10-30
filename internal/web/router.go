@@ -63,6 +63,9 @@ func NewRouter(srv *Server, authSvc *auth.Service, sessions *scs.SessionManager)
 		authed.Post("/threads/bulk-assign", srv.HandleBulkAssign)
 		authed.Post("/threads/bulk-complete", srv.HandleBulkComplete)
 		authed.Get("/threads/{id}", srv.HandleViewThread)
+		// Results-only fragment for the split view's list pane (htmx polling and
+		// filter changes). It is not a page URL: other requests redirect to the thread.
+		authed.Get("/threads/{id}/list", srv.HandleThreadList)
 		authed.Get("/threads/{id}/draft", srv.HandleDraft)
 		authed.Put("/threads/{id}/draft", srv.HandleDraft)
 		authed.Post("/threads/{id}/transition", srv.HandleTransitionThread)

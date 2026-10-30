@@ -15,7 +15,7 @@ Mail accounts are configured with numbered `MINICRM_ACCOUNT_<N>_*` environment v
                                           v
 +---------------+       +---------------------------------------------------+
 |  Browser UI   | <---> |               MiniCRM Go Binary                   |
-| (SSR + HTMX)  | HTTPS |                                                   |
+| (SSR + htmx)  | HTTPS |                                                   |
 +---------------+       |  +---------------------------------------------+  |
                         |  | HTTP Server (chi + html/template + SCS)     |  |
                         |  +------+---------------+---------------+------+  |
@@ -83,6 +83,7 @@ Mail accounts are configured with numbered `MINICRM_ACCOUNT_<N>_*` environment v
 | **Authentication** | `github.com/coreos/go-oidc/v3` + `golang.org/x/oauth2` + `github.com/alexedwards/scs/v2` | OIDC Authorization Code flow with PKCE and PostgreSQL-backed HTTP-only sessions. |
 | **Health** | `net/http` (`/healthz`) | Unauthenticated liveness/readiness probe; `cmd/minicrm` plugs in `pgxpool.Pool.Ping` via `web.Server.WithHealthCheck` |
 | **Logging** | `log/slog` | Structured JSON logging of all application events, data reads (`data_access`), and mutations (`data_change`). |
+| **Frontend** | `html/template` + htmx 2.0.4 (vendored) + `esbuild`-bundled ES modules | Server-rendered HTML, hypermedia partial swaps, and progressive-enhancement JavaScript. See [§5](#5-frontend-rendering-and-hypermedia). |
 
 ---
 
@@ -108,5 +109,39 @@ internal/
   workflow/                     # Thread state machine, Archive/Junk move queueing, Reopen & Merge
   mail/                         # MIME parser, bluemonday sanitizer, IMAP sync/action workers, SMTP outbox worker
   storage/                      # Content-addressed SHA-256 local disk attachment store
-  web/                          # chi router, security headers, /healthz probe, handlers, embedded static assets, SSR views
+  web/                          # chi router, security headers, /healthz probe, handlers
+    static/                     # Embedded assets: app.js bundle, editor.js, app.css, sw.js, vendored htmx.min.js
+    views/                      # SSR views: view models, template funcs, go:embed template sets
+      templates/                # .html template files (embedded via templates/*.html)
+frontend/                       # Frontend sources & toolchain (not served; built into internal/web/static)
+  src/                          # ES modules bundled into static/app.js (see §5)
+  editor.js                     # ProseMirror reply editor entrypoint → static/editor.js
+  test/                         # vitest + jsdom unit tests (draft autosave)
 ```
+
+---
+
+## 5. Frontend Rendering and Hypermedia
+
+The UI is **server-rendered HTML with progressive enhancement**. There is no SPA, no client-side router, and no JSON API for page data: every route returns HTML, and every interactive control degrades to a plain form or link.
+
+**Template layer (`internal/web/views/`).** View models and template funcs live in `views.go`; markup lives in `internal/web/views/templates/*.html`, embedded with `//go:embed templates/*.html`. `mustTemplates` concatenates the named files into one `html/template` set per page (deliberately not `ParseFS`, which would make each file an associated template and break the page skeleton). Pages are composed from shared partials — `layout_header.html` / `layout_footer.html`, `inbox_table.html`, `inbox_filter_form.html`, `inbox_tabs.html`, `inbox_results.html`, `settings_audit_table.html` — so the inbox and the split detail pane render the list from a single definition.
+
+**Hypermedia layer (htmx 2.0.4).** htmx is a vendored static file (`internal/web/static/htmx.min.js`, SHA-256 pinned in `static/vendor/README.md`), not a build dependency. It owns exactly two behaviours:
+
+1. **List region swaps.** The results region carries its own polling contract:
+   ```html
+   <div data-inbox-results id="inbox-results-region"
+        hx-get="/threads?..." hx-trigger="every 60s, refresh from:body"
+        hx-target="this" hx-swap="outerHTML" hx-push-url="false">
+   ```
+   The fragment response is the region plus out-of-band replacements for the results count and the status tab strip, which live in the toolbar outside the swapped element.
+2. **Filter selects.** They submit with `hx-get`/`hx-include="closest form"`/`hx-push-url="true"`; the plain `<form method="get">` and its `<noscript>` submit button remain, so filtering works without JS.
+
+Mutating actions (transition, assign, reopen & merge, reply, bulk actions) stay ordinary `POST` forms with redirect-with-flash — server-side redirects, the `data-confirm` `<dialog>` flow, and CSRF protection all keep working unchanged.
+
+**CSP constraint.** `script-src 'self'` forbids inline script and `eval`. htmx compiles trigger *filters* (`every 60s [cond]`) with `new Function`, so triggers are unconditional and behavioural gating is done in a `htmx:beforeRequest` listener that calls `event.preventDefault()` (see `frontend/src/inbox-refresh.js`, `isPaused()`). `htmx.config.allowEval` therefore stays at its default `false`.
+
+**JavaScript layer (`frontend/src/` → `internal/web/static/app.js`).** Written as ES modules and bundled/minified by `esbuild` (`cd frontend && npm run build`). The bundle is committed and CI fails if it is stale. Modules: `inbox-refresh.js` (pause logic, selection restore across swaps, pull-to-refresh), `draft.js` (reply draft autosave with revision/409 conflict handling), `selection.js` (bulk selection), `rows.js`, `tabs.js`, `chrome.js`, `frames.js` (sandboxed email iframe sizing), `split-pane.js`, `keys.js` (keyboard navigation), `reply.js` (reply sheet). `draft.js` is unit-tested with vitest + jsdom; see [`docs/testing.md`](./testing.md).
+
+The reply editor is the one deliberate exception: a ProseMirror bundle (`frontend/editor.js` → `static/editor.js`) that hides a `<textarea>` and dispatches an `editorchange` event on the form, so `draft.js` and the reply form stay plain HTML controls.

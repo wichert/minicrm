@@ -854,6 +854,8 @@ func buildAccountTestServer(t *testing.T) (*web.Server, *testWebStore, http.Hand
 				srv.HandleReplyThread(w, web.WithChiParam(r, "id", strings.TrimSuffix(rest, "/reply")))
 			case strings.HasSuffix(rest, "/transition"):
 				srv.HandleTransitionThread(w, web.WithChiParam(r, "id", strings.TrimSuffix(rest, "/transition")))
+			case strings.HasSuffix(rest, "/list"):
+				srv.HandleThreadList(w, web.WithChiParam(r, "id", strings.TrimSuffix(rest, "/list")))
 			default:
 				srv.HandleViewThread(w, web.WithChiParam(r, "id", rest))
 			}
@@ -1416,7 +1418,7 @@ func TestFlashAndNoInlineStylesAcrossViews(t *testing.T) {
 	if err := views.RenderInbox(&inbox, views.InboxViewData{
 		Title: "Threads", ActiveNav: "threads", CurrentUser: admin, DisplayTZ: "UTC",
 		Flash: views.Flash{Kind: "success", Message: "Reply queued for delivery."},
-	}, false); err != nil {
+	}); err != nil {
 		t.Fatalf("RenderInbox: %v", err)
 	}
 	for _, want := range []string{`role="status"`, "Reply queued for delivery.", "flash-success", "data-flash-dismiss"} {
@@ -2170,7 +2172,7 @@ func TestLayoutAccessibilityAndStaticAssets(t *testing.T) {
 	var buf bytes.Buffer
 	if err := views.RenderInbox(&buf, views.InboxViewData{
 		Title: "Threads", ActiveNav: "threads", CurrentUser: admin, DisplayTZ: "UTC",
-	}, false); err != nil {
+	}); err != nil {
 		t.Fatalf("RenderInbox: %v", err)
 	}
 	body := buf.String()

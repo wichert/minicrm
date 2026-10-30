@@ -1096,7 +1096,18 @@ func TestSplitPaneLoadOlderKeepsThreadPath(t *testing.T) {
 	if !strings.Contains(pane, `class="btn btn-secondary" href="/threads/`+firstID.String()+`?`) {
 		t.Errorf("pane Load older link must page the pane in place, got: %s", pane)
 	}
-	if strings.Contains(pane, `href="/threads?status=new&amp;`) {
-		t.Error("pane Load older link must not point at the plain inbox")
+	// The pane's tab strip legitimately links to /threads (it changes the queue), so
+	// check the pagination footer itself rather than the whole pane.
+	footerIdx := strings.Index(pane, `class="list-footer"`)
+	if footerIdx < 0 {
+		t.Fatalf("pane is missing its pagination footer: %s", pane)
+	}
+	footerEnd := strings.Index(pane[footerIdx:], "</p>")
+	if footerEnd < 0 {
+		footerEnd = len(pane) - footerIdx
+	}
+	footer := pane[footerIdx : footerIdx+footerEnd]
+	if !strings.Contains(footer, `href="/threads/`+firstID.String()+`?`) {
+		t.Errorf("pane Load older link must page the pane in place, got: %s", footer)
 	}
 }

@@ -1,6 +1,6 @@
 # Testing, Linting & End-to-End CI Setup
 
-MiniCRM enforces code quality, static security analysis, and functional correctness through three layers of automated tests (`unit`, `integration`, and `e2e`), local git hooks (`prek`), and a three-job GitHub Actions CI pipeline (`.github/workflows/ci.yml`).
+MiniCRM enforces code quality, static security analysis, and functional correctness through layers of automated tests (`unit`, `integration`, `frontend`, and `e2e`), local git hooks (`prek`), and a four-job GitHub Actions CI pipeline (`.github/workflows/ci.yml` calling `tests.yml`).
 
 ---
 
@@ -52,6 +52,20 @@ Run all package tests with:
 ```bash
 go test -v -race ./...
 ```
+
+### Frontend Unit Tests (`frontend/`)
+
+The progressive-enhancement layer is written as ES modules in `frontend/src/` and bundled by esbuild into the committed assets `internal/web/static/app.js` and `internal/web/static/editor.js` (which are `go:embed`ded into the binary). Build and test with:
+
+```bash
+cd frontend && npm ci && npm test && npm run build
+```
+
+`vitest` runs in a `jsdom` environment (`frontend/vitest.config.js`) against `frontend/test/*.test.js`. The suites target logic that unit tests can actually pin down — currently the draft autosave module (`src/draft.js`): autosave debounce, adopting the server revision, the `409` conflict path (stop saving, keep the user's text, block submit), blocking submit while the initial check is unfinished, and the `beforeunload` guard (dirty/saving only, never while sending).
+
+The other modules are thin DOM wiring and are covered by the Go handler tests (`internal/web/web_htmx_test.go` asserts the fragment/OOB contract and the progressive filter markup) and the `e2e/` asset assertions, not by jsdom tests.
+
+CI (`.github/workflows/tests.yml`, job `frontend`) runs `npm test` and then `npm run build` followed by `git diff --exit-code` on both bundles, so a source change without a rebuilt bundle fails the build.
 
 ---
 

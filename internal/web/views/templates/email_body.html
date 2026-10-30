@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="responsive-embedded-sizing">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'none'; base-uri 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>Email message</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #ffffff; color: #0f172a; }
+    body { display: flow-root; font-family: system-ui, -apple-system, sans-serif; font-size: 15px; line-height: 1.55; padding: 0.75rem 1rem; overflow-wrap: anywhere; }
+    img { max-width: 100%; height: auto; }
+    table { border-collapse: collapse; max-width: 100%; }
+    th, td { border: 1px solid #e2e8f0; padding: 0.35rem 0.5rem; text-align: left; }
+    blockquote { margin: 0.75rem 0; padding-left: 0.75rem; border-left: 3px solid #e2e8f0; color: #475569; }
+    pre { white-space: pre-wrap; font-family: inherit; margin: 0; }
+    a { color: #4338ca; }
+    .empty-body { color: #64748b; font-style: italic; margin: 0; }
+  </style>
+</head>
+<body>
+  {{if .HasHTML}}
+    <div>{{.SanitizedHTML}}</div>
+  {{else if .PlainText}}
+    <pre>{{.PlainText}}</pre>
+  {{else}}
+    <p class="empty-body">(No message content)</p>
+  {{end}}
+</body>
+</html>

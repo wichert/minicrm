@@ -1,0 +1,30 @@
+{{/*
+settingsAuditTablePartial is the single source of truth for the recent-activity
+table, shared by the settings page (bounded render) and /settings/activity
+(paginated). On mobile the same markup transforms into stacked cards via CSS:
+each td carries data-label and status/role also appear inside the name cell
+(line 1), so the transformation stays CSS-only per the W6 plan.
+*/}}{{define "settings_audit_table"}}
+<table class="settings-table settings-audit-table">
+  <thead>
+    <tr>
+      <th scope="col">Time</th>
+      <th scope="col">Actor</th>
+      <th scope="col">Event</th>
+      <th scope="col">Target</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .}}
+    <tr>
+      <td data-label="Time" class="nowrap"><time title="{{.FullTime}}">{{.FormattedTime}}</time></td>
+      <td data-label="Actor">{{.ActorName}}</td>
+      <td data-label="Event">{{.Label}}</td>
+      <td data-label="Target">{{if .TargetName}}{{.TargetName}}{{else}}<span class="muted">—</span>{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="4" class="empty-state">No activity recorded yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
