@@ -1,0 +1,16 @@
+
+<h1 class="sr-only">Threads</h1>
+<div class="inbox-toolbar" data-inbox-toolbar>
+  <div class="tab-strip" data-tab-strip>
+  {{template "inbox_tabs" .}}
+  </div>
+  <div class="results-status">
+    {{template "inbox_results_count" .}}
+    <a class="refresh-meta" href="{{.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
+  </div>
+</div>
+<span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
+<div class="filter-sticky">
+  {{template "inbox_filter_form" (inboxFilterForm . "/threads" .ClearSearchURL)}}
+</div>
+{{template "inbox_results_region" .}}

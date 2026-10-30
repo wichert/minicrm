@@ -1,0 +1,19 @@
+{{/*
+activityBody is the admin full-activity page: the shared audit table plus
+pagination links. Admin-only route (requireAdmin in router.go).
+*/}}
+<div class="page-heading page-heading-row">
+  <h1>Full activity</h1>
+  <a class="btn btn-ghost btn-small" href="/settings">Back to settings</a>
+</div>
+
+<div class="card">
+  <div class="table-wrap">
+    {{template "settings_audit_table" .AuditLogs}}
+  </div>
+  <div class="activity-pagination">
+    {{if .HasPrev}}<a class="btn btn-ghost btn-small" href="/settings/activity?page={{.PagePrev}}">&larr; Newer</a>{{else}}<span></span>{{end}}
+    <span class="activity-page-label muted">Page {{.Page}}</span>
+    {{if .HasNext}}<a class="btn btn-ghost btn-small" href="/settings/activity?page={{.PageNext}}">Older &rarr;</a>{{else}}<span></span>{{end}}
+  </div>
+</div>

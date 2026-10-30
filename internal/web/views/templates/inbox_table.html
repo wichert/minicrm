@@ -1,0 +1,127 @@
+{{define "inbox_table"}}
+{{if .Threads}}
+<div class="table-wrap">
+  {{/* PaneMode (W4 split list) drops the bulk-select, status, age and actions
+       columns: the active tab already states the status, the age rides at the
+       end of the pane row, and acting on a thread belongs to the detail page or
+       the full inbox. The narrow pane spends its whole width on the subject,
+       customer and preamble. */}}
+  <table class="threads-table{{if .PaneMode}} threads-table-pane{{end}}">
+    <thead>
+      <tr>
+        {{if and (not .PaneMode) (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="select-cell"><label class="select-label"><input type="checkbox" data-select-all aria-label="Select all on page"></label></th>{{end}}
+        <th scope="col">Thread</th>
+        {{if not .PaneMode}}<th scope="col">Status</th>
+        <th scope="col">Age</th>{{end}}
+        {{if and (not .PaneMode) (ne .StatusFilter "completed") (ne .StatusFilter "spam")}}<th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th>{{end}}
+      </tr>
+    </thead>
+    <tbody>
+      {{$paneBase := .PaneLinksBaseURL}}{{$refreshURL := .RefreshURL}}{{$assignable := .AssignableUsers}}{{range .Threads}}{{$row := .}}{{$rowUsers := index $assignable .Thread.ID.String}}
+      {{/* The open thread reads as selected in the pane: aria-current for assistive
+           tech plus a background/border-left in app.css. */}}
+      <tr class="thread-row{{if eq .Thread.Status "new"}} thread-row-new{{end}}{{if and $.PaneMode .IsCurrent}} thread-row-current{{end}}" data-row-href="{{threadDetailURL $paneBase .Thread.ID}}"{{if and $.PaneMode .IsCurrent}} aria-current="true"{{end}}>
+        {{if and (not $.PaneMode) (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}<td class="select-cell"><label class="select-label"><input type="checkbox" name="thread_id" value="{{.Thread.ID}}" form="bulk-spam-form" data-select-thread data-status="{{.Thread.Status}}" data-account="{{.AccountName}}" aria-label="Select {{.Thread.SubjectDisplay}}"></label></td>{{end}}
+        <td class="thread-cell">
+          {{if $.PaneMode}}{{/* W-rows pane row: row 1 is the subject (a link, up to
+              two lines) beside the customer, row 2 is the message preamble on its
+              own full-width line with the compact age at its trailing edge.
+              Assignee, account and the absolute date are dropped from the pane —
+              they live in the detail header, and the tab strip + filters already
+              carry status/account. The age keeps its full text in its title attribute.
+              No-JS story: this is plain HTML, no behaviour depends on it. */}}
+          <div class="pane-row">
+            <div class="pane-row-top">
+              <a class="thread-link" href="{{threadDetailURL $paneBase .Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
+              <span class="pane-customer" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}</span>
+            </div>
+            <p class="pane-row-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}{{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}} pane-age" title="Opened {{.OpenedFullTime}}">{{paneAgeLabel .WaitLabel}}</span>{{else}}<time class="pane-age" title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}</p>
+          </div>
+          {{else}}
+          <div class="thread-rowline">
+            <span class="thread-line">
+              <a class="thread-link" href="{{threadDetailURL $paneBase .Thread.ID}}" title="{{.Thread.SubjectDisplay}}">{{.Thread.SubjectDisplay}}</a>{{if .Thread.HasDraft}} <span class="badge">Draft</span>{{end}}{{if gt .MessageCount 1}} <span class="count-pill" title="{{.MessageCount}} messages">{{.MessageCount}}</span>{{end}}
+              <span class="thread-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</span>
+            </span>
+            <span class="thread-meta" title="{{if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{end}}">{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else if .Thread.CustomerEmail}}{{.Thread.CustomerEmail}}{{else}}Unknown customer{{end}}{{if $.ShowAccountUI}} &middot; {{.AccountName}}{{end}} &middot; {{if .AssigneeName}}{{.AssigneeName}}{{else}}Unassigned{{end}}{{if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>{{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}</span>
+          </div>
+          {{end}}
+        </td>
+        {{if not $.PaneMode}}<td class="status-cell">
+          <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
+        </td>
+        <td class="nowrap age-cell">
+          {{if .WaitLabel}}<span class="wait-badge wait-{{.WaitUrgency}}" title="Opened {{.OpenedFullTime}}">{{.WaitLabel}}</span>
+          {{else if or (eq $.StatusFilter "completed") (eq $.StatusFilter "spam")}}<time title="{{.FullTime}}">{{.FormattedTime}}</time>
+          {{else}}<time title="{{.FullTime}}">{{.RelativeTime}}</time>{{end}}
+        </td>{{end}}
+        {{/* W-rows follow-up: the split pane is a reading queue, not an action
+             surface. Row menus and hover quick actions stay on the full inbox
+             (/threads) and on the detail page, which is one click away. */}}
+        {{if and (not $.PaneMode) (ne $.StatusFilter "completed") (ne $.StatusFilter "spam")}}
+        <td class="actions-cell">
+          {{if or (eq .Thread.Status "new") (eq .Thread.Status "in_progress")}}
+          <details class="row-menu" data-row-menu>
+            <summary class="row-menu-trigger" aria-label="Actions for {{.Thread.SubjectDisplay}}" title="Actions">
+              <span aria-hidden="true">&#8943;</span>
+            </summary>
+            <div class="row-menu-popover">
+              <button type="button" class="row-menu-item" data-row-select aria-label="Select {{.Thread.SubjectDisplay}} for bulk actions">Select</button>
+              {{if eq .Thread.Status "new"}}
+              <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form">
+                <input type="hidden" name="status" value="in_progress">
+                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                <button type="submit" class="row-menu-item" aria-label="Start working on {{.Thread.SubjectDisplay}}">Start working</button>
+              </form>
+              {{end}}
+              {{if .CanAssignToMe}}<form method="post" action="/threads/{{.Thread.ID}}/assign" class="row-menu-form">
+                <input type="hidden" name="assignee_id" value="{{$.CurrentUser.ID}}">
+                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                <button type="submit" class="row-menu-item" aria-label="Assign {{.Thread.SubjectDisplay}} to me">Assign to me</button>
+              </form>{{end}}
+              {{if $rowUsers}}
+              <details class="row-menu-submenu">
+                <summary class="row-menu-item" aria-label="Assign {{.Thread.SubjectDisplay}} to a team member">Assign to&hellip;</summary>
+                <div class="row-menu-popover row-menu-submenu-popover">
+                  {{range $rowUsers}}
+                  <form method="post" action="/threads/{{$row.Thread.ID}}/assign" class="row-menu-form">
+                    <input type="hidden" name="assignee_id" value="{{.ID}}">
+                    <input type="hidden" name="return_to" value="{{$refreshURL}}">
+                    <button type="submit" class="row-menu-item" aria-label="Assign {{$row.Thread.SubjectDisplay}} to {{.DisplayName}}">{{.DisplayName}}</button>
+                  </form>
+                  {{end}}
+                </div>
+              </details>
+              {{end}}
+            </div>
+          </details>
+          {{if or (eq .Thread.Status "new") (eq .Thread.Status "in_progress")}}
+          <!-- W7 spec: hover quick actions live directly in the actions cell,
+               outside the ⋯ popover, so they work without opening the menu.
+               Each form is self-contained (own action + hidden inputs). -->
+          <div class="row-quick-actions" aria-label="Quick actions">
+            <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as completed and move its messages to Archive?" data-confirm-action="Complete thread">
+              <input type="hidden" name="status" value="completed">
+              {{if eq .Thread.Status "new"}}<input type="hidden" name="complete_from_new" value="1">{{end}}
+              <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+              <button type="submit" class="row-quick-btn row-quick-complete" aria-label="Complete {{.Thread.SubjectDisplay}}" title="Complete"><span aria-hidden="true">&#10003;</span></button>
+            </form>
+            <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as spam and move its messages to Junk?" data-confirm-action="Mark as spam">
+              <input type="hidden" name="status" value="spam">
+              <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+              <button type="submit" class="row-quick-btn row-quick-spam" aria-label="Mark {{.Thread.SubjectDisplay}} as spam" title="Mark as spam"><span aria-hidden="true">&#10005;</span></button>
+            </form>
+          </div>
+          {{end}}
+          {{end}}
+        </td>
+        {{end}}
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<p class="card empty-state">No threads match these filters.</p>
+{{end}}
+{{end}}

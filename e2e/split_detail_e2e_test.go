@@ -68,7 +68,11 @@ func TestEndToEndSplitMasterDetailAssets(t *testing.T) {
 	if !strings.Contains(js, `matchMedia("(min-width: 1280px)")`) {
 		t.Error("app.js must toggle inert on the split list via the 1280px matchMedia query")
 	}
-	if !strings.Contains(js, `"change"`) || !strings.Contains(js, "setupSplitListInert") {
+	// app.js is a minified esbuild bundle (frontend/src/app.js → internal/web/static/app.js),
+	// so identifiers are mangled: assert on the stable DOM contract instead of a
+	// function name. The inert module marks the hidden pane with data-inert-pane
+	// and re-applies on the matchMedia "change" event.
+	if !strings.Contains(js, `"change"`) || !strings.Contains(js, "data-inert-pane") {
 		t.Error("app.js inert module must react to matchMedia change events (resize without reload)")
 	}
 	// The back link must stay available in single-pane mode: hiding it in split mode

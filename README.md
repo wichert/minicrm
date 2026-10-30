@@ -253,7 +253,9 @@ go run ./cmd/minicrm
 
 ## Development & Testing
 
-The reply editor is a restricted ProseMirror build checked into `internal/web/static/editor.js`, so the Go/Docker build does not require Node. After editing `frontend/editor.js`, regenerate it with `cd frontend && npm ci && npm run build`. The minified bundle is approximately 198 KiB (62 KiB gzip); the plain-text textarea remains available without JavaScript.
+The browser assets are checked in, so the Go/Docker build does not require Node: `internal/web/static/app.js` (progressive-enhancement ES modules from `frontend/src/`, bundled with esbuild) and `internal/web/static/editor.js` (a restricted ProseMirror build from `frontend/editor.js`). After editing either source tree, regenerate and test the bundles with `cd frontend && npm ci && npm run build && npm test`. Bundles are roughly 21 KiB for `app.js` and 198 KiB (62 KiB gzip) for `editor.js`; without JavaScript the reply textarea remains available, the inbox falls back to plain forms, and filter/pagination links keep working.
+
+htmx (`internal/web/static/htmx.min.js`, 2.0.4) is vendored, not a build dependency — see `internal/web/static/vendor/README.md` for its source and SHA-256.
 
 ```bash
 # Run unit, integration, and self-contained E2E tests with race detector

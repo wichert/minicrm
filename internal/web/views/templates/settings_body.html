@@ -1,0 +1,142 @@
+
+<div class="page-heading">
+  <h1>Settings</h1>
+</div>
+
+<nav class="settings-section-nav" aria-label="Settings sections">
+  <a href="#settings-routing">Routing &amp; display</a>
+  <a href="#settings-folders">Folders</a>
+  <a href="#settings-team">Team</a>
+  <a href="#settings-activity">Activity</a>
+</nav>
+
+{{if .Errors}}
+<div class="form-errors" role="alert">
+  <ul>{{range .Errors}}<li>{{.}}</li>{{end}}</ul>
+</div>
+{{end}}
+
+<form method="post" action="/settings" class="card" id="settings-routing">
+  <h2>Routing &amp; display</h2>
+  {{range .AccountSettings}}
+  <fieldset>
+    <legend>{{.Account.Name}}</legend>
+    <label class="field">Default assignee
+      <select name="account_default_assignee_{{.Account.ID}}">
+        <option value="" {{if eq .DefaultAssigneeValue ""}}selected{{end}}>-- Unassigned --</option>
+        {{$current := .DefaultAssigneeValue}}
+        {{$acct := .Account.ID}}
+        {{range $.Users}}
+        {{if and .IsActive (.HasAccountAccess $acct)}}
+        <option value="{{.ID}}" {{if eq .ID.String $current}}selected{{end}}>{{.DisplayName}} ({{.Email}})</option>
+        {{end}}
+        {{end}}
+      </select>
+    </label>
+  </fieldset>
+  {{end}}
+  <div class="form-grid">
+    <label class="field">Display timezone (IANA)
+      <input type="text" name="display_timezone" value="{{.Settings.DisplayTimezone}}" required>
+      <span class="helper">All times in MiniCRM are shown in this timezone.</span>
+    </label>
+    <label class="field">Subject match window (days)
+      <input type="number" name="subject_match_window_days" value="{{.Settings.SubjectMatchWindowDays}}" min="1" max="365" required>
+    </label>
+    <label class="field">Needs attention threshold (days)
+      <input type="number" name="attention_age_days" value="{{.Settings.AttentionAgeDays}}" min="1" max="365" required>
+      <span class="helper">Open threads older than this appear in Needs attention.</span>
+    </label>
+  </div>
+  <fieldset id="settings-folders">
+    <legend>IMAP folder mapping</legend>
+  <div class="form-grid">
+    <label class="field">IMAP INBOX folder
+      <input type="text" name="imap_inbox_mailbox" value="{{.Settings.IMAPInboxMailbox}}" required>
+    </label>
+    <label class="field">IMAP Archive folder
+      <input type="text" name="imap_archive_mailbox" value="{{.Settings.IMAPArchiveMailbox}}" required>
+    </label>
+    <label class="field">IMAP Junk folder
+      <input type="text" name="imap_junk_mailbox" value="{{.Settings.IMAPJunkMailbox}}" required>
+    </label>
+    <label class="field">IMAP Sent folder
+      <input type="text" name="imap_sent_mailbox" value="{{.Settings.IMAPSentMailbox}}" required>
+    </label>
+  </div>
+  </fieldset>
+  <button type="submit" class="btn btn-primary">Save settings</button>
+</form>
+
+<h2 id="settings-team">Team members</h2>
+<div class="card">
+  <div class="table-wrap">
+    <table class="settings-table settings-users-table">
+      <thead>
+        <tr>
+          <th scope="col">Name</th>
+          <th scope="col">Email</th>
+          <th scope="col">Role</th>
+          <th scope="col">Account access</th>
+          <th scope="col">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Users}}
+        <tr>
+          <td data-label="Name" class="settings-user-name"><span class="settings-user-name-text">{{.DisplayName}}</span>{{if .IsActive}}<span class="badge badge-active">Active</span>{{else}}<span class="badge badge-inactive">Inactive</span>{{end}}<span class="badge badge-role">{{roleLabel .Role}}</span></td>
+          <td data-label="Email" class="settings-user-email">{{.Email}}</td>
+          <td data-label="Role" class="settings-user-role">{{roleLabel .Role}}</td>
+          <td data-label="Account access" class="settings-user-accounts">
+            {{if .AllowedAccounts}}
+              {{range .AllowedAccounts}}<span class="account-chip">{{index $.AccountNames .}}</span>{{end}}
+            {{else}}
+              <span class="muted">No account access</span>
+            {{end}}
+          </td>
+          <td data-label="Status" class="settings-user-status">{{if .IsActive}}Active{{else}}Inactive{{end}}</td>
+        </tr>
+        {{else}}
+        <tr><td colspan="5" class="empty-state">No team members yet.</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h2>Add team member</h2>
+<form method="post" action="/settings/users" class="card">
+  <div class="form-grid">
+    <label class="field">Email
+      <input type="email" name="email" value="{{.NewUser.Email}}" required>
+    </label>
+    <label class="field">Display name
+      <input type="text" name="display_name" value="{{.NewUser.DisplayName}}" required>
+    </label>
+    <label class="field">Role
+      <select name="role">
+        <option value="agent" {{if ne .NewUser.Role "admin"}}selected{{end}}>Agent</option>
+        <option value="admin" {{if eq .NewUser.Role "admin"}}selected{{end}}>Admin</option>
+      </select>
+    </label>
+  </div>
+  <fieldset>
+    <legend>Account access</legend>
+    <div class="checkbox-row">
+      {{range .Accounts}}
+      <label class="checkbox"><input type="checkbox" name="allowed_accounts" value="{{.ID}}" {{if hasAccount $.NewUser.AllowedAccounts .ID}}checked{{end}}> {{.Name}}</label>
+      {{end}}
+    </div>
+  </fieldset>
+  <button type="submit" class="btn btn-primary">Create user</button>
+</form>
+
+<h2 id="settings-activity">Recent activity</h2>
+<div class="card settings-recent">
+  <div class="table-wrap">
+    {{template "settings_audit_table" .AuditLogs}}
+  </div>
+  <div class="settings-activity-footer">
+    <a class="settings-activity-link" href="/settings/activity">View full activity</a>
+  </div>
+</div>
