@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/wichert/minicrm/compare/v1.2.1...v1.3.0) (2026-10-30)
+
+
+### Features
+
+* **web:** adopt htmx for list swaps, modularize app.js, embed templates ([#35](https://github.com/wichert/minicrm/issues/35)) ([3b785e3](https://github.com/wichert/minicrm/commit/3b785e3d20346c3a3da04ab8ac1393b31fafcabf))
+
 ## [1.2.1](https://github.com/wichert/minicrm/compare/v1.2.0...v1.2.1) (2026-10-29)
 
 
