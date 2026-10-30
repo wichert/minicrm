@@ -1,0 +1,339 @@
+
+{{if .List}}
+{{/* W4: the filter row lives once, above the whole split layout, instead of inside
+     the clamp(360px..520px) list pane where four controls wrapped onto three lines.
+     It is shown only at >=1280px (app.css .split-filters): below that the pane is
+     hidden anyway and the standalone detail page keeps its today's chrome. The form
+     posts back to the open thread's own path, so applying a filter re-renders the
+     pane without leaving the conversation — no-JS included. */}}
+<div class="split-filters" data-split-filters>
+  {{template "inbox_filter_form" (inboxFilterForm .List (threadDetailURL "" .Thread.ID) .List.ClearSearchURL)}}
+</div>
+{{end}}
+<div class="split-layout{{if not .List}} split-single{{end}}" data-split-layout>
+{{if .List}}
+  <aside class="split-list" data-split-list id="split-list" aria-label="Thread list">
+  <h2 class="sr-only">Threads</h2>
+  <div class="inbox-toolbar" data-inbox-toolbar>
+    <div class="tab-strip" data-tab-strip>
+    <nav class="tabs" aria-label="Thread status">
+      <a class="tab" href="/threads?status=attention&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "attention"}} aria-current="true"{{end}}>Needs attention <span class="count-pill">{{.List.Counts.NeedsAttention}}</span></a>
+      <a class="tab" href="/threads?status=new&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "new"}} aria-current="true"{{end}}>New <span class="count-pill">{{.List.Counts.New}}</span></a>
+      <a class="tab" href="/threads?status=open&assignee=me&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if and (eq .List.StatusFilter "open") (eq .List.AssigneeFilter "me")}} aria-current="true"{{end}}>Mine <span class="count-pill">{{.List.Counts.Mine}}</span></a>
+      <details class="row-menu tab-more" data-row-menu{{if or (eq .List.StatusFilter "in_progress") (eq .List.StatusFilter "completed") (eq .List.StatusFilter "spam") (eq .List.StatusFilter "all")}} data-active-more="true"{{end}}>
+        <summary class="tab tab-more-trigger">More{{if eq .List.StatusFilter "in_progress"}}: In progress <span class="count-pill">{{.List.Counts.InProgress}}</span>{{else if eq .List.StatusFilter "completed"}}: Completed <span class="count-pill">{{.List.Counts.Completed}}</span>{{else if eq .List.StatusFilter "spam"}}: Spam <span class="count-pill">{{.List.Counts.Spam}}</span>{{else if eq .List.StatusFilter "all"}}: All <span class="count-pill">{{.List.Counts.All}}</span>{{end}}</summary>
+        <div class="row-menu-popover tab-more-popover">
+          <a class="row-menu-item tab-more-item" href="/threads?status=in_progress&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "in_progress"}} aria-current="true"{{end}}><span>In progress</span> <span class="count-pill">{{.List.Counts.InProgress}}</span></a>
+          <a class="row-menu-item tab-more-item" href="/threads?status=completed&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "completed"}} aria-current="true"{{end}}><span>Completed</span> <span class="count-pill">{{.List.Counts.Completed}}</span></a>
+          <a class="row-menu-item tab-more-item" href="/threads?status=spam&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "spam"}} aria-current="true"{{end}}><span>Spam</span> <span class="count-pill">{{.List.Counts.Spam}}</span></a>
+          <a class="row-menu-item tab-more-item" href="/threads?status=all&assignee={{.List.AssigneeFilter}}&account={{.List.AccountFilter}}&q={{.List.Search}}"{{if eq .List.StatusFilter "all"}} aria-current="true"{{end}}><span>All</span> <span class="count-pill">{{.List.Counts.All}}</span></a>
+        </div>
+      </details>
+    </nav>
+    </div>
+    <div class="results-status">
+      <p class="results-count">{{len .List.Threads}} thread{{if ne (len .List.Threads) 1}}s{{end}}</p>
+      <a class="refresh-meta" href="{{.List.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
+    </div>
+  </div>
+  <div class="filter-sticky">
+    {{/* The form submits to the open thread's path (not /threads): applying a
+         pane filter re-renders the split view with the new filter instead of
+         navigating to the plain inbox — the same behaviour as the top
+         data-split-filters bar above, and it works without JS. The handler
+         sets ClearSearchURL to a thread-path URL so clearing the search stays
+         in the split view too. */}}
+    {{template "inbox_filter_form" (inboxFilterForm .List (threadDetailURL "" .Thread.ID) .List.ClearSearchURL)}}
+  </div>
+  <span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
+  {{/* No bulk bar in the pane: selection chrome plus a 5-button bar cannot fit a
+       narrow column without eating the subject. Bulk actions stay on the plain
+       inbox (/threads), which is one click away via the "/threads" nav link and
+       is the whole page below 1280px. */}}
+  <div data-inbox-results>
+  {{template "inbox_table" .List}}
+  {{if .List.SortTruncated}}<p class="list-truncated">Longest waiting shows at most 100 threads. Use search or filters to narrow the queue.</p>{{end}}
+  {{if .List.NextURL}}<p class="list-footer"><span class="list-footer-count">{{if .List.TotalCount}}{{.List.TotalCount}} threads{{else}}More threads{{end}}</span> <a class="btn btn-secondary" href="{{.List.NextURL}}">Load older</a></p>{{end}}
+  </div>
+  </aside>
+{{end}}
+  <div class="split-detail" data-split-detail>
+<div class="thread-top-bar thread-detail">
+  <a class="back-link" href="{{if .BackURL}}{{.BackURL}}{{else}}/threads{{end}}">&larr; Back to threads</a>
+  {{/* Refresh re-requests this page. In the split view it reuses the pane's
+       filter-carrying thread URL (List.RefreshURL) so reloading keeps the queue
+       the user is reading; without a pane it is the bare thread path. No-JS: it
+       is a plain link either way. */}}
+  <a class="btn btn-secondary btn-small" href="{{if .List}}{{.List.RefreshURL}}{{else}}/threads/{{.Thread.ID}}{{end}}">Refresh</a>
+</div>
+<div class="card thread-header-card">
+  <div class="thread-header">
+    <div>
+      <h1>{{.Thread.SubjectDisplay}}</h1>
+      <ul class="meta-list">
+        <li><span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span></li>
+        {{if .WaitLabel}}<li><span class="wait-badge wait-{{.WaitUrgency}}">{{.WaitLabel}}</span></li>{{end}}
+        {{if .ShowAccountUI}}<li><span class="badge badge-account">{{.AccountName}}</span></li>{{end}}
+        <li><span class="meta-label">Customer</span> <strong>{{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else}}Unknown customer{{end}}</strong> <span class="customer-email">{{.Thread.CustomerEmail}}</span></li>
+        {{if or (eq .Thread.Status "completed") (eq .Thread.Status "spam")}}
+        <li><span class="meta-label">Assignee</span> {{if .Thread.AssigneeID}}{{.AssigneeName}}{{else}}<span class="muted">Unassigned</span>{{end}}</li>
+        {{end}}
+      </ul>
+    </div>
+  </div>
+
+  {{if .PreviousThreads}}
+  <details class="previous-conversations">
+    <summary>{{len .PreviousThreads}} other conversation{{if ne (len .PreviousThreads) 1}}s{{end}}</summary>
+    <p class="helper">Other conversations from this email address</p>
+    <ul class="previous-conversations-list">
+      {{range .PreviousThreads}}
+      <li class="previous-conversation-row">
+        <div class="previous-conversation-main">
+          <div class="previous-conversation-head">
+            <a class="previous-conversation-link" href="/threads/{{.Thread.ID}}" target="_blank" rel="noopener" title="Opens in a new tab so your reply stays here.">{{.Thread.SubjectDisplay}}</a>
+            <span class="previous-conversation-meta">
+              <span class="{{statusBadgeClass .Thread.Status}}">{{statusLabel .Thread.Status}}</span>
+              <time class="muted previous-conversation-time" title="{{.FullTime}}">{{.FormattedTime}}</time>
+              {{if $.ShowAccountUI}}<span class="badge badge-account">{{.AccountName}}</span>{{end}}
+            </span>
+          </div>
+          <p class="previous-conversation-snippet">{{if .LatestSnippet}}{{if eq .LatestDirection "outbound"}}<span class="snippet-you">You:</span> {{end}}{{.LatestSnippet}}{{else}}<em>(No message text)</em>{{end}}</p>
+        </div>
+      </li>
+      {{end}}
+    </ul>
+  </details>
+  {{end}}
+
+  {{if .ReopensThread}}
+  <div class="banner banner-reopen">
+    <h2>Reply to a completed thread</h2>
+    <p>
+      This email replies to the completed thread
+      <a href="/threads/{{.ReopensThread.ID}}">{{.ReopensThread.SubjectDisplay}}</a>{{if .ReopenCompletedAt}}, completed {{.ReopenCompletedAt}}{{end}}{{if .ReopenCompletedBy}} by {{.ReopenCompletedBy}}{{end}}.
+    </p>
+    <p><strong>Reopen &amp; merge</strong> moves this email into the original thread and returns it to In progress; this temporary thread is removed.</p>
+    <form method="post" action="/threads/{{.Thread.ID}}/reopen-merge" class="inline-form">
+      <button type="submit" class="btn btn-primary">Reopen &amp; merge into the original thread</button>
+    </form>
+    <p class="helper">Or keep this email as a separate new thread and use Start working below.</p>
+  </div>
+  {{end}}
+
+  {{if .Errors}}
+  <div class="form-errors" role="alert">
+    <ul>{{range .Errors}}<li>{{.}}</li>{{end}}</ul>
+  </div>
+  {{end}}
+
+  <div class="actions-bar">
+    <div class="actions-group">
+      {{if eq .Thread.Status "new"}}
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form">
+        <input type="hidden" name="status" value="in_progress">
+        <button type="submit" class="btn btn-primary">Start working</button>
+      </form>
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Mark this thread complete and move its messages to the Archive folder?" data-confirm-action="Move to Archive">
+        <input type="hidden" name="status" value="completed">
+        <input type="hidden" name="complete_from_new" value="1">
+        <button type="submit" class="btn btn-primary">Mark complete</button>
+      </form>
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Mark this thread as spam and move its messages to the Junk folder?" data-confirm-action="Move to Junk">
+        <input type="hidden" name="status" value="spam">
+        <button type="submit" class="btn btn-danger">Mark as spam</button>
+      </form>
+      {{end}}
+      {{if eq .Thread.Status "in_progress"}}
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Mark this thread complete and move its messages to the Archive folder?" data-confirm-action="Move to Archive">
+        <input type="hidden" name="status" value="completed">
+        <button type="submit" class="btn btn-primary">Mark complete</button>
+      </form>
+      {{end}}
+      {{if eq .Thread.Status "spam"}}
+      <form method="post" action="/threads/{{.Thread.ID}}/transition" class="inline-form" data-confirm="Return this conversation to In progress and queue restoration from Junk?" data-confirm-action="Restore">
+        <input type="hidden" name="status" value="in_progress"><input type="hidden" name="recover_spam" value="1">
+        <button type="submit" class="btn btn-secondary">Not spam</button>
+      </form>
+      <p class="helper">This thread is marked as spam. Replies and assignment are disabled.</p>
+      {{end}}
+      {{if eq .Thread.Status "completed"}}
+      <p class="helper">This thread is completed. Replies and assignment are disabled until a follow-up reply is reopened and merged.</p>
+      {{end}}
+    </div>
+    {{if and (ne .Thread.Status "spam") (ne .Thread.Status "completed")}}
+    <div class="actions-group actions-assign">
+      {{if not .Thread.AssigneeID}}
+      <form method="post" action="/threads/{{.Thread.ID}}/assign" class="inline-form">
+        <input type="hidden" name="assignee_id" value="{{.CurrentUser.ID}}">
+        <button type="submit" class="btn btn-secondary">Assign to me</button>
+      </form>
+      {{end}}
+      <form method="post" action="/threads/{{.Thread.ID}}/assign" class="assign-form">
+        <label class="inline-field" for="assignee-{{.Thread.ID}}">Assignee
+          <select id="assignee-{{.Thread.ID}}" name="assignee_id" data-auto-submit>
+            <option value="" {{if not .Thread.AssigneeID}}selected{{end}} disabled>Unassigned</option>
+            {{range .Users}}
+            <option value="{{.ID}}" {{if and $.Thread.AssigneeID (eq .ID.String $.Thread.AssigneeID.String)}}selected{{end}}>{{.DisplayName}}</option>
+            {{end}}
+          </select>
+        </label>
+        <noscript><button type="submit" class="btn btn-secondary">Assign</button></noscript>
+      </form>
+      {{with assignmentLabel .Thread.AssignmentSource}}{{if $.Thread.AssigneeID}}<span class="muted assign-note">({{.}})</span>{{end}}{{end}}
+    </div>
+    {{end}}
+  </div>
+</div>
+
+{{if .ReplyAllowed}}
+<button type="button" class="reply-sticky-bar" data-open-reply-sheet aria-controls="reply" aria-expanded="false">Reply</button>
+{{end}}
+
+<div class="section-heading">
+  <h2>Messages ({{len .Emails}})</h2>
+  {{if gt (len .Emails) 1}}<button type="button" class="btn btn-ghost btn-small" data-toggle-messages aria-pressed="false">Expand all</button>{{end}}
+</div>
+{{range .Emails}}
+<details class="card message message-{{directionClass .Email.Direction}}"{{if .IsLatest}} open{{end}}>
+  <summary class="message-header">
+    <span class="{{directionBadge .Email.Direction}}">{{directionLabel .Email.Direction}}</span>
+    <span class="message-from"><strong>{{if .Email.FromName}}{{.Email.FromName}}{{else}}{{.Email.FromAddress}}{{end}}</strong><span class="message-address"> &lt;{{.Email.FromAddress}}&gt;</span></span>
+    <span class="message-snippet">{{if .Snippet}}{{.Snippet}}{{else}}<em>(No message content)</em>{{end}}</span>
+    {{if .Attachments}}<span class="attachment-chip" title="{{len .Attachments}} attachment(s)">&#128206; {{len .Attachments}}</span>{{end}}
+    <time class="muted message-time" title="{{.FullSent}}">{{.FormattedSent}}</time>
+  </summary>
+  {{if .HasRemoteImages}}
+  <div class="remote-image-notice">
+    <p>Remote images blocked for your privacy. Loading them may tell the sender you opened this message.</p>
+    <button type="button" class="btn btn-secondary btn-small" data-load-images data-image-prefix="/emails/{{.Email.ID}}/images/">Load images for this message</button>
+  </div>
+  {{end}}
+  <iframe
+    class="email-frame"
+    src="/emails/{{.Email.ID}}/body"
+    title="Email message from {{.Email.FromAddress}}"
+    sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+    referrerpolicy="no-referrer"
+    loading="lazy">
+  </iframe>
+  {{if .Attachments}}
+  <div class="attachments">
+    <ul class="attachment-grid" aria-label="Attachments">
+      {{range .Attachments}}
+      <li class="attachment-card">
+        {{if isImageAttachment .}}
+        <a class="attachment-thumb attachment-thumb-image" href="/attachments/{{.ID}}/view" target="_blank" rel="noopener" tabindex="-1" aria-hidden="true">
+          <img class="attachment-preview-img" src="/attachments/{{.ID}}/view" alt="{{.Filename}}" loading="lazy">
+        </a>
+        {{else}}
+        <span class="attachment-thumb attachment-thumb-doc" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+        </span>
+        {{end}}
+        <div class="attachment-meta">
+          {{if isViewableAttachment .}}
+          <a class="attachment-name" href="/attachments/{{.ID}}/view" target="_blank" rel="noopener" title="{{.Filename}}">{{.Filename}}</a>
+          {{else}}
+          <a class="attachment-name" href="/attachments/{{.ID}}/download" title="{{.Filename}}">{{.Filename}}</a>
+          {{end}}
+          <span class="attachment-sub muted">{{attachmentKind .}} &middot; {{formatSize .SizeBytes}}</span>
+        </div>
+        <div class="attachment-actions">
+          {{if isViewableAttachment .}}
+          <a class="btn-icon" href="/attachments/{{.ID}}/view" target="_blank" rel="noopener" title="View {{.Filename}}" aria-label="View {{.Filename}}">
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </a>
+          {{end}}
+          <a class="btn-icon" href="/attachments/{{.ID}}/download" title="Download {{.Filename}}" aria-label="Download {{.Filename}}">
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </a>
+        </div>
+      </li>
+      {{end}}
+    </ul>
+  </div>
+  {{end}}
+</details>
+{{end}}
+
+{{if not .ReplyAllowed}}
+{{if or .ReplyDraft .ReplyErrors}}
+<section class="card" id="reply-draft">
+  <h2>Draft not sent</h2>
+  {{if .ReplyDraft}}
+  <p class="helper">This thread cannot receive a reply, so your draft has not been sent. Copy it if you need it elsewhere.</p>
+  {{else}}
+  <p class="helper">This thread cannot receive a reply.</p>
+  {{end}}
+  {{if .ReplyErrors}}
+  <div class="form-errors" role="alert">
+    <ul>{{range .ReplyErrors}}<li>{{.}}</li>{{end}}</ul>
+  </div>
+  {{end}}
+  {{if .ReplyDraft}}
+  <label class="field" for="preserved-draft">Draft</label>
+  <textarea id="preserved-draft" name="preserved_draft" rows="6" readonly>{{.ReplyDraft}}</textarea>
+  {{end}}
+</section>
+{{end}}
+{{end}}
+
+{{if .ReplyAllowed}}
+<section class="card reply-card" id="reply">
+  <button type="button" class="reply-sheet-close" data-close-reply-sheet aria-label="Close reply">&times;</button>
+  <h2>Send reply</h2>
+  <details class="reply-context-details" open>
+    <summary>{{.AccountName}} &rarr; {{if .Thread.CustomerName}}{{.Thread.CustomerName}}{{else}}{{.Thread.CustomerEmail}}{{end}}</summary>
+    <dl class="reply-context">
+      <div><dt>From</dt><dd>{{.AccountName}} &lt;{{.AccountFromAddress}}&gt;</dd></div>
+      <div><dt>To</dt><dd>{{if .Thread.CustomerName}}{{.Thread.CustomerName}} {{end}}&lt;{{.Thread.CustomerEmail}}&gt;</dd></div>
+    </dl>
+  </details>
+  {{if eq .Thread.Status "new"}}
+  <p class="helper">If this thread is unassigned, sending will assign it to you. Sending a reply also moves a new thread to In progress.</p>
+  {{end}}
+  {{if .ReplyErrors}}
+  <div class="form-errors" role="alert">
+    <ul>{{range .ReplyErrors}}<li>{{.}}</li>{{end}}</ul>
+  </div>
+  {{end}}
+  <form method="post" action="/threads/{{.Thread.ID}}/reply" enctype="multipart/form-data" class="reply-form" data-draft-url="/threads/{{.Thread.ID}}/draft">
+    <input type="hidden" name="draft_revision" value="{{.DraftRevision}}">
+    <input type="hidden" name="body_formatting" value="{{.DraftFormatting}}" disabled>
+    <div class="field">
+      <label for="reply-body">Message</label>
+      <textarea id="reply-body" class="reply-textarea" name="body_text" rows="6" required placeholder="Write your reply...">{{.ReplyDraft}}</textarea>
+      <div data-editor-controls hidden>
+        <div role="toolbar" aria-label="Reply formatting">
+          <button type="button" class="btn btn-secondary btn-small" data-editor-bold aria-pressed="false">Bold</button>
+          <button type="button" class="btn btn-secondary btn-small" data-editor-italic aria-pressed="false">Italic</button>
+          <button type="button" class="btn btn-secondary btn-small" data-editor-plain>Use plain text</button>
+        </div>
+        <div data-editor></div>
+      </div>
+    </div>
+    <div class="reply-footer">
+      <button type="button" class="btn btn-secondary" data-save-draft>Save draft</button>
+      <button type="button" class="btn btn-secondary" data-discard-draft>Discard draft</button>
+      <span role="status" aria-live="polite" data-draft-status></span>
+      <label class="file-field" for="reply-attachment">Attachment (optional)
+        <input id="reply-attachment" type="file" name="attachment">
+      </label>
+      <button type="submit" class="btn btn-primary">Send reply</button>
+    </div>
+  </form>
+</section>
+{{end}}
+
+<details class="card activity-card">
+  <summary><h2>Activity ({{len .Events}})</h2></summary>
+  <ol class="timeline">
+    {{range .Events}}
+    {{if .Section}}<li class="timeline-section"><h3>{{.Section}}</h3></li>{{end}}
+    <li><time class="muted" title="{{.FullTime}}">{{.FormattedTime}}</time> <span>{{.Summary}}</span></li>
+    {{else}}
+    <li class="muted">No activity recorded yet.</li>
+    {{end}}
+  </ol>
+</details>

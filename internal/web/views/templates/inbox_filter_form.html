@@ -1,0 +1,51 @@
+{{/*
+inboxFilterForm is the shared filter bar used by all three placements: the
+full inbox page, the split view's top bar (data-split-filters) and the split
+pane's sticky bar. Action selects where the plain GET form submits (no-JS
+path): the full inbox posts to /threads, the split bars post to the open
+thread's path so applying a filter re-renders the split view in place.
+*/}}{{define "inbox_filter_form"}}
+<form method="get" action="{{.Action}}" class="filter-inline">
+	<input type="hidden" name="status" value="{{.Data.StatusFilter}}">
+	<label class="inline-field search-field">
+		<span class="search-icon" aria-hidden="true">
+			<svg viewBox="0 0 16 16" width="14" height="14" focusable="false"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+		</span>
+		<span class="sr-only">Customer or subject</span>
+		<input type="search" name="q" value="{{.Data.Search}}" placeholder="Search customer or subject" aria-label="Customer or subject">
+		{{if .Data.Search}}<a class="search-clear" href="{{.ClearSearchURL}}" aria-label="Clear search">&times;</a>{{end}}
+	</label>
+	{{if .Data.ShowAssigneeUI}}
+	<label class="inline-field inline-field-compact">
+		<span class="sr-only">Assignee</span>
+		<select name="assignee" data-hx-get="{{.Action}}" aria-label="Assignee">
+			<option value="" {{if eq .Data.AssigneeFilter ""}}selected{{end}}>Anyone</option>
+			<option value="me" {{if eq .Data.AssigneeFilter "me"}}selected{{end}}>Assigned to me</option>
+			<option value="unassigned" {{if eq .Data.AssigneeFilter "unassigned"}}selected{{end}}>Unassigned</option>
+			{{range .Data.Users}}
+			<option value="{{.ID}}" {{if eq .ID.String $.Data.AssigneeFilter}}selected{{end}}>{{.DisplayName}}</option>
+			{{end}}
+		</select>
+	</label>
+	{{end}}
+	{{if .Data.ShowAccountUI}}
+	<label class="inline-field inline-field-compact">
+		<span class="sr-only">Account</span>
+		<select name="account" data-hx-get="{{.Action}}" aria-label="Account">
+			<option value="">All accounts</option>
+			{{range .Data.Accounts}}
+			<option value="{{.ID}}" {{if eq .ID $.Data.AccountFilter}}selected{{end}}>{{.Name}}</option>
+			{{end}}
+		</select>
+	</label>
+	{{end}}
+	<label class="inline-field inline-field-compact">
+		<span class="sr-only">Sort</span>
+		<select name="sort" data-hx-get="{{.Action}}" aria-label="Sort threads">
+			<option value="newest" {{if ne .Data.Sort "longest_waiting"}}selected{{end}}>Newest</option>
+			<option value="longest_waiting" {{if eq .Data.Sort "longest_waiting"}}selected{{end}}>Longest waiting</option>
+		</select>
+	</label>
+	<noscript><button type="submit" class="btn btn-secondary btn-small">Filter</button></noscript>
+</form>
+{{end}}
