@@ -1,13 +1,13 @@
 # Plan — Frontend Hypermedia Refactor: adopt htmx, modularize app.js, embed templates
 
-**Status:** Partially complete — WS-C (template embed) and WS-A (htmx swap) landed; WS-B/WS-D pending
+**Status:** Complete — WS-A (htmx swap), WS-B (ES modules + draft tests), WS-C (template embed) and WS-D (docs) landed.
 **Date:** 2026-10-30
 **Scope:** Browser UI only (`internal/web/`, `frontend/`, `docs/`). No changes to workflow state machine, IMAP/SMTP workers, storage, auth, or security middleware — all invariants in `AGENTS.md` are untouched.
 **Motivation:** The frontend is architecturally correct (SSR + progressive enhancement, no SPA) but currently hand-implements hypermedia swapping (`swapResults()` in `app.js`) while the codebase and `docs/architecture.md` claim htmx is in use. The `HX-Request` partial path exists but has no real client. This plan finishes that migration, modularizes the JS, and moves templates out of Go string literals.
 
 ---
 
-## 1. Problem (current state, verified)
+## 1. Problem (state before the refactor, verified)
 
 1. **Half-htmx with no htmx.** `handlers_threads.go:721` branches on `HX-Request: true`; `views.RenderInbox(..., partialOnly)` (`views.go:834-838`) renders `inboxPartTmpl` (table only). Nothing in the browser sends that header. The real auto-refresh is `swapResults()` (`app.js:~660-717`): full-page `GET`, `DOMParser`, then hand-copies three regions (`[data-inbox-results]`, `.results-count`, `.tabs`).
 2. **Hand-rolled DOM lifecycle.** After every swap, JS must re-run `setupRowLinks()`, `setupRowMenus()`, `setupBulkForm()`, `setupTabStrips()`, `refreshBulkSelection()`, re-apply checked thread IDs + `data-selection-mode` + split-pane scroll, and guard re-binding with idempotency flags (`menu.dataset.rowMenuReady`, `tab.dataset.tabFocusBound`, `strip.dataset.tabStripReady`). ~200–300 lines exist only because there is no swap manager.
@@ -79,20 +79,22 @@
 
 ### WS-B — Split app.js into ES modules and test the critical logic
 
-**B1. Split** into `frontend/src/` modules bundled by the existing esbuild setup (`frontend/package.json` build extended to bundle `app.js` → `internal/web/static/app.js`):
-- `src/inbox-refresh.js` — `isPaused()`, status label, htmx hooks (WS-A client glue)
-- `src/bulk-selection.js` — bulk bar recount/confirm-text updates (kept: it is selection state, not swapping)
-- `src/draft.js` — autosave, revision/409 conflict, `beforeunload` guard (unchanged logic)
-- `src/frames.js` — iframe autoresize, `data-load-images`, `inert` toggle, split-pane scroll restore
+**B1. Split** into `frontend/src/` modules bundled by the existing esbuild setup (`frontend/package.json` build extended to bundle `app.js` → `internal/web/static/app.js`). **Implemented layout** (slightly finer than the original sketch, because `chrome.js` had become a grab bag):
+- `src/inbox-refresh.js` — `isPaused()`, `hasPendingInlineEdit()`, selection capture/restore, `htmx:beforeRequest`/`afterSwap` glue, status label, pull-to-refresh
+- `src/selection.js` — bulk bar recount/confirm text, `setupBulkForm`, long-press selection mode
+- `src/draft.js` — autosave, revision/409 conflict, `beforeunload` guard
+- `src/frames.js` — iframe autoresize, `data-load-images`, expired-frame handling
+- `src/split-pane.js` — split-pane scroll restore + `inert` toggle
 - `src/keys.js` — j/k/x/c/s// keyboard nav
-- `src/chrome.js` — tab strips, row menus, row links, flash dismiss, reply sheet, pull-to-refresh
-- Public behavior must be unchanged; this is a mechanical split + htmx integration, not a rewrite.
+- `src/rows.js` — row links, row menus
+- `src/tabs.js` — tab strips + overflow
+- `src/chrome.js` — filter/auto-submit, flash dismiss, message toggle, confirm dialog
+- `src/reply.js` — reply sheet + Cmd/Ctrl+Enter latch
+- `src/app.js` — entry point wiring the above
 
-**B2. Test the data-loss-critical module.** Add `vitest` to `frontend/` (test-only dev dependency) with jsdom tests for `draft.js`:
-- 409 → conflicted state, submit blocked, message shown
-- `beforeunload` prevented while dirty/saving, not while `sending`
-- debounce/discard/revision-update flow
-Stretch: one Playwright smoke in `e2e/` (the dev-oidc harness exists) asserting a swap preserves a checked row.
+To keep `draft.js` testable it is exported as a factory, `createDraftAutoSaver({form, field, revision, status, formatting, fetchImpl, delayMs, setTimeoutImpl, clearTimeoutImpl})`, with `setupDraftForms()` as the DOM adapter. Public behavior is unchanged: this is a mechanical split + htmx integration, not a rewrite.
+
+**Implemented (landed, `559e0f5`):** `frontend/package.json` now has `build` (= `build:editor` + `build:app`), `build:app` (`esbuild src/app.js --bundle --minify --legal-comments=external --target=es2019`), and `test` (`vitest run`); `frontend/vitest.config.js` runs jsdom over `test/**/*.test.js`; `frontend/test/draft.test.js` has 7 tests (governing debounce+PUT payload, 409 conflict, submit blocked before init/while conflicted, clean submit, `beforeunload` dirty/saving/sending, discard). `internal/web/static/app.js` is now a committed 21 KB minified bundle; `.github/workflows/tests.yml` gained a `frontend` job that runs `npm ci`, `npm test`, `npm run build`, and fails if the committed bundle is stale. `e2e/split_detail_e2e_test.go` asserts stable DOM markers (`data-inert-pane`, `"change"`) instead of now-mangled function names.
 
 **Acceptance:** `npm run build` produces `app.js` + `editor.js`; `npm test` passes; no behavior change observed manually across inbox, split view, detail, settings.
 
@@ -107,7 +109,9 @@ Stretch: one Playwright smoke in `e2e/` (the dev-oidc harness exists) asserting 
 ### WS-D — Truth in documentation
 
 **D1.** Update `docs/architecture.md`: browser UI = "SSR + htmx 2.x + progressive-enhancement ES modules"; refresh contract; list of what remains custom JS.
-**D2.** Update `docs/security.md` if any CSP/`hx-` interaction needs mention (none expected; verify `script-src 'self'` suffices).
+**D2.** Update `docs/security.md` if any CSP/`hx-` interaction needs mention. **Implemented:** a "htmx and `script-src 'self'`" paragraph documenting that trigger filters are `new Function`-based and therefore unused, `allowEval` stays `false`, gating happens in `htmx:beforeRequest`, and fragments inherit the document CSP.
+**D1–D3 implemented (landed):** `docs/architecture.md` §5 "Frontend Rendering and Hypermedia" documents the template embed, the two htmx behaviours (region poll + filter selects), the CSP constraint, the ES-module map, and the ProseMirror exception; the stack table gained a Frontend row and the package tree gained `static/`, `views/templates/`, and `frontend/`.
+
 **D3.** Delete stale references: `data-hx-get` shim notes in `docs/ux-review.md` stay (historical record) but `architecture.md` must no longer claim HTMX while not shipping it.
 
 ---
