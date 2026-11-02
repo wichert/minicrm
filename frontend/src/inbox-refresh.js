@@ -155,10 +155,28 @@ export function setupInboxAutoRefresh() {
     // gate lives here. preventDefault() on the event cancels the request, which
     // is exactly the semantics a trigger filter would have had.
     document.body.addEventListener("htmx:beforeRequest", (event) => {
-      const elt = event.detail && event.detail.elt;
+      const detail = event.detail;
+      const elt = detail && detail.elt;
       const region = resultsContainer();
-      if (!region || !elt || !(elt === region || region.contains(elt))) {
+      if (!region || !elt) {
         return;
+      }
+      const target = detail.target;
+      const targetSelector = elt.getAttribute("hx-target");
+      if (
+        target !== region &&
+        targetSelector !== "#split-inbox-results-region" &&
+        !(elt === region || region.contains(elt))
+      ) {
+        return;
+      }
+      // Choosing a tab in the More popover intentionally swaps the list; close
+      // that menu first so the general open-menu pause does not cancel it.
+      if (elt.matches(".tab-more-item")) {
+        const menu = elt.closest("details[data-row-menu]");
+        if (menu) {
+          menu.open = false;
+        }
       }
       if (isPaused()) {
         event.preventDefault();
@@ -184,6 +202,11 @@ export function setupInboxAutoRefresh() {
     refreshLink.addEventListener("click", (event) => {
       if (!window.htmx) {
         return; // no hypermedia layer: let the anchor navigate
+      }
+      // Pane links issue their own hx-get so htmx can show its request
+      // indicator. The target's beforeRequest gate below still honors pauses.
+      if (refreshLink.hasAttribute("hx-get")) {
+        return;
       }
       event.preventDefault();
       trigger();

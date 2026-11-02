@@ -988,6 +988,79 @@ func TestSplitPaneFilterFormsTargetThreadPath(t *testing.T) {
 	}
 }
 
+// Pane-only refresh and tab links use the list fragment endpoint while the
+// full inbox keeps ordinary navigation fallbacks. A tab-switch response must
+// replace the split tab strip out of band with the newly active status.
+func TestSplitPaneRefreshAndTabsTargetPaneFragment(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Targeting thread",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "target@example.com",
+		LastMessageAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+	}
+
+	detailPath := "/threads/" + threadID.String() + "?status=new&assignee=me&account=support&q=needle"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, detailPath, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET split detail status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatal("pane/detail markers not in expected order")
+	}
+	pane := body[paneIdx:detailIdx]
+	for _, want := range []string{
+		`href="/threads/` + threadID.String() + `?status=new&amp;assignee=me&amp;account=support&amp;q=needle" data-refresh-link hx-get="/threads/` + threadID.String() + `/list?status=new&amp;assignee=me&amp;account=support&amp;q=needle"`,
+		`hx-target="#split-inbox-results-region" hx-swap="outerHTML" hx-push-url="false"`,
+		`hx-get="/threads/` + threadID.String() + `/list?account=support&amp;assignee=me&amp;q=needle&amp;sort=newest&amp;status=attention"`,
+		`hx-target="#split-inbox-results-region" hx-swap="outerHTML" hx-push-url="false"`,
+	} {
+		if !strings.Contains(pane, want) {
+			t.Errorf("pane markup missing %q", want)
+		}
+	}
+	if strings.Contains(pane, `hx-swap-oob`) {
+		t.Error("the initial pane tab strip must not be marked out of band")
+	}
+	if !strings.Contains(pane, `href="/threads?status=in_progress&amp;assignee=me&amp;account=support&amp;q=needle"`) ||
+		!strings.Contains(pane, `hx-get="/threads/`+threadID.String()+`/list?account=support&amp;assignee=me&amp;q=needle&amp;sort=newest&amp;status=in_progress"`) {
+		t.Error("More popover items must keep no-JS hrefs and target the pane fragment")
+	}
+
+	full := httptest.NewRecorder()
+	router.ServeHTTP(full, httptest.NewRequest(http.MethodGet, "/threads?status=new", nil))
+	if full.Code != http.StatusOK {
+		t.Fatalf("GET full inbox status = %d, want 200", full.Code)
+	}
+	fullBody := full.Body.String()
+	if strings.Contains(fullBody, `data-refresh-link hx-get=`) {
+		t.Error("full inbox refresh link must not carry pane htmx targeting")
+	}
+	if strings.Contains(fullBody, `href="/threads?status=new&amp;assignee=&amp;account=&amp;q=" hx-get=`) {
+		t.Error("full inbox tab links must remain ordinary navigation links")
+	}
+
+	fragmentReq := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"/list?status=completed&assignee=me&account=support&q=needle", nil)
+	fragmentReq.Header.Set("HX-Request", "true")
+	fragment := httptest.NewRecorder()
+	router.ServeHTTP(fragment, fragmentReq)
+	if fragment.Code != http.StatusOK {
+		t.Fatalf("GET pane fragment status = %d, want 200", fragment.Code)
+	}
+	fragmentBody := fragment.Body.String()
+	if !strings.Contains(fragmentBody, `id="split-inbox-tabs" aria-label="Thread status" hx-swap-oob="true"`) {
+		t.Fatal("pane fragment must include the split tab strip as an OOB update")
+	}
+	completedTab := strings.Index(fragmentBody, `href="/threads?status=completed`)
+	if completedTab < 0 || !strings.Contains(fragmentBody[completedTab:], `aria-current="true"`) {
+		t.Error("pane fragment must mark the newly selected Completed tab active")
+	}
+}
+
 // Deep-link fallback: a detail URL without any filter query (bookmark, Back
 // reload, legacy ?thread= link) must populate the pane from the session's
 // last-visited inbox queue instead of the bare default open inbox.

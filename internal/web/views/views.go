@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"io"
 	"mime"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -775,6 +776,7 @@ var templateFuncs = template.FuncMap{
 	"paneAgeLabel":         PaneAgeLabel,
 	"threadDetailURL":      ThreadDetailURL,
 	"inboxFilterForm":      inboxFilterFormArgs,
+	"inboxTabURL":          inboxTabURL,
 }
 
 // ThreadDetailURL builds a thread detail link from a base inbox URL (whose query
@@ -800,7 +802,19 @@ func ThreadDetailURL(base string, threadID fmt.Stringer) string {
 	return link + "?" + query
 }
 
-// inboxFilterFormData parameterizes the shared inbox filter form partial: the
+// inboxTabURL builds the split pane's fragment URL for a status tab while
+// preserving the current non-status filters and resetting pagination.
+func inboxTabURL(base, status, assignee, account, search, sort string) string {
+	query := url.Values{}
+	query.Set("status", status)
+	query.Set("assignee", assignee)
+	query.Set("account", account)
+	query.Set("q", search)
+	query.Set("sort", sort)
+	return base + "?" + query.Encode()
+}
+
+// inboxFilterFormData parameterizes the shared inbox filter partial: the
 // three placements (full inbox, split top bar, split pane) render the same
 // controls but target different URLs. Data holds the list's filter values and
 // visibility flags; ClearSearchURL is the placement-specific "clear search"

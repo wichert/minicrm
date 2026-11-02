@@ -113,7 +113,7 @@ func TestSplitPaneFragmentEndpoint(t *testing.T) {
 	frag := rec.Body.String()
 	for _, want := range []string{
 		`id="split-inbox-results-region"`,
-		`hx-get="/threads/` + openID.String() + `?status=new"`,
+		`hx-get="/threads/` + openID.String() + `/list?status=new"`,
 		`id="split-inbox-results-count" hx-swap-oob="true"`,
 		`id="split-inbox-tabs" aria-label="Thread status" hx-swap-oob="true"`,
 		"Pane sibling",
@@ -183,7 +183,7 @@ func TestSplitPanePollsItsOwnEndpoint(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"?status=new", nil))
 	body := rec.Body.String()
-	if !strings.Contains(body, `hx-get="/threads/`+threadID.String()+`?status=new"`) {
+	if !strings.Contains(body, `hx-get="/threads/`+threadID.String()+`/list?status=new"`) {
 		t.Errorf("pane region must poll the pane endpoint: %s", body)
 	}
 	if !strings.Contains(body, `hx-get="/threads/`+threadID.String()+`/list"`) {
