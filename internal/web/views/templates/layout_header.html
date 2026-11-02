@@ -22,9 +22,9 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header>
     <nav class="navbar" aria-label="Main">
-      <a class="navbar-brand" href="/threads"><svg class="brand-mark" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" fill="#6366f1"/><path d="M7 11.5h18v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="m7.5 12 8.5 6.5L24.5 12" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>{{if .AppShortName}}{{.AppShortName}}{{else if .AppName}}{{.AppName}}{{else}}MiniCRM{{end}}</span></a>
+      <a class="navbar-brand" href="{{if .ThreadsURL}}{{.ThreadsURL}}{{else}}/threads{{end}}"><svg class="brand-mark" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" fill="#6366f1"/><path d="M7 11.5h18v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="m7.5 12 8.5 6.5L24.5 12" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>{{if .AppShortName}}{{.AppShortName}}{{else if .AppName}}{{.AppName}}{{else}}MiniCRM{{end}}</span></a>
       <ul class="nav-links">
-        <li><a href="/threads"{{if eq .ActiveNav "threads"}} aria-current="page"{{end}}>Threads</a></li>
+        <li><a href="{{if .ThreadsURL}}{{.ThreadsURL}}{{else}}/threads{{end}}"{{if eq .ActiveNav "threads"}} aria-current="page"{{end}}>Threads</a></li>
         {{if eq .CurrentUser.Role "admin"}}<li><a href="/settings"{{if eq .ActiveNav "settings"}} aria-current="page"{{end}}>Settings</a></li>{{end}}
       </ul>
       <div class="navbar-user">

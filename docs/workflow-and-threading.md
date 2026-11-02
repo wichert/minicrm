@@ -14,6 +14,10 @@ An operator may mark a new conversation complete in one action. `CompleteFromNew
 
 Thread details list other conversations matching the same customer email address, across only the mail accounts accessible to the operator. This is an email-address match, not a resolved customer identity: aliases and changed addresses are not linked. History links open separately to avoid replacing the current composer. The panel shows up to 100 most recent matches; use inbox search for additional results.
 
+## Inbox filter persistence
+
+The split-view inbox keeps the most recently visited filtered queue in the user's session. Changing filters in the thread pane updates that queue, and the detail page's Back to threads and Threads navigation links return to it. A bare thread deep link does not replace the saved queue; the plain `/threads` inbox remains the canonical unfiltered URL. Only allowlisted inbox filters are retained, and filter changes stay on the thread page without redirects.
+
 ## 1. Reply Linking & Threading (`internal/threading/`)
 
 Every email belongs to a `threads` record. When an incoming email is ingested, `threading.Matcher.ResolveThread` determines whether it belongs to an existing conversation or starts a new thread.

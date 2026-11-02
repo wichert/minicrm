@@ -2523,6 +2523,7 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 		`<meta name="theme-color" content="#14142b">`,
 		`<h1 class="sr-only">Threads</h1>`,
 		`href="/threads?status=new&amp;assignee=me" data-refresh-link`,
+		`href="/threads" aria-current="page">Threads</a>`,
 		`data-refresh-status`,
 	} {
 		if !strings.Contains(inboxHTML, want) {
@@ -2543,8 +2544,13 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 		t.Fatalf("GET /threads/{id} status = %d", rec.Code)
 	}
 	detailHTML := rec.Body.String()
-	if !strings.Contains(detailHTML, `href="/threads?status=new&amp;assignee=me"`) {
-		t.Fatalf("expected Back to threads link to preserve filter query params, got: %s", detailHTML)
+	for _, want := range []string{
+		`class="back-link" href="/threads?status=new&amp;assignee=me"`,
+		`href="/threads?status=new&amp;assignee=me" aria-current="page">Threads</a>`,
+	} {
+		if !strings.Contains(detailHTML, want) {
+			t.Fatalf("expected detail navigation to preserve filter query %q, got: %s", want, detailHTML)
+		}
 	}
 	if !strings.Contains(detailHTML, `href="/threads/`+threadID.String()+`">Refresh</a>`) {
 		t.Fatalf("expected Refresh button on thread detail page")
