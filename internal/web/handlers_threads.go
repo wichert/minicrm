@@ -840,9 +840,20 @@ func (s *Server) loadSplitPaneList(ctx context.Context, user sqlc.User, r *http.
 	list.ClearSearchURL = threadPathWithoutSearch(paneBase, thread.ID)
 	// The pane's htmx endpoint is its own route, addressed by thread path with the
 	// queue's filters: a poll swaps the pane region without re-rendering the whole
-	// conversation, and a filter change re-runs the same query server-side.
-	list.PartialURL = list.RefreshURL
+	// conversation, and a filter change re-runs the same query server-side. The
+	// fragment URL uses this request's filters (or the saved queue for deep links)
+	// so refreshes preserve the visible pane state.
 	list.FilterURL = "/threads/" + thread.ID.String() + "/list"
+	list.PartialURL = list.FilterURL
+	paneQuery := r.URL.RawQuery
+	if paneQuery == "" {
+		if queryStart := strings.IndexByte(paneBase, '?'); queryStart >= 0 {
+			paneQuery = paneBase[queryStart+1:]
+		}
+	}
+	if query := inboxFilterQuery(paneQuery); query != "" {
+		list.PartialURL += "?" + query
+	}
 	// "Load older" pages the pane in place instead of jumping to the plain inbox:
 	// same cursor query, addressed by the thread path. No-JS keeps working because
 	// it is an ordinary link.

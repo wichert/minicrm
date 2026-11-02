@@ -20,7 +20,7 @@
     </div>
     <div class="results-status">
       {{template "inbox_results_count" .List}}
-      <a class="refresh-meta" href="{{.List.RefreshURL}}" data-refresh-link title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
+      <a class="refresh-meta" href="{{.List.RefreshURL}}" data-refresh-link hx-get="{{.List.PartialURL}}" hx-target="#split-inbox-results-region" hx-swap="outerHTML" hx-push-url="false" title="Refresh the list"><span data-refresh-status aria-live="polite">Refresh</span></a>
     </div>
   </div>
   <div class="filter-sticky">
