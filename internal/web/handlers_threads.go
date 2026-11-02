@@ -644,25 +644,25 @@ func (s *Server) loadInboxList(ctx context.Context, user sqlc.User, r *http.Requ
 		if th.AssigneeID != nil {
 			assigneeName = userNames[*th.AssigneeID]
 		}
-		waitSince := th.OpenedAt
+		waitSince := th.WaitSince
 		if waitSince.IsZero() {
 			waitSince = th.LastMessageAt
 		}
 		waitLabel, waitUrgency := views.ThreadAgeBadge(th.Status, waitSince, now, displayTZ)
 		items = append(items, views.ThreadSummaryItem{
-			Thread:          th,
-			AssigneeName:    assigneeName,
-			AccountName:     s.accountName(th.AccountID),
-			FormattedTime:   views.FormatTimestamp(th.LastMessageAt, displayTZ),
-			FullTime:        views.FormatTimestampFull(th.LastMessageAt, displayTZ),
-			OpenedFullTime:  views.FormatTimestampFull(waitSince, displayTZ),
-			RelativeTime:    views.FormatRelativeTime(th.LastMessageAt, now),
-			WaitLabel:       waitLabel,
-			WaitUrgency:     waitUrgency,
-			LatestSnippet:   views.ExtractEmailSnippet(th.LatestBodyText, th.LatestBodyHTML, 130),
-			LatestDirection: th.LatestDirection,
-			MessageCount:    th.MessageCount,
-			CanAssignToMe:   (th.Status == sqlc.ThreadStatusNew || th.Status == sqlc.ThreadStatusInProgress) && th.AssigneeID == nil,
+			Thread:            th,
+			AssigneeName:      assigneeName,
+			AccountName:       s.accountName(th.AccountID),
+			FormattedTime:     views.FormatTimestamp(th.LastMessageAt, displayTZ),
+			FullTime:          views.FormatTimestampFull(th.LastMessageAt, displayTZ),
+			WaitSinceFullTime: views.FormatTimestampFull(waitSince, displayTZ),
+			RelativeTime:      views.FormatRelativeTime(th.LastMessageAt, now),
+			WaitLabel:         waitLabel,
+			WaitUrgency:       waitUrgency,
+			LatestSnippet:     views.ExtractEmailSnippet(th.LatestBodyText, th.LatestBodyHTML, 130),
+			LatestDirection:   th.LatestDirection,
+			MessageCount:      th.MessageCount,
+			CanAssignToMe:     (th.Status == sqlc.ThreadStatusNew || th.Status == sqlc.ThreadStatusInProgress) && th.AssigneeID == nil,
 		})
 	}
 
@@ -1015,9 +1015,9 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		}
 	}
 
-	// GetThreadByID now returns OpenedAt (earliest email sent_at); the emails[0] fallback
-	// only covers legacy callers that select threads without opened_at.
-	waitSince := thread.OpenedAt
+	// GetThreadByID returns the current waiting start; the emails[0] fallback
+	// only covers legacy callers that select threads without wait_since.
+	waitSince := thread.WaitSince
 	if waitSince.IsZero() && len(emails) > 0 && !emails[0].SentAt.IsZero() {
 		waitSince = emails[0].SentAt
 	}

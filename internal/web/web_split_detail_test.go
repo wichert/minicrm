@@ -116,9 +116,9 @@ func TestSplitPaneRowsRenderTwoLinePaneRowMarkup(t *testing.T) {
 		t.Error("pane rows must keep the age badge with the pane-age compact class")
 	}
 	ageIdx := strings.Index(row, `pane-age`)
-	titleIdx := strings.Index(row, `title="Opened `)
+	titleIdx := strings.Index(row, `title="Waiting since `)
 	if ageIdx < 0 || titleIdx < 0 || titleIdx < ageIdx {
-		t.Error("the compact age must keep the full opened timestamp in its title")
+		t.Error("the compact age must keep the full waiting-since timestamp in its title")
 	}
 	// The pane drops assignee, account and the separate meta line.
 	if strings.Contains(row, `thread-meta`) || strings.Contains(row, `Unassigned`) {

@@ -10,6 +10,10 @@ Bulk spam validates each selected thread and reports individual failures while p
 
 An operator may mark a new conversation complete in one action. `CompleteFromNew` locks the thread and atomically applies the existing `new → in_progress → completed` transitions, records both events and queues the Archive moves. A failed write rolls back the whole operation; this does not add a direct state-machine transition.
 
+## Waiting time
+
+Inbox waiting badges and the Needs attention queue measure when the customer last began waiting for an agent, rather than when the thread was opened. If the newest email is outbound, waiting starts at that outbound reply. If the newest email is inbound, waiting starts at the first message in the uninterrupted trailing run of inbound emails. For example, `A1 C1 C2 C3` waits from `C1`, while `C1 C2 A1 A2 C3` waits from `C3`; a single inbound or outbound message starts at its own timestamp. Equal timestamps are ordered by email ID to determine which message is newest. The `opened_at` timestamp remains the original thread-open time; waiting-time labels use the display timezone for day boundaries.
+
 ## Customer history
 
 Thread details list other conversations matching the same customer email address, across only the mail accounts accessible to the operator. This is an email-address match, not a resolved customer identity: aliases and changed addresses are not linked. History links open separately to avoid replacing the current composer. The panel shows up to 100 most recent matches; use inbox search for additional results.

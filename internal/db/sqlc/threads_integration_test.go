@@ -13,11 +13,8 @@ import (
 	"github.com/wichert/minicrm/internal/db/sqlc"
 )
 
-// TestGetThreadByIDScansOpenedAt guards the threadColumns/scanThreadWithOpenedAt
-// contract: GetThreadByID projects one extra column (opened_at) on top of the shared
-// threadColumns list, so the row scanner must expect exactly that arity. A mismatch
-// only surfaces against real PostgreSQL, not in unit tests with fakes.
-func TestGetThreadByIDScansOpenedAt(t *testing.T) {
+// TestGetThreadByIDScansTimes guards the detail query's opened_at and wait_since projections.
+func TestGetThreadByIDScansTimes(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set TEST_DATABASE_URL to a disposable PostgreSQL database")
@@ -74,6 +71,9 @@ func TestGetThreadByIDScansOpenedAt(t *testing.T) {
 	if !got.OpenedAt.Equal(created.LastMessageAt) {
 		t.Fatalf("opened_at fallback = %v, want %v", got.OpenedAt, created.LastMessageAt)
 	}
+	if !got.WaitSince.Equal(created.LastMessageAt) {
+		t.Fatalf("wait_since fallback = %v, want %v", got.WaitSince, created.LastMessageAt)
+	}
 
 	opened := time.Now().UTC().Add(-72 * time.Hour).Truncate(time.Microsecond)
 	emailID := uuid.New()
@@ -88,9 +88,124 @@ func TestGetThreadByIDScansOpenedAt(t *testing.T) {
 	if !got.OpenedAt.Equal(opened) {
 		t.Fatalf("opened_at = %v, want %v", got.OpenedAt, opened)
 	}
-	// The shared columns must still round-trip correctly alongside the extra one.
-	if got.ID != created.ID || got.AccountID != "support" || got.Status != sqlc.ThreadStatusNew {
-		t.Fatalf("unexpected thread after scan: %+v", got)
+	if !got.WaitSince.Equal(opened) {
+		t.Fatalf("inbound-only wait_since = %v, want %v", got.WaitSince, opened)
+	}
+	// Add an outbound response and a trailing inbound run; waiting starts at that run.
+	outboundAt := opened.Add(24 * time.Hour)
+	inbound1 := outboundAt.Add(24 * time.Hour)
+	inbound2 := inbound1.Add(time.Hour)
+	for i, item := range []struct {
+		direction string
+		at        time.Time
+	}{{"outbound", outboundAt}, {"inbound", inbound1}, {"inbound", inbound2}} {
+		id := uuid.New()
+		if _, err := pool.Exec(ctx, `INSERT INTO emails (id,thread_id,account_id,direction,message_id,imap_mailbox,imap_uidvalidity,imap_uid,from_address,subject,subject_normalized,sent_at) VALUES ($1,$2,'support',$3,$4,'INBOX',1,$5,'customer@example.com','Opened at','opened-at',$6)`, id, created.ID, item.direction, id.String(), 8+i, item.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err = q.GetThreadByID(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.WaitSince.Equal(inbound1) {
+		t.Fatalf("trailing inbound run wait_since = %v, want %v", got.WaitSince, inbound1)
+	}
+	list, err := q.ListThreads(ctx, sqlc.ListThreadsFilter{AllowedAccounts: []string{"support"}, Limit: 10})
+	if err != nil || len(list) != 1 || !list[0].WaitSince.Equal(inbound1) {
+		t.Fatalf("ListThreads wait_since = %+v, err %v; want %v", list, err, inbound1)
+	}
+
+	// Verify each direction sequence against the waiting-since rule in both
+	// query paths. The shared tuple ordering resolves tied sent_at values by
+	// received_at, then ID, exactly as the latest-message projection does.
+	sequenceCases := []struct {
+		name       string
+		directions []string
+		wantIndex  int
+	}{
+		{"outbound then inbound run", []string{"outbound", "inbound", "inbound", "inbound"}, 1},
+		{"inbound run then outbound run then inbound", []string{"inbound", "inbound", "outbound", "outbound", "inbound"}, 4},
+		{"single inbound", []string{"inbound"}, 0},
+		{"single outbound", []string{"outbound"}, 0},
+		{"inbound outbound inbound", []string{"inbound", "outbound", "inbound"}, 2},
+	}
+	for caseIndex, tc := range sequenceCases {
+		thread, err := q.CreateThread(ctx, sqlc.Thread{AccountID: "support", SubjectNormalized: tc.name, SubjectDisplay: tc.name, Status: sqlc.ThreadStatusNew, CustomerEmail: "sequence@example.com"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := time.Now().UTC().Add(-time.Duration(len(sequenceCases)-caseIndex) * 24 * time.Hour).Truncate(time.Microsecond)
+		want := base.Add(time.Duration(tc.wantIndex) * time.Hour)
+		for i, direction := range tc.directions {
+			id := uuid.New()
+			at := base.Add(time.Duration(i) * time.Hour)
+			if _, err := pool.Exec(ctx, `INSERT INTO emails (id,thread_id,account_id,direction,message_id,imap_mailbox,imap_uidvalidity,imap_uid,from_address,subject,subject_normalized,sent_at) VALUES ($1,$2,'support',$3,$4,'INBOX',1,$5,'sequence@example.com',$6,$6,$7)`, id, thread.ID, direction, id.String(), 100+i, tc.name, at); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := q.GetThreadByID(ctx, thread.ID)
+		if err != nil || !got.WaitSince.Equal(want) {
+			t.Fatalf("%s GetThreadByID wait_since = %v (err %v), want %v", tc.name, got.WaitSince, err, want)
+		}
+		if got.ID != thread.ID || got.AccountID != "support" || got.Status != sqlc.ThreadStatusNew {
+			t.Fatalf("unexpected thread after %s scan: %+v", tc.name, got)
+		}
+		listed, err := q.ListThreads(ctx, sqlc.ListThreadsFilter{AllowedAccounts: []string{"support"}, Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, item := range listed {
+			if item.ID == thread.ID {
+				found = true
+				if !item.WaitSince.Equal(want) {
+					t.Fatalf("%s ListThreads wait_since = %v, want %v", tc.name, item.WaitSince, want)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s missing from ListThreads", tc.name)
+		}
+	}
+
+	// Equal sent_at values use received_at before the stable ID tie-breaker.
+	tied, err := q.CreateThread(ctx, sqlc.Thread{AccountID: "support", SubjectNormalized: "tied timestamps", SubjectDisplay: "Tied timestamps", Status: sqlc.ThreadStatusNew, CustomerEmail: "sequence@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tieAt := time.Now().UTC().Add(-100 * time.Hour).Truncate(time.Microsecond)
+	olderReceived := uuid.New()
+	newerReceived := uuid.New()
+	for _, e := range []struct {
+		id        uuid.UUID
+		direction string
+		received  time.Time
+		uid       int
+	}{{olderReceived, "inbound", tieAt, 500}, {newerReceived, "outbound", tieAt.Add(time.Minute), 501}} {
+		if _, err := pool.Exec(ctx, `INSERT INTO emails (id,thread_id,account_id,direction,message_id,imap_mailbox,imap_uidvalidity,imap_uid,from_address,subject,subject_normalized,sent_at,received_at) VALUES ($1,$2,'support',$3,$4,'INBOX',1,$5,'sequence@example.com','tied','tied',$6,$7)`, e.id, tied.ID, e.direction, e.id.String(), e.uid, tieAt, e.received); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tiedGot, err := q.GetThreadByID(ctx, tied.ID)
+	if err != nil || !tiedGot.WaitSince.Equal(tieAt) {
+		t.Fatalf("tied timestamps GetThreadByID wait_since = %v (err %v), want outbound timestamp %v", tiedGot.WaitSince, err, tieAt)
+	}
+
+	// The tab count and filtered list share the waiting-time cutoff semantics.
+	cutoff := time.Now().UTC().Add(-72 * time.Hour)
+	attentionList, err := q.ListThreads(ctx, sqlc.ListThreadsFilter{
+		AllowedAccounts: []string{"support"}, NeedsAttention: true, AttentionCutoff: cutoff, Limit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts, err := q.CountThreadsByTab(ctx, sqlc.CountThreadsFilter{AllowedAccounts: []string{"support"}, AttentionCutoff: cutoff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.NeedsAttention != len(attentionList) {
+		t.Fatalf("NeedsAttention count = %d, filtered list has %d threads", counts.NeedsAttention, len(attentionList))
 	}
 
 	// LockThreadByID still projects the plain threadColumns list and must keep working.
