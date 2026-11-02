@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.0](https://github.com/wichert/minicrm/compare/v1.2.1...v1.3.0) (2026-11-02)
+
+
+### Features
+
+* **inbox:** persist filter state across split view ([#44](https://github.com/wichert/minicrm/issues/44)) ([77669f3](https://github.com/wichert/minicrm/commit/77669f31cb353a068392fc0b563279cd6d23ee25)), closes [#43](https://github.com/wichert/minicrm/issues/43)
+* **web:** calculate customer waiting time ([#47](https://github.com/wichert/minicrm/issues/47)) ([6ebcce5](https://github.com/wichert/minicrm/commit/6ebcce57696a7f4638d71a50fcab6289a041fb51)), closes [#40](https://github.com/wichert/minicrm/issues/40)
+
+
+### Bug Fixes
+
+* **split:** correct pane refresh and tab targeting ([#45](https://github.com/wichert/minicrm/issues/45)) ([de9bc6e](https://github.com/wichert/minicrm/commit/de9bc6ea8b69038a594a7eba803eace5a1af6644)), closes [#41](https://github.com/wichert/minicrm/issues/41)
+* **ui:** pull-to-refresh content-only and navbar name ([#46](https://github.com/wichert/minicrm/issues/46)) ([2228f53](https://github.com/wichert/minicrm/commit/2228f53874307948ca5fc87bbf7d3dfee7d5b0cf)), closes [#42](https://github.com/wichert/minicrm/issues/42)
+
 ## [1.2.1](https://github.com/wichert/minicrm/compare/v1.2.0...v1.2.1) (2026-10-29)
 
 
