@@ -265,6 +265,11 @@ func (s *Server) appBranding() AppBranding {
 // resolveInboxBackURL returns the most recent /threads filter URL from Referer or session,
 // falling back to "/threads".
 func (s *Server) resolveInboxBackURL(r *http.Request) string {
+	if inboxFilterQuery(r.URL.RawQuery) != "" {
+		if current := sanitizeInboxBackURL(r.URL.RequestURI(), r.Host); current != "" && current != "/threads" {
+			return current
+		}
+	}
 	if ref := sanitizeInboxBackURL(r.Header.Get("Referer"), r.Host); ref != "" {
 		return ref
 	}
@@ -274,6 +279,17 @@ func (s *Server) resolveInboxBackURL(r *http.Request) string {
 		}
 	}
 	return "/threads"
+}
+
+// rememberInboxQueue stores a filtered queue URL from a thread detail or pane
+// request. Bare deep links must not replace the user's last useful inbox queue.
+func (s *Server) rememberInboxQueue(r *http.Request) {
+	if s.sessions == nil || inboxFilterQuery(r.URL.RawQuery) == "" {
+		return
+	}
+	if currentInbox := sanitizeInboxBackURL(r.URL.RequestURI(), r.Host); currentInbox != "" && currentInbox != "/threads" {
+		s.sessions.Put(r.Context(), lastInboxURLSessionKey, currentInbox)
+	}
 }
 
 func sanitizeInboxBackURL(raw, requestHost string) string {
@@ -910,6 +926,7 @@ func (s *Server) HandleThreadList(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	s.rememberInboxQueue(r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := views.RenderInboxResults(w, *listData); err != nil {
 		slog.ErrorContext(ctx, "render_split_pane_failed", slog.String("error", err.Error()))
@@ -933,6 +950,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 	// this inbox URL's query, so opening a thread from a filtered queue re-renders
 	// the pane with the same filters.
 	listData := s.loadSplitPaneList(ctx, user, r, thread)
+	s.rememberInboxQueue(r)
 	var reopensThread *sqlc.Thread
 	reopenCompletedAt := ""
 	reopenCompletedBy := ""
@@ -1067,6 +1085,7 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		}
 	}
 	b := s.appBranding()
+	backURL := s.resolveInboxBackURL(r)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if status != http.StatusOK {
@@ -1079,8 +1098,9 @@ func (s *Server) renderThreadDetail(w http.ResponseWriter, r *http.Request, user
 		AppShortName:       b.ShortName,
 		Flash:              s.popFlash(r),
 		ActiveNav:          "threads",
+		ThreadsURL:         backURL,
 		CurrentUser:        user,
-		BackURL:            s.resolveInboxBackURL(r),
+		BackURL:            backURL,
 		Thread:             thread,
 		AssigneeName:       assigneeName,
 		WaitLabel:          waitLabel,

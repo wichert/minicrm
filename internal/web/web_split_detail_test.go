@@ -1114,6 +1114,15 @@ func TestDetailDeepLinkUsesSessionInboxFilters(t *testing.T) {
 	if strings.Contains(pane, `<a class="thread-link" href="/threads/`+newID.String()) {
 		t.Errorf("deep-linked pane must not fall back to the default open queue: %s", pane)
 	}
+	for _, want := range []string{
+		`class="back-link" href="/threads?status=completed&amp;sort=longest_waiting"`,
+		`class="nav-links"`,
+		`href="/threads?status=completed&amp;sort=longest_waiting" aria-current="page">Threads</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("deep-linked page must preserve saved queue in back/breadcrumb links; missing %s", want)
+		}
+	}
 	// The carried filters show in the pane's controls and hidden status field.
 	for _, want := range []string{
 		`name="status" value="completed"`,
@@ -1130,6 +1139,68 @@ func TestDetailDeepLinkUsesSessionInboxFilters(t *testing.T) {
 	// The refresh link stays on the split view with the restored queue.
 	if !strings.Contains(pane, `href="/threads/`+newID.String()+`?status=completed&amp;sort=longest_waiting"`) {
 		t.Error("deep-linked pane refresh link must carry the restored filters")
+	}
+}
+
+// A pane filter change updates the saved queue; a subsequent bare detail link
+// must use that queue for both the pane and its navigation links.
+func TestSplitPaneFilterChangePersistsQueueWithoutBareLinkOverwrite(t *testing.T) {
+	_, store, router, _, _ := buildAccountTestServer(t)
+	threadID := uuid.New()
+	completedID := uuid.New()
+	store.threads[threadID] = sqlc.Thread{
+		ID: threadID, AccountID: "support", SubjectDisplay: "Open anchor",
+		Status: sqlc.ThreadStatusNew, CustomerEmail: "open@example.com",
+		LastMessageAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+	}
+	store.threads[completedID] = sqlc.Thread{
+		ID: completedID, AccountID: "support", SubjectDisplay: "Completed queue item",
+		Status: sqlc.ThreadStatusCompleted, CustomerEmail: "done@example.com",
+		LastMessageAt: time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC),
+	}
+
+	// Start from the ordinary inbox; the split-pane filter request is what should
+	// replace the saved queue.
+	inbox := httptest.NewRecorder()
+	router.ServeHTTP(inbox, httptest.NewRequest(http.MethodGet, "/threads", nil))
+	paneReq := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String()+"/list?status=completed&sort=longest_waiting", nil)
+	paneReq.Header.Set("HX-Request", "true")
+	for _, cookie := range inbox.Result().Cookies() {
+		paneReq.AddCookie(cookie)
+	}
+	paneRec := httptest.NewRecorder()
+	router.ServeHTTP(paneRec, paneReq)
+	if paneRec.Code != http.StatusOK {
+		t.Fatalf("GET pane filter status = %d, want 200", paneRec.Code)
+	}
+
+	// A bare deep link must not overwrite the newly persisted filter queue.
+	deepReq := httptest.NewRequest(http.MethodGet, "/threads/"+threadID.String(), nil)
+	for _, cookie := range paneRec.Result().Cookies() {
+		deepReq.AddCookie(cookie)
+	}
+	deepRec := httptest.NewRecorder()
+	router.ServeHTTP(deepRec, deepReq)
+	if deepRec.Code != http.StatusOK {
+		t.Fatalf("GET bare detail status = %d, want 200", deepRec.Code)
+	}
+	body := deepRec.Body.String()
+	paneIdx := strings.Index(body, `data-split-list`)
+	detailIdx := strings.Index(body, `data-split-detail`)
+	if paneIdx < 0 || detailIdx < 0 || detailIdx < paneIdx {
+		t.Fatal("bare detail must render the split panes")
+	}
+	pane := body[paneIdx:detailIdx]
+	if !strings.Contains(pane, `href="/threads/`+completedID.String()+`?status=completed&amp;sort=longest_waiting"`) {
+		t.Errorf("bare deep link must retain pane filter changes: %s", pane)
+	}
+	for _, want := range []string{
+		`class="back-link" href="/threads?status=completed&amp;sort=longest_waiting"`,
+		`href="/threads?status=completed&amp;sort=longest_waiting" aria-current="page">Threads</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("bare deep link must use persisted queue in navigation; missing %s", want)
+		}
 	}
 }
 

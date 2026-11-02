@@ -58,6 +58,7 @@ type InboxViewData struct {
 	AppShortName   string
 	Flash          Flash
 	ActiveNav      string
+	ThreadsURL     string
 	CurrentUser    sqlc.User
 	Threads        []ThreadSummaryItem
 	Counts         sqlc.ThreadCounts
@@ -144,6 +145,7 @@ type ThreadDetailViewData struct {
 	AppShortName  string
 	Flash         Flash
 	ActiveNav     string
+	ThreadsURL    string
 	CurrentUser   sqlc.User
 	BackURL       string
 	Thread        sqlc.Thread
@@ -208,6 +210,7 @@ type SettingsViewData struct {
 	AppShortName    string
 	Flash           Flash
 	ActiveNav       string
+	ThreadsURL      string
 	CurrentUser     sqlc.User
 	Settings        sqlc.SystemSettings
 	Users           []sqlc.User
@@ -227,6 +230,7 @@ type ErrorViewData struct {
 	AppShortName string
 	Flash        Flash
 	ActiveNav    string
+	ThreadsURL   string
 	CurrentUser  sqlc.User
 	StatusCode   int
 	Heading      string
@@ -878,6 +882,7 @@ type ActivityViewData struct {
 	AppShortName string
 	Flash        Flash
 	ActiveNav    string
+	ThreadsURL   string
 	CurrentUser  sqlc.User
 	AuditLogs    []AuditEntryView
 	// Page is the 1-based page number being shown.
