@@ -70,8 +70,8 @@ func TestEndToEndOIDCAuthenticationWithDevIDM(t *testing.T) {
 	if len(redirects) < 3 {
 		t.Fatalf("expected at least 3 redirects (/auth/login -> dev-oidc /authorize -> /auth/callback -> /threads), got %v", redirects)
 	}
-	if !strings.Contains(body, "Dev Admin") || !strings.Contains(body, "admin@example.com") {
-		t.Fatalf("expected authenticated user 'Dev Admin (admin@example.com)' in /threads HTML, got:\n%s", body)
+	if !strings.Contains(body, "Dev Admin") || strings.Contains(body, "admin@example.com") {
+		t.Fatalf("expected authenticated user 'Dev Admin' without an email address in /threads HTML, got:\n%s", body)
 	}
 	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
 		t.Fatalf("expected strict Content-Security-Policy header on /threads, got %q", csp)

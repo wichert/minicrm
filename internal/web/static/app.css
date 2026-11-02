@@ -177,11 +177,6 @@ a:hover {
   font-weight: 600;
 }
 
-.navbar-user-email {
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
 .navbar-user form {
   margin: 0;
 }
@@ -1119,10 +1114,6 @@ p.card.empty-state {
 
 .navbar-user-name {
   color: #ffffff;
-}
-
-.navbar-user-email {
-  color: #8f95b8;
 }
 
 .navbar .btn-ghost {
@@ -2119,10 +2110,6 @@ details.message:not([open]) > .message-header {
     width: auto;
     margin-left: auto;
     gap: 0.4rem;
-  }
-
-  .navbar-user-email {
-    display: none;
   }
 
   .navbar-user-name {

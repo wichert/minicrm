@@ -235,18 +235,25 @@ export function setupInboxAutoRefresh() {
    behaviour (which reloads the whole page and loses scroll position). Only
    engages at the very top of the document, ignores gestures that start in a
    paused context, and never fires while a refresh is already in flight. */
+export function pullTransform(pulled) {
+  const distance = Math.min(Math.max(0, pulled) * 0.4, 120);
+  return `translateY(${distance}px)`;
+}
+
 export function setupPullToRefresh(refresh) {
   if (!("ontouchstart" in window) || !resultsContainer()) {
     return;
   }
   // The pull feedback uses its own indicator, not [data-refresh-status]: the
   // results-status line is hidden below 768px, so the gesture would otherwise be
-  // invisible on a phone.
+  // invisible on a phone. Move only the content below the navbar.
   const indicator = document.querySelector("[data-pull-indicator]");
+  const content = document.querySelector("[data-pull-content]");
   let startY = null;
   let pulled = 0;
   const threshold = 70;
   let hideTimer = null;
+  let resetTimer = null;
 
   function showPull(label) {
     if (!indicator) {
@@ -262,10 +269,42 @@ export function setupPullToRefresh(refresh) {
     indicator.textContent = label;
   }
 
+  function resetContent(animate = true) {
+    if (!content) {
+      return;
+    }
+    clearTimeout(resetTimer);
+    content.style.transition = animate ? "transform 180ms ease-out" : "none";
+    content.style.transform = "translateY(0)";
+    if (!animate) {
+      content.style.removeProperty("transition");
+      content.style.removeProperty("transform");
+      return;
+    }
+    resetTimer = setTimeout(() => {
+      content.style.removeProperty("transition");
+      content.style.removeProperty("transform");
+      resetTimer = null;
+    }, 200);
+  }
+
+  function pausedContext() {
+    return Boolean(document.querySelector("dialog[open], details[data-row-menu][open]"));
+  }
+
+  if (window.htmx) {
+    // Keep the content wrapper clean when htmx replaces the results region.
+    document.body.addEventListener("htmx:afterSwap", (event) => {
+      if (event.detail && event.detail.target && event.detail.target.matches("[data-inbox-results]")) {
+        resetContent(false);
+      }
+    });
+  }
+
   document.addEventListener(
     "touchstart",
     (event) => {
-      if (window.scrollY > 0 || event.touches.length !== 1 || event.target.closest("dialog, details[data-row-menu]")) {
+      if (window.scrollY > 0 || event.touches.length !== 1 || pausedContext() || event.target.closest("dialog, details[data-row-menu]")) {
         startY = null;
         return;
       }
@@ -282,7 +321,12 @@ export function setupPullToRefresh(refresh) {
         return;
       }
       pulled = event.touches[0].clientY - startY;
-      if (pulled > 0 && window.scrollY === 0) {
+      if (pulled > 0 && window.scrollY === 0 && !pausedContext()) {
+        if (content) {
+          clearTimeout(resetTimer);
+          content.style.transition = "none";
+          content.style.transform = pullTransform(pulled);
+        }
         showPull(pulled >= threshold ? "Release to refresh" : "Pull to refresh");
       }
     },
@@ -290,11 +334,23 @@ export function setupPullToRefresh(refresh) {
   );
 
   document.addEventListener(
-    "touchend",
+    "touchcancel",
     () => {
-      const shouldRefresh = startY !== null && pulled >= threshold && window.scrollY === 0;
       startY = null;
       pulled = 0;
+      resetContent();
+      showPull("");
+    },
+    { passive: true }
+  );
+
+  document.addEventListener(
+    "touchend",
+    () => {
+      const shouldRefresh = startY !== null && pulled >= threshold && window.scrollY === 0 && !pausedContext();
+      startY = null;
+      pulled = 0;
+      resetContent();
       if (shouldRefresh) {
         showPull("Refreshing…");
         if (refresh.trigger) {
