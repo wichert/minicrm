@@ -29,14 +29,13 @@
       </ul>
       <div class="navbar-user">
         <span class="navbar-user-name">{{.CurrentUser.DisplayName}}</span>
-        <span class="navbar-user-email">{{.CurrentUser.Email}}</span>
         <form method="post" action="/auth/logout">
           <button type="submit" class="btn btn-ghost btn-small">Log out</button>
         </form>
       </div>
     </nav>
   </header>
-  <main id="main-content" class="container{{if .WideLayout}} container-wide{{end}}" tabindex="-1">
+  <main id="main-content" class="container{{if .WideLayout}} container-wide{{end}}" data-pull-content tabindex="-1">
     {{if .Flash.Message}}<div class="flash flash-{{.Flash.Kind}}" role="status">
       <span>{{.Flash.Message}}</span>
       <button type="button" class="flash-dismiss" data-flash-dismiss aria-label="Dismiss notice">×</button>
