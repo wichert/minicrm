@@ -32,19 +32,19 @@ type Flash struct {
 
 // ThreadSummaryItem holds display fields for a single row in the inbox list.
 type ThreadSummaryItem struct {
-	Thread          sqlc.Thread
-	AssigneeName    string
-	AccountName     string
-	FormattedTime   string
-	FullTime        string
-	OpenedFullTime  string
-	RelativeTime    string
-	WaitLabel       string
-	WaitUrgency     string
-	LatestSnippet   string
-	LatestDirection string
-	MessageCount    int
-	CanAssignToMe   bool
+	Thread            sqlc.Thread
+	AssigneeName      string
+	AccountName       string
+	FormattedTime     string
+	FullTime          string
+	WaitSinceFullTime string
+	RelativeTime      string
+	WaitLabel         string
+	WaitUrgency       string
+	LatestSnippet     string
+	LatestDirection   string
+	MessageCount      int
+	CanAssignToMe     bool
 	// IsCurrent marks the thread the detail page is showing so the pane row reads as
 	// selected (aria-current plus a background in app.css).
 	IsCurrent bool
@@ -311,56 +311,46 @@ func FormatWaitDuration(since, now time.Time) (string, string) {
 	return fmt.Sprintf("Waiting %dd", days), "urgent"
 }
 
-// ThreadAgeBadge derives the age badge label and urgency tier ("fresh", "warning", "urgent")
-// for an open thread (new or in_progress) using its opened_at timestamp and the configured
-// IANA display timezone. Calendar-day buckets ("Today", "This week", "Overdue") are computed
-// in displayTimezone rather than UTC wall-clock time.
-func ThreadAgeBadge(status sqlc.ThreadStatus, openedAt, now time.Time, displayTimezone string) (string, string) {
+// ThreadAgeBadge derives a waiting-time label and urgency tier for an open thread
+// (new or in_progress) from when the customer last started waiting. Day counts use
+// calendar dates in the configured display timezone so they advance at local midnight.
+func ThreadAgeBadge(status sqlc.ThreadStatus, waitSince, now time.Time, displayTimezone string) (string, string) {
 	if status != sqlc.ThreadStatusNew && status != sqlc.ThreadStatusInProgress {
 		return "", ""
 	}
-	if openedAt.IsZero() {
-		// Defensible default: an unknown open time is treated as today so a missing
-		// timestamp never inflates a thread's age or mislabels it as overdue.
-		return "Today", "fresh"
+	if waitSince.IsZero() {
+		return "Waiting", "fresh"
+	}
+	elapsed := now.Sub(waitSince)
+	if elapsed < time.Hour {
+		label, _ := FormatWaitDuration(waitSince, now)
+		return label, "fresh"
 	}
 	loc, err := time.LoadLocation(displayTimezone)
 	if err != nil {
 		loc = time.UTC
 	}
-	openedLocal := openedAt.In(loc)
-	nowLocal := now.In(loc)
-	openedDay := time.Date(openedLocal.Year(), openedLocal.Month(), openedLocal.Day(), 0, 0, 0, 0, time.UTC)
+	waitLocal, nowLocal := waitSince.In(loc), now.In(loc)
+	waitDay := time.Date(waitLocal.Year(), waitLocal.Month(), waitLocal.Day(), 0, 0, 0, 0, time.UTC)
 	nowDay := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, time.UTC)
-	days := int(nowDay.Sub(openedDay) / (24 * time.Hour))
-	switch {
-	case days <= 0:
-		return "Today", "fresh"
-	case days <= 7:
-		return fmt.Sprintf("Open %dd", days), "warning"
-	default:
-		return fmt.Sprintf("Overdue · %dd", days), "urgent"
+	days := int(nowDay.Sub(waitDay) / (24 * time.Hour))
+	if days > 0 {
+		return fmt.Sprintf("Waiting %dd", days), "urgent"
 	}
+	if elapsed < 24*time.Hour {
+		return fmt.Sprintf("Waiting %dh", int(elapsed.Hours())), "warning"
+	}
+	return "Waiting 1d", "urgent"
 }
 
 // PaneAgeLabel shortens a wait badge label for the split pane's compact age
-// element ("Today", "3d", "12d"). It reuses the exact bucketing of
-// ThreadAgeBadge — the buckets are derived from the same label so the two can
-// never disagree — and simply strips the words the pane does not have room
-// for. Labels that match no bucket (future-proofing) pass through unchanged.
+// element ("12m", "5h", "3d"). It derives from ThreadAgeBadge's label — both
+// derive from one label so they can never disagree about the waiting-time bucket.
 func PaneAgeLabel(waitLabel string) string {
-	switch waitLabel {
-	case "Today":
-		return "Today"
-	case "Open 1d", "Open 2d", "Open 3d", "Open 4d", "Open 5d", "Open 6d", "Open 7d":
-		return strings.TrimPrefix(waitLabel, "Open ")
-	default:
-		// "Overdue · Nd" or an unexpected label: keep the day count, drop words.
-		if days, ok := strings.CutPrefix(waitLabel, "Overdue · "); ok {
-			return days
-		}
-		return waitLabel
+	if value, ok := strings.CutPrefix(waitLabel, "Waiting "); ok {
+		return value
 	}
+	return waitLabel
 }
 
 var htmlTagRe = regexp.MustCompile(`<[^>]+>`)

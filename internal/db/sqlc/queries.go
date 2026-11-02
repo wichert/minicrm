@@ -356,15 +356,13 @@ func scanThread(row pgx.Row) (Thread, error) {
 	return t, err
 }
 
-// scanThreadWithOpenedAt scans threadColumns plus a trailing opened_at column. The
-// column list is shared with scanThread, so any addition to threadColumns must be
-// mirrored in both scanners — the trailing opened_at is scanned in addition to it.
-func scanThreadWithOpenedAt(row pgx.Row) (Thread, error) {
+// scanThreadWithTimes scans threadColumns plus trailing opened_at and wait_since columns.
+func scanThreadWithTimes(row pgx.Row) (Thread, error) {
 	var t Thread
 	err := row.Scan(
 		&t.ID, &t.AccountID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
 		&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
-		&t.OpenedAt,
+		&t.OpenedAt, &t.WaitSince,
 	)
 	return t, err
 }
@@ -393,12 +391,19 @@ func (q *Queries) CreateThread(ctx context.Context, t Thread) (Thread, error) {
 	))
 }
 
-// GetThreadByID fetches a thread by UUID. Unlike the shared threadColumns select, it also
-// returns opened_at (earliest email sent_at) so the detail page can show the thread-age badge
-// without relying on the first email's SentAt.
+// GetThreadByID fetches a thread by UUID with both its original open time and current waiting time.
 func (q *Queries) GetThreadByID(ctx context.Context, id uuid.UUID) (Thread, error) {
-	return scanThreadWithOpenedAt(q.db.QueryRow(ctx, `SELECT `+threadColumns+`,
-	       COALESCE((SELECT MIN(e.sent_at) FROM emails e WHERE e.thread_id = threads.id), threads.last_message_at) AS opened_at
+	return scanThreadWithTimes(q.db.QueryRow(ctx, `SELECT `+threadColumns+`,
+	       COALESCE((SELECT MIN(e.sent_at) FROM emails e WHERE e.thread_id = threads.id), threads.last_message_at) AS opened_at,
+	       COALESCE(CASE
+	         WHEN (SELECT e.direction FROM emails e WHERE e.thread_id = threads.id ORDER BY e.sent_at DESC, e.received_at DESC, e.id DESC LIMIT 1) = 'outbound'
+	         THEN (SELECT e.sent_at FROM emails e WHERE e.thread_id = threads.id ORDER BY e.sent_at DESC, e.received_at DESC, e.id DESC LIMIT 1)
+	         ELSE COALESCE((SELECT MIN(e.sent_at) FROM emails e WHERE e.thread_id = threads.id AND e.direction = 'inbound'
+	           AND NOT EXISTS (SELECT 1 FROM emails o WHERE o.thread_id = e.thread_id AND o.direction = 'outbound'
+	             -- Match latest ordering (sent_at, received_at), then use ID as a stable final tie-break.
+	             AND (o.sent_at, o.received_at, o.id) > (e.sent_at, e.received_at, e.id))),
+	           (SELECT MAX(e.sent_at) FROM emails e WHERE e.thread_id = threads.id))
+	       END, threads.last_message_at) AS wait_since
 	       FROM threads WHERE id = $1`, id))
 }
 
@@ -456,9 +461,8 @@ func (q *Queries) CountThreadsByTab(ctx context.Context, f CountThreadsFilter) (
 	}
 	const query = `
 		SELECT
-			-- Inclusive <= cutoff: a thread opened exactly at the cutoff counts as
-			-- needing attention (matches the needs_attention predicate below).
-			COUNT(*) FILTER (WHERE t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $3::timestamptz)::int AS needs_attention,
+			-- Inclusive <= cutoff: a customer waiting exactly to the cutoff counts as needing attention.
+			COUNT(*) FILTER (WHERE t.status IN ('new', 'in_progress') AND COALESCE(stats.wait_since, t.last_message_at) <= $3::timestamptz)::int AS needs_attention,
 			COUNT(*) FILTER (WHERE t.status = 'new')::int AS new_count,
 			COUNT(*) FILTER (WHERE t.status IN ('new', 'in_progress') AND t.assignee_id = $4::uuid)::int AS mine_count,
 			COUNT(*) FILTER (WHERE t.status = 'in_progress')::int AS in_progress_count,
@@ -467,7 +471,16 @@ func (q *Queries) CountThreadsByTab(ctx context.Context, f CountThreadsFilter) (
 			COUNT(*)::int AS all_count
 		FROM threads t
 		LEFT JOIN LATERAL (
-			SELECT MIN(e.sent_at) AS opened_at
+			SELECT MIN(e.sent_at) AS opened_at,
+			       CASE
+			         WHEN (SELECT e.direction FROM emails e WHERE e.thread_id = t.id ORDER BY e.sent_at DESC, e.received_at DESC, e.id DESC LIMIT 1) = 'outbound'
+			         THEN (SELECT e.sent_at FROM emails e WHERE e.thread_id = t.id ORDER BY e.sent_at DESC, e.received_at DESC, e.id DESC LIMIT 1)
+			         ELSE MIN(e.sent_at) FILTER (WHERE e.direction = 'inbound' AND NOT EXISTS (
+			           SELECT 1 FROM emails o WHERE o.thread_id = e.thread_id AND o.direction = 'outbound'
+			             -- Match latest ordering (sent_at, received_at), then use ID as a stable final tie-break.
+			             AND (o.sent_at, o.received_at, o.id) > (e.sent_at, e.received_at, e.id)
+			         ))
+			       END AS wait_since
 			FROM emails e
 			WHERE e.thread_id = t.id
 		) stats ON true
@@ -515,11 +528,21 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		       COALESCE(latest.body_html_sanitized, ''),
 		       COALESCE(latest.direction, ''),
 		       COALESCE(stats.opened_at, t.last_message_at),
+		       COALESCE(stats.wait_since, t.last_message_at),
 		       COALESCE((SELECT NOT d.discarded AND d.body <> '' FROM reply_drafts d WHERE d.thread_id=t.id ORDER BY d.id DESC LIMIT 1), false)
 		FROM threads t
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*)::int AS message_count,
-			       MIN(e.sent_at) AS opened_at
+			       MIN(e.sent_at) AS opened_at,
+			       CASE
+			         WHEN (SELECT e.direction FROM emails e WHERE e.thread_id = t.id ORDER BY e.sent_at DESC, e.received_at DESC, e.id DESC LIMIT 1) = 'outbound'
+			         THEN (SELECT e.sent_at FROM emails e WHERE e.thread_id = t.id ORDER BY e.sent_at DESC, e.received_at DESC, e.id DESC LIMIT 1)
+			         ELSE MIN(e.sent_at) FILTER (WHERE e.direction = 'inbound' AND NOT EXISTS (
+			           SELECT 1 FROM emails o WHERE o.thread_id = e.thread_id AND o.direction = 'outbound'
+			             -- Match latest ordering (sent_at, received_at), then use ID as a stable final tie-break.
+			             AND (o.sent_at, o.received_at, o.id) > (e.sent_at, e.received_at, e.id)
+			         ))
+			       END AS wait_since
 			FROM emails e
 			WHERE e.thread_id = t.id
 		) stats ON true
@@ -527,7 +550,7 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 			SELECT e.body_text, e.body_html_sanitized, e.direction
 			FROM emails e
 			WHERE e.thread_id = t.id
-			ORDER BY e.sent_at DESC, e.received_at DESC
+			ORDER BY e.sent_at DESC, e.received_at DESC, e.id DESC
 			LIMIT 1
 		) latest ON true
 		WHERE ($1::thread_status IS NULL OR t.status = $1)
@@ -543,7 +566,7 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		  AND ($10::text = '' OR t.customer_email = $10::citext)
 		  AND ($11::uuid IS NULL OR t.id <> $11)
 		  -- Inclusive <= attention cutoff, matching the count query above.
-		  AND (NOT $13::boolean OR (t.status IN ('new', 'in_progress') AND COALESCE(stats.opened_at, t.last_message_at) <= $14::timestamptz))
+		  AND (NOT $13::boolean OR (t.status IN ('new', 'in_progress') AND COALESCE(stats.wait_since, t.last_message_at) <= $14::timestamptz))
 		` + orderClause + `
 		LIMIT $12`
 	// f.Sort is allow-listed upstream; it only selects between two static query
@@ -559,7 +582,7 @@ func (q *Queries) ListThreads(ctx context.Context, f ListThreadsFilter) ([]Threa
 		if err := rows.Scan(
 			&t.ID, &t.AccountID, &t.SubjectNormalized, &t.SubjectDisplay, &t.Status, &t.AssigneeID,
 			&t.AssignmentSource, &t.CustomerEmail, &t.CustomerName, &t.ReopensThreadID, &t.LastMessageAt,
-			&t.MessageCount, &t.LatestBodyText, &t.LatestBodyHTML, &t.LatestDirection, &t.OpenedAt, &t.HasDraft,
+			&t.MessageCount, &t.LatestBodyText, &t.LatestBodyHTML, &t.LatestDirection, &t.OpenedAt, &t.WaitSince, &t.HasDraft,
 		); err != nil {
 			return nil, err
 		}
@@ -594,7 +617,7 @@ func (q *Queries) ListCustomerHistory(ctx context.Context, accounts []string, em
 			SELECT e.body_text, e.body_html_sanitized, e.direction
 			FROM emails e
 			WHERE e.thread_id = t.id
-			ORDER BY e.sent_at DESC, e.received_at DESC
+			ORDER BY e.sent_at DESC, e.received_at DESC, e.id DESC
 			LIMIT 1
 		) latest ON true
 		WHERE t.account_id = ANY($1::text[]) AND t.customer_email = $2::citext AND t.id <> $3

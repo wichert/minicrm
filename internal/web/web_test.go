@@ -230,6 +230,13 @@ func (s *testWebStore) UpsertSystemSettings(_ context.Context, cfg sqlc.SystemSe
 	return cfg, nil
 }
 
+func (s *testWebStore) threadWaitSince(t sqlc.Thread) time.Time {
+	if !t.WaitSince.IsZero() {
+		return t.WaitSince
+	}
+	return s.threadOpenedAt(t)
+}
+
 func (s *testWebStore) threadOpenedAt(t sqlc.Thread) time.Time {
 	if !t.OpenedAt.IsZero() {
 		return t.OpenedAt
@@ -272,7 +279,7 @@ func (s *testWebStore) CountThreadsByTab(_ context.Context, f sqlc.CountThreadsF
 		}
 		out.All++
 		isOpen := t.Status == sqlc.ThreadStatusNew || t.Status == sqlc.ThreadStatusInProgress
-		if isOpen && !s.threadOpenedAt(t).After(f.AttentionCutoff) {
+		if isOpen && !s.threadWaitSince(t).After(f.AttentionCutoff) {
 			out.NeedsAttention++
 		}
 		if isOpen && t.AssigneeID != nil && *t.AssigneeID == f.UserID {
@@ -305,7 +312,7 @@ func (s *testWebStore) ListThreads(_ context.Context, f sqlc.ListThreadsFilter) 
 			if t.Status != sqlc.ThreadStatusNew && t.Status != sqlc.ThreadStatusInProgress {
 				continue
 			}
-			if s.threadOpenedAt(t).After(f.AttentionCutoff) {
+			if s.threadWaitSince(t).After(f.AttentionCutoff) {
 				continue
 			}
 		}
@@ -2215,7 +2222,7 @@ func TestInboxDefaultsToOpenQueueAndShowsSnippets(t *testing.T) {
 			ID: id, AccountID: "support", SubjectDisplay: name, Status: status, AssigneeID: &multiUser.ID,
 			CustomerEmail: "a@client.com", LastMessageAt: time.Now().UTC(),
 			MessageCount: 3, LatestBodyText: "Latest   words\nhere", LatestDirection: "outbound",
-			OpenedAt: time.Now().UTC().Add(-50 * time.Hour),
+			OpenedAt: time.Now().UTC().Add(-50 * time.Hour), WaitSince: time.Now().UTC().Add(-50 * time.Hour),
 		}
 	}
 	rec := httptest.NewRecorder()
@@ -2224,7 +2231,7 @@ func TestInboxDefaultsToOpenQueueAndShowsSnippets(t *testing.T) {
 	if !strings.Contains(body, "Open one") || strings.Contains(body, "Done one") || strings.Contains(body, "Junk one") {
 		t.Fatalf("default inbox must only list open threads: %s", body)
 	}
-	for _, want := range []string{"Latest words here", "You:", `class="count-pill"`, "Open 2d", "wait-warning"} {
+	for _, want := range []string{"Latest words here", "You:", `class="count-pill"`, "Waiting 2d", "wait-urgent"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected %q in inbox: %s", want, body)
 		}
@@ -2396,7 +2403,7 @@ func TestExternalReplyEventSummaries(t *testing.T) {
 }
 
 // After a reply sent from another mail client the thread is in progress,
-// shows the "You:" snippet, and displays its thread-age badge based on opened_at.
+// shows the "You:" snippet, and bases its waiting badge on the agent reply.
 func TestInboxReflectsExternalReply(t *testing.T) {
 	_, store, router, multiUser, _ := buildAccountTestServer(t)
 	id := uuid.New()
@@ -2404,19 +2411,16 @@ func TestInboxReflectsExternalReply(t *testing.T) {
 	store.threads[id] = sqlc.Thread{
 		ID: id, AccountID: "support", SubjectDisplay: "Answered elsewhere", Status: sqlc.ThreadStatusInProgress,
 		AssigneeID: &multiUser.ID, CustomerEmail: "a@client.com",
-		LastMessageAt: now.Add(-5 * time.Minute), OpenedAt: now.Add(-72 * time.Hour),
+		LastMessageAt: now.Add(-5 * time.Minute), OpenedAt: now.Add(-72 * time.Hour), WaitSince: now.Add(-5 * time.Minute),
 		MessageCount: 2, LatestDirection: "outbound", LatestBodyText: "Sent from Thunderbird",
 	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/threads", nil))
 	body := rec.Body.String()
-	for _, want := range []string{"Answered elsewhere", "You:", "Sent from Thunderbird", "Open 3d", "wait-warning"} {
+	for _, want := range []string{"Answered elsewhere", "You:", "Sent from Thunderbird", "Waiting 5m", "wait-fresh"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected %q in inbox: %s", want, body)
 		}
-	}
-	if strings.Contains(body, "Waiting") {
-		t.Fatalf("an answered thread must not show a legacy waiting badge: %s", body)
 	}
 }
 
@@ -2562,129 +2566,30 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 }
 
 func TestThreadAgeBadge(t *testing.T) {
-	// Reference time: 2026-10-29 01:30:00 CET (which is 2026-10-29 00:30:00 UTC)
-	now := time.Date(2026, 10, 29, 0, 30, 0, 0, time.UTC)
-
+	now := time.Date(2026, 10, 29, 12, 30, 0, 0, time.UTC)
 	tests := []struct {
-		name        string
-		status      sqlc.ThreadStatus
-		openedAt    time.Time
-		now         time.Time // optional; zero means the shared "now" reference time
-		displayTZ   string
-		wantLabel   string
-		wantUrgency string
+		name           string
+		status         sqlc.ThreadStatus
+		since          time.Time
+		now            time.Time
+		tz             string
+		label, urgency string
 	}{
-		{
-			name:        "new thread opened today in display timezone",
-			status:      sqlc.ThreadStatusNew,
-			openedAt:    time.Date(2026, 10, 28, 23, 15, 0, 0, time.UTC), // 2026-10-29 00:15 CET (same local calendar day as now)
-			displayTZ:   "Europe/Amsterdam",
-			wantLabel:   "Today",
-			wantUrgency: "fresh",
-		},
-		{
-			name:        "same timestamp in America/New_York is still Oct 28 for both opened and now",
-			status:      sqlc.ThreadStatusNew,
-			openedAt:    time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC), // Oct 28 08:00 EDT; now is Oct 28 20:30 EDT (same local day)
-			displayTZ:   "America/New_York",
-			wantLabel:   "Today",
-			wantUrgency: "fresh",
-		},
-		{
-			name:        "timezone boundary: Oct 28 22:30 UTC is Oct 28 23:30 CET vs now Oct 29 01:30 CET -> Open 1d",
-			status:      sqlc.ThreadStatusNew,
-			openedAt:    time.Date(2026, 10, 28, 22, 30, 0, 0, time.UTC),
-			displayTZ:   "Europe/Amsterdam",
-			wantLabel:   "Open 1d",
-			wantUrgency: "warning",
-		},
-		{
-			name:        "in_progress thread opened 3 days ago gets warning badge",
-			status:      sqlc.ThreadStatusInProgress,
-			openedAt:    time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC),
-			displayTZ:   "Europe/Amsterdam",
-			wantLabel:   "Open 3d",
-			wantUrgency: "warning",
-		},
-		{
-			name:        "in_progress thread opened 7 days ago gets warning badge (boundary)",
-			status:      sqlc.ThreadStatusInProgress,
-			openedAt:    time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC),
-			displayTZ:   "Europe/Amsterdam",
-			wantLabel:   "Open 7d",
-			wantUrgency: "warning",
-		},
-		{
-			name:        "in_progress thread opened 8 days ago gets overdue urgent badge",
-			status:      sqlc.ThreadStatusInProgress,
-			openedAt:    time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC),
-			displayTZ:   "Europe/Amsterdam",
-			wantLabel:   "Overdue · 8d",
-			wantUrgency: "urgent",
-		},
-		{
-			name:        "completed thread gets no age badge",
-			status:      sqlc.ThreadStatusCompleted,
-			openedAt:    time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC),
-			displayTZ:   "Europe/Amsterdam",
-			wantLabel:   "",
-			wantUrgency: "",
-		},
-		{
-			// Spring-forward DST: on 2026-03-29 the Amsterdam clock jumps 02:00 CET -> 03:00 CEST,
-			// so this local day is only 23 hours long. now = 2026-03-29 01:30 UTC = 03:30 CEST
-			// (local Mar 29); openedAt = 2026-03-27 23:30 UTC = Mar 28 00:30 CET (local Mar 28).
-			// Calendar-day bucketing counts Mar 29 - Mar 28 = 1 day: the skipped hour must not
-			// inflate the label to "Open 2d".
-			name:        "spring-forward DST transition does not off-by-one the day count",
-			now:         time.Date(2026, 3, 29, 1, 30, 0, 0, time.UTC), // 03:30 CEST in Amsterdam
-			status:      sqlc.ThreadStatusNew,
-			openedAt:    time.Date(2026, 3, 27, 23, 30, 0, 0, time.UTC),
-			displayTZ:   "Europe/Amsterdam",
-			wantLabel:   "Open 1d",
-			wantUrgency: "warning",
-		},
-		{
-			// Fall-back DST: 2026-10-25 the Amsterdam clock repeats 02:00-03:00 CEST->CET, making
-			// that local day 25 hours. now = 2026-10-26 00:30 UTC = 01:30 CET (Oct 26);
-			// openedAt = 2026-10-24 23:30 UTC = Oct 25 01:30 CEST (Oct 25) -> "Open 1d".
-			name:        "fall-back DST transition does not off-by-one the day count",
-			now:         time.Date(2026, 10, 26, 0, 30, 0, 0, time.UTC), // 01:30 CET in Amsterdam
-			status:      sqlc.ThreadStatusNew,
-			openedAt:    time.Date(2026, 10, 24, 23, 30, 0, 0, time.UTC),
-			displayTZ:   "Europe/Amsterdam",
-			wantLabel:   "Open 1d",
-			wantUrgency: "warning",
-		},
-		{
-			name:        "invalid timezone string falls back to UTC",
-			status:      sqlc.ThreadStatusNew,
-			openedAt:    time.Date(2026, 10, 28, 23, 15, 0, 0, time.UTC), // UTC day Oct 28; now is Oct 29 00:30 UTC
-			displayTZ:   "Not/AZone",
-			wantLabel:   "Open 1d",
-			wantUrgency: "warning",
-		},
-		{
-			name:        "spam thread gets no age badge",
-			status:      sqlc.ThreadStatusSpam,
-			openedAt:    time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC),
-			displayTZ:   "Europe/Amsterdam",
-			wantLabel:   "",
-			wantUrgency: "",
-		},
+		{"recent inbound", sqlc.ThreadStatusNew, now.Add(-12 * time.Minute), now, "UTC", "Waiting 12m", "fresh"},
+		{"under hour", sqlc.ThreadStatusNew, now.Add(-59 * time.Minute), now, "UTC", "Waiting 59m", "fresh"},
+		{"warning", sqlc.ThreadStatusInProgress, now.Add(-5 * time.Hour), now, "UTC", "Waiting 5h", "warning"},
+		{"calendar day rolls over", sqlc.ThreadStatusNew, time.Date(2026, 10, 28, 23, 30, 0, 0, time.UTC), time.Date(2026, 10, 29, 0, 30, 0, 0, time.UTC), "UTC", "Waiting 1d", "urgent"},
+		{"multi-day", sqlc.ThreadStatusInProgress, now.Add(-72 * time.Hour), now, "UTC", "Waiting 3d", "urgent"},
+		{"invalid timezone falls back to UTC", sqlc.ThreadStatusNew, time.Date(2026, 10, 28, 23, 30, 0, 0, time.UTC), time.Date(2026, 10, 29, 0, 30, 0, 0, time.UTC), "Not/AZone", "Waiting 1d", "urgent"},
+		{"unknown timestamp", sqlc.ThreadStatusNew, time.Time{}, now, "UTC", "Waiting", "fresh"},
+		{"completed", sqlc.ThreadStatusCompleted, now.Add(-72 * time.Hour), now, "UTC", "", ""},
+		{"spam", sqlc.ThreadStatusSpam, now.Add(-72 * time.Hour), now, "UTC", "", ""},
 	}
-
 	for _, tc := range tests {
-		tc := tc
-		caseNow := now
-		if !tc.now.IsZero() {
-			caseNow = tc.now
-		}
 		t.Run(tc.name, func(t *testing.T) {
-			gotLabel, gotUrgency := views.ThreadAgeBadge(tc.status, tc.openedAt, caseNow, tc.displayTZ)
-			if gotLabel != tc.wantLabel || gotUrgency != tc.wantUrgency {
-				t.Fatalf("ThreadAgeBadge(%q) = (%q, %q), want (%q, %q)",
-					tc.status, gotLabel, gotUrgency, tc.wantLabel, tc.wantUrgency)
+			label, urgency := views.ThreadAgeBadge(tc.status, tc.since, tc.now, tc.tz)
+			if label != tc.label || urgency != tc.urgency {
+				t.Fatalf("ThreadAgeBadge = (%q, %q), want (%q, %q)", label, urgency, tc.label, tc.urgency)
 			}
 		})
 	}
@@ -2760,7 +2665,7 @@ func TestNeedsAttentionPagination(t *testing.T) {
 	_, store, router, _, _ := buildAccountTestServer(t)
 
 	now := time.Now().UTC()
-	// Three stale new threads; attention filtering keys on OpenedAt while the pagination
+	// Three stale new threads; attention filtering keys on waiting time while the pagination
 	// cursor keys on (LastMessageAt, ID), so make the two orderings differ.
 	type spec struct {
 		name       string
@@ -2778,7 +2683,7 @@ func TestNeedsAttentionPagination(t *testing.T) {
 		store.threads[id] = sqlc.Thread{
 			ID: id, AccountID: "support", SubjectDisplay: sp.name,
 			Status: sqlc.ThreadStatusNew, CustomerEmail: "p@example.com",
-			LastMessageAt: sp.ln, OpenedAt: sp.opened,
+			LastMessageAt: sp.ln, OpenedAt: sp.opened, WaitSince: sp.opened,
 		}
 	}
 
@@ -2855,17 +2760,22 @@ func TestNeedsAttentionFilterAndTabCounts(t *testing.T) {
 		{
 			ID: uuid.New(), AccountID: "support", SubjectDisplay: "Stale New Support",
 			Status: sqlc.ThreadStatusNew, AssigneeID: &multiUser.ID, CustomerEmail: "a@example.com",
-			LastMessageAt: now.Add(-1 * time.Hour), OpenedAt: now.Add(-72 * time.Hour), // 3d old -> Needs attention
+			LastMessageAt: now.Add(-1 * time.Hour), OpenedAt: now.Add(-72 * time.Hour), WaitSince: now.Add(-72 * time.Hour), // 3d waiting -> Needs attention
 		},
 		{
 			ID: uuid.New(), AccountID: "support", SubjectDisplay: "Stale InProgress Support",
 			Status: sqlc.ThreadStatusInProgress, AssigneeID: &otherUserID, CustomerEmail: "b@example.com",
-			LastMessageAt: now.Add(-2 * time.Hour), OpenedAt: now.Add(-60 * time.Hour), // 2.5d old -> Needs attention
+			LastMessageAt: now.Add(-2 * time.Hour), OpenedAt: now.Add(-60 * time.Hour), WaitSince: now.Add(-60 * time.Hour), // 2.5d waiting -> Needs attention
 		},
 		{
 			ID: uuid.New(), AccountID: "support", SubjectDisplay: "Fresh New Support",
 			Status: sqlc.ThreadStatusNew, AssigneeID: &multiUser.ID, CustomerEmail: "c@example.com",
-			LastMessageAt: now.Add(-30 * time.Minute), OpenedAt: now.Add(-4 * time.Hour), // 4h old -> NOT Needs attention
+			LastMessageAt: now.Add(-30 * time.Minute), OpenedAt: now.Add(-4 * time.Hour), WaitSince: now.Add(-30 * time.Minute), // recent customer reply -> NOT Needs attention
+		},
+		{
+			ID: uuid.New(), AccountID: "support", SubjectDisplay: "Recent Agent Reply",
+			Status: sqlc.ThreadStatusInProgress, AssigneeID: &multiUser.ID, CustomerEmail: "reply@example.com",
+			LastMessageAt: now.Add(-15 * time.Minute), OpenedAt: now.Add(-5 * 24 * time.Hour), WaitSince: now.Add(-15 * time.Minute), // agent replied recently -> NOT Needs attention
 		},
 		{
 			ID: uuid.New(), AccountID: "support", SubjectDisplay: "Old Completed Support",
@@ -2875,7 +2785,7 @@ func TestNeedsAttentionFilterAndTabCounts(t *testing.T) {
 		{
 			ID: uuid.New(), AccountID: "sales", SubjectDisplay: "Stale New Sales",
 			Status: sqlc.ThreadStatusNew, AssigneeID: &multiUser.ID, CustomerEmail: "e@example.com",
-			LastMessageAt: now.Add(-3 * time.Hour), OpenedAt: now.Add(-96 * time.Hour), // 4d old in sales -> Needs attention for multiUser only
+			LastMessageAt: now.Add(-3 * time.Hour), OpenedAt: now.Add(-96 * time.Hour), WaitSince: now.Add(-96 * time.Hour), // 4d waiting in sales -> Needs attention for multiUser only
 		},
 	}
 	for _, th := range threads {
@@ -2895,17 +2805,17 @@ func TestNeedsAttentionFilterAndTabCounts(t *testing.T) {
 		"Stale New Sales",
 		`aria-current="true">Needs attention <span class="count-pill">3</span></a>`,
 		`New <span class="count-pill">3</span></a>`,
-		`Mine <span class="count-pill">3</span></a>`,
-		`<span>In progress</span> <span class="count-pill">1</span>`,
+		`Mine <span class="count-pill">4</span></a>`,
+		`<span>In progress</span> <span class="count-pill">2</span>`,
 		`<span>Completed</span> <span class="count-pill">1</span>`,
 		`<span>Spam</span> <span class="count-pill">0</span>`,
-		`<span>All</span> <span class="count-pill">5</span>`,
+		`<span>All</span> <span class="count-pill">6</span>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected %q in Needs attention response: %s", want, body)
 		}
 	}
-	for _, unwanted := range []string{"Fresh New Support", "Old Completed Support"} {
+	for _, unwanted := range []string{"Fresh New Support", "Recent Agent Reply", "Old Completed Support"} {
 		if strings.Contains(body, unwanted) {
 			t.Fatalf("did not expect %q in Needs attention response: %s", unwanted, body)
 		}
@@ -2924,8 +2834,8 @@ func TestNeedsAttentionFilterAndTabCounts(t *testing.T) {
 	for _, want := range []string{
 		`Needs attention <span class="count-pill">2</span></a>`,
 		`New <span class="count-pill">2</span></a>`,
-		`Mine <span class="count-pill">2</span></a>`,
-		`<span>All</span> <span class="count-pill">4</span>`,
+		`Mine <span class="count-pill">3</span></a>`,
+		`<span>All</span> <span class="count-pill">5</span>`,
 	} {
 		if !strings.Contains(supportBody, want) {
 			t.Fatalf("expected account-scoped count %q in response: %s", want, supportBody)
@@ -3075,11 +2985,10 @@ func TestPaneAgeLabelShortensThreadAgeBadgeBuckets(t *testing.T) {
 		waitLabel string
 		want      string
 	}{
-		{"today stays verbatim", "Today", "Today"},
-		{"open 1d loses only the word", "Open 1d", "1d"},
-		{"open 7d loses only the word", "Open 7d", "7d"},
-		{"overdue keeps the day count", "Overdue · 3d", "3d"},
-		{"overdue 12d keeps the day count", "Overdue · 12d", "12d"},
+		{"minutes lose the waiting prefix", "Waiting 12m", "12m"},
+		{"hours lose the waiting prefix", "Waiting 5h", "5h"},
+		{"days lose the waiting prefix", "Waiting 3d", "3d"},
+		{"unknown labels pass through unchanged", "???", "???"},
 		{"unexpected labels pass through unchanged", "???", "???"},
 	}
 	for _, tc := range tests {
@@ -3091,10 +3000,10 @@ func TestPaneAgeLabelShortensThreadAgeBadgeBuckets(t *testing.T) {
 	}
 	// Cross-check against the badge itself for real timestamps: the pane label
 	// for a 2-day-old thread must match the badge's own bucket, not a recompute.
-	openedAt := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
-	label, _ := views.ThreadAgeBadge(sqlc.ThreadStatusNew, openedAt, now, "UTC")
+	waitSince := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
+	label, _ := views.ThreadAgeBadge(sqlc.ThreadStatusNew, waitSince, now, "UTC")
 	compact := views.PaneAgeLabel(label)
-	if compact != strings.TrimPrefix(label, "Open ") {
+	if compact != strings.TrimPrefix(label, "Waiting ") {
 		t.Fatalf("pane label %q does not shorten badge label %q", compact, label)
 	}
 	if compact != "2d" {

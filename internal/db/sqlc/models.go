@@ -88,6 +88,7 @@ type Thread struct {
 	LatestBodyHTML  string    `json:"latest_body_html,omitempty"`
 	LatestDirection string    `json:"latest_direction,omitempty"`
 	OpenedAt        time.Time `json:"opened_at,omitempty"`
+	WaitSince       time.Time `json:"wait_since,omitempty"`
 }
 
 // Address represents an RFC 5322 email participant.
