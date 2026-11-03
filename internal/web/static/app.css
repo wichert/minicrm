@@ -3055,9 +3055,20 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   color: var(--text-muted, #5b5b6b);
 }
 
+/* Rule: hover must never move items
+   ------------------------------------------------------------
+   :hover (and :focus-within) states may only change paint —
+   colors, backgrounds, borders, shadows, outlines, opacity —
+   never layout. Toggling display, visibility, or size in a
+   hover state shifts sibling content and every row below it.
+   Content that must appear on hover is rendered unconditionally
+   or lives in an absolutely-positioned overlay; transitions may
+   animate opacity or transform only. */
+
 /* W7: per-thread "Assign to…" submenu inside the row menu popover.
-   Kept inline-flex so it lines up with the sibling quick-action forms; the
-   show/hide rules below toggle between none and inline-flex consistently. */
+   The row menu popover is absolutely positioned, so nothing inside
+   it can shift row layout; the submenu is therefore always rendered
+   at its final size instead of being revealed on hover. */
 .row-menu-submenu {
   position: static;
   display: inline-flex;
@@ -3134,9 +3145,11 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
 
 .thread-row:hover .actions-cell .row-quick-actions,
 .thread-row:focus-within .actions-cell .row-quick-actions,
-.actions-cell .row-quick-actions:focus-within,
-.thread-row:hover .actions-cell .row-menu-submenu,
-.thread-row:focus-within .actions-cell .row-menu-submenu {
+.actions-cell .row-quick-actions:focus-within {
+  display: inline-flex;
+}
+
+.actions-cell .row-menu-submenu {
   display: inline-flex;
 }
 
