@@ -2699,7 +2699,6 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   }
 
   .split-list .actions-cell,
-  .split-list .row-quick-actions,
   .split-list .row-menu {
     display: none;
   }
@@ -3093,60 +3092,10 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   min-width: 0;
 }
 
-/* W7: hover quick-actions beside the ⋯ trigger; keyboard-reachable via
-   :focus-within so the buttons are usable without a pointer. Hidden below
-   768px where the row menu is the primary affordance. */
-.row-quick-actions {
-  display: flex;
-  gap: 0.25rem;
-}
-
-.row-quick-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.75rem;
-  height: 1.75rem;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 0.375rem;
-  background: transparent;
-  color: var(--text-muted, #5b5b6b);
-  cursor: pointer;
-}
-
-.row-quick-btn:hover {
-  background: var(--surface-soft, #eef0f4);
-}
-
-.row-quick-btn:focus-visible {
-  outline: 2px solid var(--accent, #6366f1);
-  outline-offset: 1px;
-}
-
-.row-quick-complete:hover {
-  color: var(--ok, #15803d);
-}
-
-.row-quick-spam:hover {
-  color: var(--danger, #b91c1c);
-}
-
 .actions-cell .row-menu {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-}
-
-.actions-cell .row-quick-actions,
-.actions-cell .row-menu-submenu {
-  display: none;
-}
-
-.thread-row:hover .actions-cell .row-quick-actions,
-.thread-row:focus-within .actions-cell .row-quick-actions,
-.actions-cell .row-quick-actions:focus-within {
-  display: inline-flex;
 }
 
 .actions-cell .row-menu-submenu {
@@ -3160,11 +3109,3 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
   outline-offset: -2px;
 }
 
-/* W7 mobile: the ⋯ popover stays the primary affordance below 768px, but the
-   "Assign to…" submenu must remain reachable there too — only the hover
-   quick-action buttons are hidden (they would overlap the narrow row). */
-@media (max-width: 767px) {
-  .actions-cell .row-quick-actions {
-    display: none !important;
-  }
-}
