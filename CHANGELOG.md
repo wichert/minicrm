@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.4.0](https://github.com/wichert/minicrm/compare/v1.3.0...v1.4.0) (2026-11-03)
+
+
+### Features
+
+* **ui:** drop the timestamp from open thread rows ([#54](https://github.com/wichert/minicrm/issues/54)) ([28c6e38](https://github.com/wichert/minicrm/commit/28c6e384204566e6f35585841e5e227215a72815))
+
+
+### Bug Fixes
+
+* **ui:** anchor pull-to-refresh indicator to the navbar's paint space ([#49](https://github.com/wichert/minicrm/issues/49)) ([e515a32](https://github.com/wichert/minicrm/commit/e515a32e45822aa3ac7b501b3adc6f47f432f15c)), closes [#42](https://github.com/wichert/minicrm/issues/42)
+* **ui:** never let hover states move layout ([#52](https://github.com/wichert/minicrm/issues/52)) ([ccb9382](https://github.com/wichert/minicrm/commit/ccb93828141b845a5f72b89c7f5e361ad1bb96ee))
+
 ## [1.3.0](https://github.com/wichert/minicrm/compare/v1.2.1...v1.3.0) (2026-11-02)
 
 
