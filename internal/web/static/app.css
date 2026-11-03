@@ -1573,12 +1573,8 @@ select:disabled {
   background: #f5f6ff;
 }
 
-.thread-row td:first-child {
-  box-shadow: inset 3px 0 0 transparent;
-}
-
-.thread-row-new td:first-child {
-  box-shadow: inset 3px 0 0 var(--primary);
+.thread-row-new .thread-link {
+  font-weight: 700;
 }
 
 .thread-cell {
@@ -1596,7 +1592,7 @@ select:disabled {
 
 .thread-link {
   color: var(--text);
-  font-weight: 600;
+  font-weight: 400;
   text-decoration: none;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2359,10 +2355,6 @@ details.message:not([open]) > .message-header {
     box-shadow: none;
   }
 
-  .threads-table tr.thread-row-new {
-    box-shadow: inset 3px 0 0 var(--primary);
-  }
-
   .mobile-select-all { display: inline-flex; align-items: center; gap: 0.4rem; }
 
   /* W3 mobile: the bar becomes a full-width bottom sheet; per-row checkboxes
@@ -2782,15 +2774,12 @@ html.js body[data-reply-sheet-open="true"] .reply-sticky-bar { display: none; }
     padding-right: 0.35rem;
   }
 
-  /* The open thread reads as selected: a left accent plus a tinted background.
-     aria-current="true" carries the same state to assistive tech. */
+  /* The open thread reads as selected: a tinted background plus a stronger
+     subject color. aria-current="true" carries the same state to assistive
+     tech. */
   .split-list .thread-row[aria-current="true"],
   .split-list .thread-row-current {
     background: var(--primary-soft);
-  }
-
-  .split-list .thread-row-current td:first-child {
-    box-shadow: inset 3px 0 0 var(--primary);
   }
 
   .split-list .thread-row-current .thread-link {
