@@ -1,7 +1,7 @@
 /* MiniCRM Service Worker: static shell precache and offline navigation fallback only.
  * Never caches authenticated HTML, email bodies, or attachments.
  */
-var CACHE_NAME = "minicrm-shell-v4";
+var CACHE_NAME = "minicrm-shell-v5";
 var SHELL_ASSETS = [
   "/static/app.css",
   "/static/app.js",
