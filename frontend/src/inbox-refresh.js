@@ -234,7 +234,15 @@ export function setupInboxAutoRefresh() {
 /* Pull-to-refresh on touch devices, on top of the browser's own overscroll
    behaviour (which reloads the whole page and loses scroll position). Only
    engages at the very top of the document, ignores gestures that start in a
-   paused context, and never fires while a refresh is already in flight. */
+   paused context, and never fires while a refresh is already in flight.
+
+   Only the content below the navbar (main[data-pull-content]) moves. The navbar
+   itself is never transformed, so it stays put while the gap below it opens up.
+   The indicator lives inside <header> and is placed in CSS paint space
+   (position: absolute; top: 100%), so it never needs measuring here: during
+   iOS rubber-band overscroll the document paints shifted while all layout
+   geometry (scrollY, getBoundingClientRect) stays frozen, so any JS-measured
+   top would drift above the navbar mid-pull. */
 export function pullTransform(pulled) {
   const distance = Math.min(Math.max(0, pulled) * 0.4, 120);
   return `translateY(${distance}px)`;
@@ -255,6 +263,8 @@ export function setupPullToRefresh(refresh) {
   let hideTimer = null;
   let resetTimer = null;
 
+  // The indicator's position is owned entirely by CSS (absolute, just below
+  // the header); JS only toggles visibility and text.
   function showPull(label) {
     if (!indicator) {
       return;
