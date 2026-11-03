@@ -32,7 +32,6 @@
          in the split view too. */}}
     {{template "inbox_filter_form" (inboxFilterForm .List (threadDetailURL "" .Thread.ID) .List.ClearSearchURL)}}
   </div>
-  <span class="pull-indicator" data-pull-indicator aria-hidden="true"></span>
   {{/* No bulk bar in the pane (PaneMode): selection chrome plus a 5-button bar
        cannot fit a narrow column without eating the subject. */}}
   {{template "inbox_results_region" .List}}

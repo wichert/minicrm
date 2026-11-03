@@ -2529,6 +2529,7 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 		`href="/threads?status=new&amp;assignee=me" data-refresh-link`,
 		`href="/threads" aria-current="page">Threads</a>`,
 		`data-refresh-status`,
+		`data-pull-content`,
 	} {
 		if !strings.Contains(inboxHTML, want) {
 			t.Fatalf("expected %q in inbox HTML", want)
@@ -2536,6 +2537,26 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 	}
 	if strings.Contains(inboxHTML, `<h1>Threads</h1>`) {
 		t.Fatalf("inbox should not render a visible Threads heading")
+	}
+
+	// Pull-to-refresh may only move the content below the navbar, so the indicator
+	// must live outside <main data-pull-content>: navbar -> indicator -> content.
+	navIdx := strings.Index(inboxHTML, `<nav class="navbar"`)
+	indicatorIdx := strings.Index(inboxHTML, `data-pull-indicator`)
+	contentIdx := strings.Index(inboxHTML, `data-pull-content`)
+	if navIdx < 0 || indicatorIdx < 0 || contentIdx < 0 {
+		t.Fatalf("pull-to-refresh hooks missing: nav=%d indicator=%d content=%d", navIdx, indicatorIdx, contentIdx)
+	}
+	if navIdx >= indicatorIdx || indicatorIdx >= contentIdx {
+		t.Fatalf("pull indicator must sit between the navbar and the content wrapper: nav=%d indicator=%d content=%d", navIdx, indicatorIdx, contentIdx)
+	}
+	// The indicator must live inside <header> (before </header>) so that its
+	// CSS position: absolute anchors to the header's paint space; iOS
+	// rubber-band overscroll otherwise leaves a viewport-fixed pill above the
+	// navbar mid-pull.
+	headerEndIdx := strings.Index(inboxHTML, "</header>")
+	if headerEndIdx < 0 || indicatorIdx >= headerEndIdx {
+		t.Fatalf("pull indicator must be inside <header>: indicator=%d </header>=%d", indicatorIdx, headerEndIdx)
 	}
 
 	// 2. Thread detail preserves BackURL from same-origin /threads?... Referer and rejects cross-origin Referer
@@ -2568,6 +2589,52 @@ func TestThreadDetailBackURLAndRefreshControls(t *testing.T) {
 	router.ServeHTTP(recEvil, reqEvil)
 	if !strings.Contains(recEvil.Body.String(), `class="back-link" href="/threads"`) {
 		t.Fatalf("expected cross-origin Referer to fall back to /threads, got: %s", recEvil.Body.String())
+	}
+}
+
+// The pull-to-refresh indicator must anchor to the navbar's paint space: the
+// unqualified header rule makes <header> the containing block, and the active
+// indicator must be absolutely positioned just below the header rather than
+// fixed to the viewport (iOS rubber-band overscroll shifts painted positions
+// while layout geometry stays frozen, so a fixed pill drifts above the navbar
+// mid-pull).
+func TestPullIndicatorAnchorsToHeaderPaintSpace(t *testing.T) {
+	css, err := static.FS.ReadFile("app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sheet := string(css)
+
+	// Anchor at a line start so selector fragments like `.thread-header {`
+	// cannot satisfy the search for the unqualified element rule.
+	headerIdx := strings.Index(sheet, "\nheader {")
+	if headerIdx < 0 {
+		t.Fatal("app.css is missing an unqualified header { rule")
+	}
+	headerRule := sheet[headerIdx:]
+	if end := strings.Index(headerRule, "}"); end >= 0 {
+		headerRule = headerRule[:end]
+	}
+	if !strings.Contains(headerRule, "position: relative") {
+		t.Errorf("header must be position: relative so it is the indicator's containing block: %q", headerRule)
+	}
+
+	indicatorIdx := strings.Index(sheet, ".pull-indicator[data-active=\"true\"] {")
+	if indicatorIdx < 0 {
+		t.Fatal("app.css is missing .pull-indicator[data-active=true]")
+	}
+	indicatorRule := sheet[indicatorIdx:]
+	if end := strings.Index(indicatorRule, "}"); end >= 0 {
+		indicatorRule = indicatorRule[:end]
+	}
+	if !strings.Contains(indicatorRule, "position: absolute") {
+		t.Errorf("active pull indicator must be position: absolute (anchored to <header>): %q", indicatorRule)
+	}
+	if !strings.Contains(indicatorRule, "top: 100%") {
+		t.Errorf("active pull indicator must sit at top: 100%% below the header: %q", indicatorRule)
+	}
+	if strings.Contains(indicatorRule, "position: fixed") {
+		t.Errorf("active pull indicator must not be position: fixed (drifts above the navbar during rubber-band overscroll): %q", indicatorRule)
 	}
 }
 

@@ -26,6 +26,7 @@
 html {
   color-scheme: light;
   -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: contain;
 }
 
 body {
@@ -1322,6 +1323,10 @@ h3 {
    line lives inside .results-status, which is hidden below 768px, so the pull
    gesture owns its own indicator here. Hidden on desktop; shown only while a
    pull is in progress (JS sets data-active) or while a refresh is running. */
+header {
+  position: relative;
+}
+
 .pull-indicator {
   display: none;
 }
@@ -2150,13 +2155,17 @@ details.message:not([open]) > .message-header {
     display: none;
   }
 
-  /* Immediate pull feedback at the top of the viewport, under the sticky filter
-     row, so a phone user sees the gesture before release. */
+  /* Immediate pull feedback in the gap that opens between the navbar and the
+     dragged-down content. The indicator lives inside <header>, so with
+     position: absolute it shares the navbar's paint space: iOS rubber-band
+     overscroll shifts painted positions without changing layout geometry, so
+     viewport-fixed placement would drift above the navbar mid-pull. */
   .pull-indicator[data-active="true"] {
     display: block;
-    position: fixed;
+    position: absolute;
     z-index: 40;
-    top: calc(max(0.6rem, env(safe-area-inset-top)) + 2.75rem);
+    top: 100%;
+    margin-top: 0.5rem;
     left: 50%;
     transform: translateX(-50%);
     padding: 0.3rem 0.75rem;
