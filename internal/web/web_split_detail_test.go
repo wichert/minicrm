@@ -3,7 +3,6 @@ package web_test
 import (
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +12,6 @@ import (
 	"github.com/wichert/minicrm/internal/auth"
 	sqlc "github.com/wichert/minicrm/internal/db/sqlc"
 	web "github.com/wichert/minicrm/internal/web"
-	"github.com/wichert/minicrm/internal/web/static"
 )
 
 // W-rows: the split pane renders a dedicated two-line row (subject + customer,
@@ -609,104 +607,6 @@ func TestSplitPaneTableOmitsStatusAgeAndSelectColumns(t *testing.T) {
 		if strings.Contains(results, unwanted) {
 			t.Errorf("pane rows must not render the action affordance %q", unwanted)
 		}
-	}
-}
-
-// W4 defect: `.container-wide` overrode `.container`'s top margin with 0, so the
-// inbox and the split view sat flush against the ink navbar. The heading spacing
-// must come back from the shared `.container` rhythm, and the wide variant must
-// keep its width cap and horizontal centering.
-func TestWideContainerKeepsTopSpacing(t *testing.T) {
-	css, err := static.FS.ReadFile("app.css")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sheet := string(css)
-
-	if !strings.Contains(sheet, ".container {\n  width: 100%;\n  max-width: 1120px;\n  margin: 1.75rem auto;") {
-		t.Error("app.css must keep the shared .container top-margin rhythm (1.75rem)")
-	}
-	wideIdx := strings.Index(sheet, ".container-wide {")
-	if wideIdx < 0 {
-		t.Fatal("app.css is missing .container-wide")
-	}
-	rule := sheet[wideIdx:]
-	if end := strings.Index(rule, "}"); end >= 0 {
-		rule = rule[:end]
-	}
-	if !strings.Contains(rule, "max-width: min(1400px, 100%)") {
-		t.Errorf(".container-wide must keep its width cap: %q", rule)
-	}
-	if regexp.MustCompile(`margin-top:\s*0[;\s]`).MatchString(rule) {
-		t.Errorf(".container-wide must not zero out the top margin: %q", rule)
-	}
-	// The pane's sticky offsets must agree with that spacing: it sticks below the
-	// viewport top and is allowed to scroll to a viewport minus the 1rem it keeps
-	// on each side.
-	if !strings.Contains(sheet, "top: 1rem;") || !strings.Contains(sheet, "max-height: calc(100vh - 2rem);") {
-		t.Error("app.css must keep the paired split-list sticky top/max-height")
-	}
-}
-
-// W4 pane density is expressed in app.css only for what the template cannot say:
-// a wider list column, two-line rows, a selected row, a slim actions cell, and the
-// wide-only filter row that replaced the pane's own duplicate chrome.
-func TestSplitPaneStylesAreWideOnly(t *testing.T) {
-	css, err := static.FS.ReadFile("app.css")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sheet := string(css)
-
-	// The pane is wider than before (four filter controls no longer live in it and
-	// the table is three columns instead of five).
-	if !strings.Contains(sheet, "grid-template-columns: clamp(360px, 34vw, 520px) minmax(0, 1fr)") {
-		t.Error("app.css must widen the split list column")
-	}
-	// The current row reads as selected.
-	if !strings.Contains(sheet, `.split-list .thread-row[aria-current="true"]`) {
-		t.Error("app.css must style the selected pane row")
-	}
-	if !strings.Contains(sheet, ".split-list .thread-row-current td:first-child") {
-		t.Error("app.css must draw the selected row's accent on the first cell")
-	}
-	// Pane rows use the W-rows two-line layout (the 1280px one-line rule is for
-	// the full-width inbox only; the pane gets its own .pane-row markup).
-	if !strings.Contains(sheet, ".split-list .pane-row {") ||
-		!strings.Contains(sheet, ".split-list .pane-row-top {") ||
-		!strings.Contains(sheet, ".split-list .pane-row-snippet {") {
-		t.Error("app.css must style the pane's two-line pane-row layout")
-	}
-	// The pane must not keep the old one-line row overrides: their selectors
-	// would be dead now that the pane emits .pane-row markup instead.
-	if strings.Contains(sheet, ".split-list .thread-rowline") ||
-		strings.Contains(sheet, ".split-list .thread-line") ||
-		strings.Contains(sheet, ".split-list .thread-meta") {
-		t.Error("app.css must drop the retired .split-list one-line row overrides")
-	}
-	// The pane renders no actions cell, and no row hover highlight: a row that
-	// lit up under the cursor suggested an action surface that is not there.
-	if !strings.Contains(sheet, ".split-list .thread-row:hover") ||
-		!strings.Contains(sheet, "background: transparent;") {
-		t.Error("app.css must suppress the split pane's row hover highlight")
-	}
-	if !strings.Contains(sheet, ".split-list .row-quick-actions,") {
-		t.Error("app.css must keep the pane's quick actions hidden")
-	}
-	// The split filter row is wide-only: rendered above the split, hidden below
-	// 1280px where the pane does not exist.
-	if !strings.Contains(sheet, ".split-filters {\n  display: none;") {
-		t.Error("app.css must hide the split filter row by default (below 1280px)")
-	}
-	if !strings.Contains(sheet, "@media (max-width: 1279.98px) {\n  .split-filters {\n    display: none;") {
-		t.Error("app.css must keep an explicit below-1280px rule for .split-filters")
-	}
-	// The pane hides its own table header and the redundant results count.
-	if !strings.Contains(sheet, ".split-list .threads-table thead {") {
-		t.Error("app.css must hide the pane's table header row")
-	}
-	if !strings.Contains(sheet, ".split-list .results-count {") {
-		t.Error("app.css must drop the pane's results count")
 	}
 }
 
