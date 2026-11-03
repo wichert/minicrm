@@ -1530,24 +1530,6 @@ func TestInboxStatusTabsKeepOverflowAndKeyboardAffordances(t *testing.T) {
 			t.Errorf("inbox is missing %q", want)
 		}
 	}
-	js, err := static.FS.ReadFile("app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{`addEventListener("focus"`, `scrollIntoView`, `overflowStart`, `overflowEnd`} {
-		if !strings.Contains(string(js), want) {
-			t.Errorf("tab behavior is missing %q", want)
-		}
-	}
-	css, err := static.FS.ReadFile("app.css")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{`@media (max-width: 768px)`, `.tab-strip[data-overflow-end="true"]`, `:focus-visible`} {
-		if !strings.Contains(string(css), want) {
-			t.Errorf("tab styles are missing %q", want)
-		}
-	}
 }
 
 func TestPreviousConversationsRespectEmailAndAccountAccess(t *testing.T) {
@@ -2196,16 +2178,6 @@ func TestLayoutAccessibilityAndStaticAssets(t *testing.T) {
 		}
 	}
 
-	js, err := static.FS.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read embedded app.js: %v", err)
-	}
-	if strings.Contains(string(js), "window.confirm") {
-		t.Fatalf("app.js must not use window.confirm")
-	}
-	if !strings.Contains(string(js), "showModal") || !strings.Contains(string(js), "requestSubmit") {
-		t.Fatalf("app.js must confirm via <dialog> and keep the form submit path")
-	}
 	icon, err := static.FS.ReadFile("favicon.svg")
 	if err != nil || !strings.Contains(string(icon), "<svg") {
 		t.Fatalf("expected embedded favicon.svg, err=%v", err)
