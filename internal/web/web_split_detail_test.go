@@ -594,8 +594,7 @@ func TestSplitPaneTableOmitsStatusAgeAndSelectColumns(t *testing.T) {
 	if !strings.Contains(pane, `<span class="wait-badge`) {
 		t.Error("pane rows must keep the age inline in the meta line")
 	}
-	// The pane is a reading queue: no row menu, no hover quick actions and no
-	// bulk-select entry. Acting on a thread belongs to the detail page or the
+	// The pane is a reading queue: no row menu and no bulk-select entry. Acting on a thread belongs to the detail page or the
 	// full inbox (/threads), which is one click away. Scope this to the results
 	// table — the pane's "More" tab strip legitimately uses data-row-menu.
 	resultsIdx := strings.Index(pane, `data-inbox-results`)
@@ -603,7 +602,7 @@ func TestSplitPaneTableOmitsStatusAgeAndSelectColumns(t *testing.T) {
 		t.Fatal("pane must render its results region")
 	}
 	results := pane[resultsIdx:]
-	for _, unwanted := range []string{`data-row-menu`, `data-row-select`, `row-quick-complete`, `row-quick-spam`, `class="actions-cell"`, `<th scope="col" class="actions-cell">`} {
+	for _, unwanted := range []string{`data-row-menu`, `data-row-select`, `row-quick-complete`, `row-quick-spam`, `row-quick-actions`, `class="actions-cell"`, `<th scope="col" class="actions-cell">`} {
 		if strings.Contains(results, unwanted) {
 			t.Errorf("pane rows must not render the action affordance %q", unwanted)
 		}

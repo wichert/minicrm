@@ -95,12 +95,13 @@ export function setupKeyboardNav() {
     }
     if (event.key === "c" || event.key === "s") {
       const status = event.key === "c" ? "completed" : "spam";
-      // Prefer the matching quick-action form; the menu forms are equivalent.
+      // Take the first matching transition form in the row (the ⋯ menu forms;
+      // they are equivalent to the former quick-action forms).
       const transitionForms = kbActiveRow.querySelectorAll('form[action$="/transition"]');
       let chosen = null;
       transitionForms.forEach((f) => {
         const input = f.querySelector('input[name="status"]');
-        if (input && input.value === status && (!chosen || f.closest(".row-quick-actions"))) {
+        if (input && input.value === status && !chosen) {
           chosen = f;
         }
       });

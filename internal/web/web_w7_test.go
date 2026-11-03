@@ -15,9 +15,9 @@ import (
 )
 
 // W7 row-menu parity: every open thread's ⋯ menu must carry the Start working
-// shortcut (new only), the per-thread "Assign to…" submenu filtered server-side
-// to active users with access to the thread's own account, and the quick
-// complete/spam buttons.
+// shortcut (new only), Complete, Mark as spam, and the per-thread "Assign to…"
+// submenu filtered server-side to active users with access to the thread's own
+// account.
 func TestRowMenuParityAndAccountFilteredAssignTo(t *testing.T) {
 	_, store, router, multiUser, singleUser := buildAccountTestServer(t)
 	supportID := uuid.New()
@@ -37,8 +37,11 @@ func TestRowMenuParityAndAccountFilteredAssignTo(t *testing.T) {
 	if !strings.Contains(body, "row-menu-submenu") || !strings.Contains(body, "Assign to&hellip;") {
 		t.Error("row menu must offer the Assign to… submenu")
 	}
-	if !strings.Contains(body, "row-quick-complete") || !strings.Contains(body, "row-quick-spam") {
-		t.Error("row menu must offer quick complete/spam buttons")
+	if !strings.Contains(body, `data-confirm-action="Complete thread"`) || !strings.Contains(body, `data-confirm-action="Mark as spam"`) {
+		t.Error("row menu must offer Complete and Mark as spam actions with confirm dialogs")
+	}
+	if !strings.Contains(body, `>Complete<`) || !strings.Contains(body, `>Mark as spam<`) {
+		t.Error("row menu must render Complete and Mark as spam items")
 	}
 	// Submenu entries are per-thread and account-scoped: the multi-account admin
 	// sees both agents on the support thread.
