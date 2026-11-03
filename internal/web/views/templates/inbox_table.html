@@ -74,6 +74,17 @@
                 <button type="submit" class="row-menu-item" aria-label="Start working on {{.Thread.SubjectDisplay}}">Start working</button>
               </form>
               {{end}}
+              <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as completed and move its messages to Archive?" data-confirm-action="Complete thread">
+                <input type="hidden" name="status" value="completed">
+                {{if eq .Thread.Status "new"}}<input type="hidden" name="complete_from_new" value="1">{{end}}
+                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                <button type="submit" class="row-menu-item" aria-label="Complete {{.Thread.SubjectDisplay}}">Complete</button>
+              </form>
+              <form method="post" action="/threads/{{.Thread.ID}}/transition" class="row-menu-form" data-confirm="Mark this conversation as spam and move its messages to Junk?" data-confirm-action="Mark as spam">
+                <input type="hidden" name="status" value="spam">
+                <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
+                <button type="submit" class="row-menu-item row-menu-item-danger" aria-label="Mark {{.Thread.SubjectDisplay}} as spam">Mark as spam</button>
+              </form>
               {{if .CanAssignToMe}}<form method="post" action="/threads/{{.Thread.ID}}/assign" class="row-menu-form">
                 <input type="hidden" name="assignee_id" value="{{$.CurrentUser.ID}}">
                 <input type="hidden" name="return_to" value="{{$.RefreshURL}}">
