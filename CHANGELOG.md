@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.2](https://github.com/wichert/minicrm/compare/v1.5.1...v1.5.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **inbox:** allow focused filters to submit ([#66](https://github.com/wichert/minicrm/issues/66)) ([aeffd0f](https://github.com/wichert/minicrm/commit/aeffd0fc325be2e456ee7ec43fc00349a44ebba7))
+
 ## [1.5.1](https://github.com/wichert/minicrm/compare/v1.5.0...v1.5.1) (2026-11-12)
 
 
