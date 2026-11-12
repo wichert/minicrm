@@ -178,24 +178,27 @@ func TestDevIDMWithRealOIDCProviderAndPKCE(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		clientSecret string
+		claimsOnly   bool
 	}{
 		{name: "confidential client", clientSecret: "minicrm-secret"},
 		{name: "public client without secret", clientSecret: ""},
+		{name: "claims only in userinfo", clientSecret: "", claimsOnly: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			testDevIDMWithRealOIDCProviderAndPKCE(t, tc.clientSecret)
+			testDevIDMWithRealOIDCProviderAndPKCE(t, tc.clientSecret, tc.claimsOnly)
 		})
 	}
 }
 
-func testDevIDMWithRealOIDCProviderAndPKCE(t *testing.T, clientSecret string) {
+func testDevIDMWithRealOIDCProviderAndPKCE(t *testing.T, clientSecret string, claimsOnly bool) {
 	idm, err := devidm.NewServer(devidm.Config{
-		ClientID:     "minicrm-client",
-		ClientSecret: clientSecret,
-		Subject:      "dev-admin-sub",
-		Email:        "admin@example.com",
-		Name:         "Dev Admin",
-		Groups:       []string{"crm-support"},
+		ClientID:          "minicrm-client",
+		ClientSecret:      clientSecret,
+		IDTokenClaimsOnly: claimsOnly,
+		Subject:           "dev-admin-sub",
+		Email:             "admin@example.com",
+		Name:              "Dev Admin",
+		Groups:            []string{"crm-support"},
 	})
 	if err != nil {
 		t.Fatalf("devidm.NewServer: %v", err)

@@ -129,6 +129,8 @@ Because `dev-oidc` implements the real protocol rather than bypassing authentica
 4. **PKCE Verification & ID Token Issuance (`POST /token`)**:
    - Consumes the single-use authorization code, verifies `client_secret` (if configured), and validates the PKCE `code_verifier` (`base64RawURL(sha256(code_verifier)) == code_challenge`). When no client secret is configured the endpoint emulates a public client and rejects requests that send client credentials (`Authorization` header or `client_secret` parameter) with `invalid_client`.
    - Signs an RS256 JWT `id_token` containing the configured fixed user identity (`sub`, `email`, `email_verified: true`, `name`) along with `iss`, `aud`, `iat`, `exp`, and `nonce`.
+5. **UserInfo (`GET /userinfo`)**:
+   - Returns the fixed identity claims (`sub`, `email`, `name`, `groups`) for a valid `Bearer dev-access-token-*` token. MiniCRM consults it when the ID token omits `email` or the groups claim (e.g. Zitadel without "User Info inside ID Token").
 
 ### CLI Flags & Environment Variables for `cmd/dev-oidc`
 
@@ -392,7 +394,7 @@ Each group may contribute one or more values, and values from several groups are
    - **PKCE**: Zitadel requires `S256` for public clients automatically.
 2. **Redirect URIs**: add `https://<your-minicrm-domain>/auth/callback` exactly (scheme, host, port, path must match `MINICRM_OIDC_REDIRECT_URL`). For local development also add `http://127.0.0.1:8080/auth/callback`.
 3. **Post-logout redirect URIs** (optional): `https://<your-minicrm-domain>/`.
-4. Enable **User Info inside ID Token** in the application's token settings. Zitadel does not place `profile`/`email` claims in the ID token by default, and MiniCRM requires the `email` claim in the ID token at login — without this setting the callback fails with `oidc id_token missing email claim`.
+4. (Recommended) Enable **User Info inside ID Token** in the application's token settings so `email`/`name`/roles travel in the ID token. This is optional: when the ID token lacks `email` or the roles claim, MiniCRM automatically fetches them from Zitadel's UserInfo endpoint instead. Enabling the setting avoids the extra round-trip.
 5. Note the **Client ID** shown after creation. No client secret exists for `NONE` clients — this is expected.
 6. Assign users to the project via **Authorizations** (project roles) so they may log in.
 
@@ -448,7 +450,7 @@ MINICRM_ACCOUNT_1_OIDC_GROUP=crm_support
 | Symptom | Cause & fix |
 |---|---|
 | `401 Unauthorized` at callback, Zitadel `invalid_client` | The application is configured with `BASIC`/`POST` authentication (expects a secret). Switch to `NONE` (public client) or configure the issued secret. |
-| `401 Unauthorized` at callback, log `oidc id_token missing email claim` | Enable **User Info inside ID Token** in the Zitadel application token settings (section 7.1). |
+| `401 Unauthorized` at callback, log `oidc id_token missing email claim` | The ID token has no `email` and UserInfo did not supply one either. Enable **User Info inside ID Token** (section 7.1) and ensure the user has an email address; MiniCRM falls back to UserInfo automatically. |
 | Users are logged out when the ID token expires | No refresh token was issued: enable the Refresh Token grant in Zitadel and add `offline_access` to `MINICRM_OIDC_SCOPES`. |
 | `403 Forbidden` / `no_account_access` | The roles claim is missing. Enable role assertion on the application and check `MINICRM_OIDC_GROUPS_CLAIM` matches `urn:zitadel:iam:org:project:roles`; verify roles are granted via project Authorizations. |
 | MiniCRM refuses to start: `MINICRM_SESSION_ENCRYPTION_KEY is required ...` | Set `MINICRM_SESSION_ENCRYPTION_KEY` — mandatory when no client secret is configured. |
