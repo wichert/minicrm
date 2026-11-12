@@ -216,7 +216,7 @@ func (p *OIDCProvider) ExchangeAndVerify(ctx context.Context, code, codeVerifier
 	if idToken.Nonce != expectedNonce {
 		return nil, errors.New("oidc id_token nonce mismatch")
 	}
-	identity, err := p.parseVerifiedIdentity(idToken)
+	identity, err := p.parseVerifiedIdentity(ctx, idToken, token)
 	if err != nil {
 		return nil, err
 	}
@@ -277,13 +277,41 @@ func (p *OIDCProvider) RefreshAndVerify(ctx context.Context, refreshToken string
 	return res, nil
 }
 
-func (p *OIDCProvider) parseVerifiedIdentity(idToken *oidc.IDToken) (*VerifiedIdentity, error) {
+func (p *OIDCProvider) parseVerifiedIdentity(ctx context.Context, idToken *oidc.IDToken, token *oauth2.Token) (*VerifiedIdentity, error) {
 	var claims map[string]any
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("parse oidc claims: %w", err)
 	}
 	email, _ := claims["email"].(string)
 	name, _ := claims["name"].(string)
+	groups := ExtractGroups(claims[p.groupsClaim])
+
+	// Some providers (e.g. Zitadel by default) only expose email/profile/groups via
+	// UserInfo, not in the ID token. Fetch them there when missing.
+	if p.provider != nil && token != nil && token.AccessToken != "" &&
+		(strings.TrimSpace(email) == "" || groups == nil) {
+		ui, err := p.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
+		if err != nil {
+			return nil, fmt.Errorf("fetch oidc userinfo: %w", err)
+		}
+		if ui.Subject != "" && ui.Subject != idToken.Subject {
+			return nil, ErrOIDCSubjectMismatch
+		}
+		var uiClaims map[string]any
+		if err := ui.Claims(&uiClaims); err != nil {
+			return nil, fmt.Errorf("parse oidc userinfo claims: %w", err)
+		}
+		if strings.TrimSpace(email) == "" {
+			email, _ = uiClaims["email"].(string)
+		}
+		if strings.TrimSpace(name) == "" {
+			name, _ = uiClaims["name"].(string)
+		}
+		if groups == nil {
+			groups = ExtractGroups(uiClaims[p.groupsClaim])
+		}
+	}
+
 	if strings.TrimSpace(email) == "" {
 		return nil, errors.New("oidc id_token missing email claim")
 	}
@@ -295,7 +323,7 @@ func (p *OIDCProvider) parseVerifiedIdentity(idToken *oidc.IDToken) (*VerifiedId
 		Subject:       idToken.Subject,
 		Email:         strings.TrimSpace(email),
 		Name:          displayName,
-		Groups:        ExtractGroups(claims[p.groupsClaim]),
+		Groups:        groups,
 		GroupsPresent: true,
 	}, nil
 }

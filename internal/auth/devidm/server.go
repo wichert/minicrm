@@ -33,6 +33,9 @@ type Config struct {
 	Name         string
 	// Groups are emitted in the ID token under the "groups" claim.
 	Groups []string
+	// IDTokenClaimsOnly limits the ID token to standard claims (no email/name/groups),
+	// like Zitadel without "User Info inside ID Token". UserInfo then serves them.
+	IDTokenClaimsOnly bool
 }
 
 type authCodeEntry struct {
@@ -122,6 +125,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /jwks", s.handleJWKS)
 	mux.HandleFunc("GET /authorize", s.handleAuthorize)
 	mux.HandleFunc("POST /token", s.handleToken)
+	mux.HandleFunc("GET /userinfo", s.handleUserInfo)
 	return mux
 }
 
@@ -136,6 +140,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"authorization_endpoint":                issuer + "/authorize",
 		"token_endpoint":                        issuer + "/token",
 		"jwks_uri":                              issuer + "/jwks",
+		"userinfo_endpoint":                     issuer + "/userinfo",
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
@@ -273,6 +278,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		Name:          cfg.Name,
 		Groups:        cfg.Groups,
 	}
+	if cfg.IDTokenClaimsOnly {
+		claims.Email = ""
+		claims.Name = ""
+		claims.Groups = nil
+	}
 
 	rawIDToken, err := jwt.Signed(s.signer).Claims(claims).Serialize()
 	if err != nil {
@@ -285,6 +295,24 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		"token_type":   "Bearer",
 		"expires_in":   3600,
 		"id_token":     rawIDToken,
+	})
+}
+
+func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, "Bearer ") || !strings.HasPrefix(strings.TrimPrefix(authz, "Bearer "), "dev-access-token-") {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+		return
+	}
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sub":            cfg.Subject,
+		"email":          cfg.Email,
+		"email_verified": true,
+		"name":           cfg.Name,
+		"groups":         cfg.Groups,
 	})
 }
 
