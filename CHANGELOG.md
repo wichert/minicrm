@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0](https://github.com/wichert/minicrm/compare/v1.4.0...v1.5.0) (2026-11-12)
+
+
+### Features
+
+* **auth:** fall back to UserInfo for missing ID-token claims ([#58](https://github.com/wichert/minicrm/issues/58)) ([868d099](https://github.com/wichert/minicrm/commit/868d099930c5b3839370580bde5132d75fa6ea30))
+* **auth:** support public OIDC clients with PKCE-only authentication ([#57](https://github.com/wichert/minicrm/issues/57)) ([1b3df93](https://github.com/wichert/minicrm/commit/1b3df933936b36807b3c5cd17df4b585c4847e55))
+
 ## [1.4.0](https://github.com/wichert/minicrm/compare/v1.3.0...v1.4.0) (2026-11-03)
 
 
