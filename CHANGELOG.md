@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/wichert/minicrm/compare/v1.5.0...v1.5.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **auth:** log claims on oidc callback ([#64](https://github.com/wichert/minicrm/issues/64)) ([a35eb23](https://github.com/wichert/minicrm/commit/a35eb234ee1fa1df235c03495cd4ac2cf73335cc))
+
 ## [1.5.0](https://github.com/wichert/minicrm/compare/v1.4.0...v1.5.0) (2026-11-12)
 
 
