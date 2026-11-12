@@ -1,10 +1,65 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { pullTransform, setupPullToRefresh } from "../src/inbox-refresh.js";
+import { pullTransform, setupInboxAutoRefresh, setupPullToRefresh } from "../src/inbox-refresh.js";
 
 /* The pull gesture must never move the navbar. These tests pin the two pieces
    that make that true: the damped/capped transform helper, and the fact that
    setupPullToRefresh writes that transform to the content wrapper only, while
    leaving the indicator's position entirely to CSS paint space. */
+
+describe("setupInboxAutoRefresh", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    window.htmx = {};
+    document.body.innerHTML = `
+      <form>
+        <select name="account" hx-get="/threads/partial" hx-target="#inbox-results-region">
+          <option value="">All accounts</option>
+          <option value="support">Support</option>
+        </select>
+      </form>
+      <div data-inbox-results id="inbox-results-region" hx-get="/threads/partial"></div>`;
+  });
+
+  afterEach(() => {
+    delete window.htmx;
+    document.body.innerHTML = "";
+    vi.useRealTimers();
+  });
+
+  function beforeRequest(elt) {
+    const event = new CustomEvent("htmx:beforeRequest", {
+      bubbles: true,
+      cancelable: true,
+      detail: { elt, target: document.querySelector("[data-inbox-results]") },
+    });
+    elt.dispatchEvent(event);
+    return event;
+  }
+
+  it("allows a focused filter select's own htmx request", () => {
+    setupInboxAutoRefresh();
+    const select = document.querySelector("select[name=account]");
+    select.focus();
+
+    expect(beforeRequest(select).defaultPrevented).toBe(false);
+  });
+
+  it("still pauses polling while a filter select has focus", () => {
+    setupInboxAutoRefresh();
+    document.querySelector("select[name=account]").focus();
+
+    expect(beforeRequest(document.querySelector("[data-inbox-results]")).defaultPrevented).toBe(true);
+  });
+
+  it("keeps unrelated pause guards for filter requests", () => {
+    document.body.insertAdjacentHTML("beforeend", "<dialog open></dialog>");
+    setupInboxAutoRefresh();
+    const select = document.querySelector("select[name=account]");
+    select.focus();
+
+    expect(beforeRequest(select).defaultPrevented).toBe(true);
+  });
+});
 
 describe("pullTransform", () => {
   it("applies 0.4 damping and caps the content shift at 120px", () => {
