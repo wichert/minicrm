@@ -295,7 +295,7 @@ func (p *OIDCProvider) parseVerifiedIdentity(idToken *oidc.IDToken) (*VerifiedId
 		Subject:       idToken.Subject,
 		Email:         strings.TrimSpace(email),
 		Name:          displayName,
-		Groups:        extractGroups(claims[p.groupsClaim]),
+		Groups:        ExtractGroups(claims[p.groupsClaim]),
 		GroupsPresent: true,
 	}, nil
 }
@@ -315,7 +315,7 @@ func (p *OIDCProvider) parseRefreshedIdentity(ctx context.Context, idToken *oidc
 	email, _ := claims["email"].(string)
 	name, _ := claims["name"].(string)
 	rawGroups, groupsPresent := claims[p.groupsClaim]
-	groups := extractGroups(rawGroups)
+	groups := ExtractGroups(rawGroups)
 
 	if !groupsPresent && p.provider != nil && token != nil && token.AccessToken != "" {
 		ui, err := p.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
@@ -335,7 +335,7 @@ func (p *OIDCProvider) parseRefreshedIdentity(ctx context.Context, idToken *oidc
 			return nil, NewPermanentAuthError(fmt.Errorf("parse oidc userinfo claims: %w", err))
 		}
 		if rawUIGroups, ok := uiClaims[p.groupsClaim]; ok {
-			groups = extractGroups(rawUIGroups)
+			groups = ExtractGroups(rawUIGroups)
 			groupsPresent = true
 		}
 		if strings.TrimSpace(name) == "" {
@@ -355,9 +355,11 @@ func (p *OIDCProvider) parseRefreshedIdentity(ctx context.Context, idToken *oidc
 	}, nil
 }
 
-// extractGroups normalizes a groups/roles claim value into a string slice.
-// OIDC providers may emit either a JSON array of strings or a single string.
-func extractGroups(raw any) []string {
+// ExtractGroups normalizes a groups/roles claim value into a string slice.
+// OIDC providers may emit a JSON array of strings, a single string, or — like
+// Zitadel's urn:zitadel:iam:org:project:roles claim — an object whose keys are
+// the role names (values are ignored).
+func ExtractGroups(raw any) []string {
 	switch v := raw.(type) {
 	case []any:
 		groups := make([]string, 0, len(v))
@@ -374,6 +376,15 @@ func extractGroups(raw any) []string {
 			return nil
 		}
 		return []string{strings.TrimSpace(v)}
+	case map[string]any:
+		groups := make([]string, 0, len(v))
+		for role := range v {
+			if strings.TrimSpace(role) != "" {
+				groups = append(groups, strings.TrimSpace(role))
+			}
+		}
+		slices.Sort(groups) // map iteration order is random; keep account resolution deterministic
+		return groups
 	default:
 		return nil
 	}

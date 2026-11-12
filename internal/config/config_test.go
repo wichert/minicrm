@@ -67,6 +67,31 @@ func TestLoadValidConfig(t *testing.T) {
 	}
 }
 
+func TestLoadPublicPKCEClientWithoutSecret(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("MINICRM_OIDC_CLIENT_SECRET", "")
+	t.Setenv("MINICRM_SESSION_ENCRYPTION_KEY", "stable-session-key")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("expected public PKCE client config to load, got error: %v", err)
+	}
+	if cfg.OIDCClientSecret != "" {
+		t.Fatalf("got client secret %q, want empty", cfg.OIDCClientSecret)
+	}
+}
+
+func TestLoadPublicPKCEClientRequiresSessionEncryptionKey(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("MINICRM_OIDC_CLIENT_SECRET", "")
+	t.Setenv("MINICRM_SESSION_ENCRYPTION_KEY", "")
+
+	_, err := config.Load()
+	if err == nil || !strings.Contains(err.Error(), "MINICRM_SESSION_ENCRYPTION_KEY") {
+		t.Fatalf("expected session encryption key error, got %v", err)
+	}
+}
+
 func TestLoadTwoAccounts(t *testing.T) {
 	setRequiredEnv(t)
 	setAccountEnv(t, 2, "sales")

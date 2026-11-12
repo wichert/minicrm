@@ -72,7 +72,7 @@ MiniCRM is configured via environment variables:
 | `MINICRM_APP_DESCRIPTION` | No | `Lightweight multi-account email CRM` | Per-instance description advertised in `/manifest.webmanifest` |
 | `MINICRM_SESSION_LIFETIME` | No | `168h` | Default session lifetime when the OIDC provider does not issue a refresh token with an explicit expiry |
 | `MINICRM_SESSION_IDLE_TIMEOUT` | No | `0s` | Optional session inactivity timeout (`0s` disables idle expiry so session lifetime aligns with the OAuth2 refresh token) |
-| `MINICRM_SESSION_ENCRYPTION_KEY` | No | — | Secret key material used (via HKDF-SHA256) to encrypt OAuth2 refresh tokens at rest with AES-256-GCM; falls back to `MINICRM_OIDC_CLIENT_SECRET` when unset |
+| `MINICRM_SESSION_ENCRYPTION_KEY` | No | — | Secret key material used (via HKDF-SHA256) to encrypt OAuth2 refresh tokens at rest with AES-256-GCM; falls back to `MINICRM_OIDC_CLIENT_SECRET` when unset. **Required** when no client secret is configured (public PKCE client) |
 | `MINICRM_OIDC_GROUPS_CLAIM` | No | `groups` | ID token claim carrying the user's group/role memberships |
 | `MINICRM_OIDC_SCOPES` | No | `openid,profile,email` | Comma-separated scopes requested from the IdP; must include `openid`. Add `groups`/`groups_name` when the IdP (e.g. Kanidm) only emits groups on request |
 | `MINICRM_ACCOUNT_<N>_ID` | **Yes** | — | Unique account identifier for account `N` (e.g. `support`). Accounts are numbered from `1` upwards until an `_ID` is absent |
@@ -96,7 +96,7 @@ MiniCRM is configured via environment variables:
 > **Mail server requirement:** MiniCRM also reads each account's `Sent` folder (after `INBOX`) so replies sent from other mail clients appear in the thread. MiniCRM's own replies are de-duplicated by `Message-ID`, so the SMTP server must preserve the `Message-ID` MiniCRM sets, and any copy stored in `Sent` must carry the same one. See [`docs/imap.md`](./docs/imap.md).
 | `MINICRM_OIDC_ISSUER_URL` | **Yes** | — | OIDC issuer URL (must serve `.well-known/openid-configuration`). For Kanidm this is `https://<host>/oauth2/openid/<client>` |
 | `MINICRM_OIDC_CLIENT_ID` | **Yes** | — | OAuth2 client ID |
-| `MINICRM_OIDC_CLIENT_SECRET` | **Yes** | — | OAuth2 client secret |
+| `MINICRM_OIDC_CLIENT_SECRET` | No | — | OAuth2 client secret. Leave unset for public PKCE-only clients (e.g. Zitadel); `MINICRM_SESSION_ENCRYPTION_KEY` is then required |
 | `MINICRM_OIDC_REDIRECT_URL` | **Yes** | — | OIDC callback URL (e.g. `https://crm.example.com/auth/callback`) |
 
 ### Example: Two Mail Accounts

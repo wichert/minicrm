@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -379,6 +380,30 @@ func TestLoginCallbackWithoutAccountAccessReturns403(t *testing.T) {
 	handler.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusForbidden {
 		t.Fatalf("got status %d, want 403", rec2.Code)
+	}
+}
+
+func TestExtractGroups(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  any
+		want []string
+	}{
+		{name: "nil", raw: nil, want: nil},
+		{name: "string", raw: "crm-support", want: []string{"crm-support"}},
+		{name: "array", raw: []any{"crm-support", " crm-sales ", 42}, want: []string{"crm-support", "crm-sales"}},
+		{name: "zitadel roles object", raw: map[string]any{
+			"crm-sales":   map[string]any{"org": "example"},
+			"crm-support": map[string]any{"org": "example"},
+		}, want: []string{"crm-sales", "crm-support"}},
+		{name: "empty object", raw: map[string]any{}, want: []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := auth.ExtractGroups(tc.raw); !slices.Equal(got, tc.want) {
+				t.Fatalf("ExtractGroups(%v) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
 	}
 }
 
