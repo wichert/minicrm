@@ -22,8 +22,11 @@ import (
 
 // Config holds the configuration for the dummy OIDC identity server.
 type Config struct {
-	IssuerURL    string
-	ClientID     string
+	IssuerURL string
+	ClientID  string
+	// ClientSecret enables confidential-client authentication when set. When empty the
+	// server emulates a public client: discovery advertises token endpoint auth method
+	// "none" and any client credentials sent to /token are rejected.
 	ClientSecret string
 	Subject      string
 	Email        string
@@ -124,6 +127,10 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	issuer := s.IssuerURL()
+	authMethods := []string{"none"}
+	if s.cfg.ClientSecret != "" {
+		authMethods = []string{"client_secret_basic", "client_secret_post"}
+	}
 	doc := map[string]any{
 		"issuer":                                issuer,
 		"authorization_endpoint":                issuer + "/authorize",
@@ -134,7 +141,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email", "groups"},
 		"claims_supported":                      []string{"iss", "sub", "aud", "iat", "exp", "nonce", "email", "email_verified", "name", "groups"},
-		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
+		"token_endpoint_auth_methods_supported": authMethods,
 		"code_challenge_methods_supported":      []string{"S256"},
 	}
 	writeJSON(w, http.StatusOK, doc)
@@ -227,6 +234,14 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if !hasBasic {
 		clientID = strings.TrimSpace(r.FormValue("client_id"))
 		clientSecret = r.FormValue("client_secret")
+	}
+
+	if s.cfg.ClientSecret == "" && (hasBasic || clientSecret != "") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error":             "invalid_client",
+			"error_description": "public client (token_endpoint_auth_method none) must not send client credentials",
+		})
+		return
 	}
 
 	entry, cfg, err := s.consumeAuthCode(code, clientID, clientSecret, codeVerifier)

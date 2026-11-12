@@ -2,10 +2,12 @@ package devidm_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -109,6 +111,67 @@ func (m *memStore) InsertAuditLog(_ context.Context, entry sqlc.AuditLog) error 
 func (m *memStore) InsertThreadEvent(_ context.Context, ev sqlc.ThreadEvent) error {
 	m.threadLogs = append(m.threadLogs, ev)
 	return nil
+}
+
+func TestDevIDMPublicClientRejectsClientCredentials(t *testing.T) {
+	idm, err := devidm.NewServer(devidm.Config{ClientID: "minicrm-client"})
+	if err != nil {
+		t.Fatalf("devidm.NewServer: %v", err)
+	}
+	idmSrv := httptest.NewServer(idm.Handler())
+	defer idmSrv.Close()
+	idm.SetIssuerURL(idmSrv.URL)
+
+	resp, err := http.Get(idmSrv.URL + "/.well-known/openid-configuration")
+	if err != nil {
+		t.Fatalf("GET discovery: %v", err)
+	}
+	var discovery struct {
+		AuthMethods []string `json:"token_endpoint_auth_methods_supported"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&discovery)
+	resp.Body.Close()
+	if len(discovery.AuthMethods) != 1 || discovery.AuthMethods[0] != "none" {
+		t.Fatalf("public client discovery auth methods = %v, want [none]", discovery.AuthMethods)
+	}
+
+	// A client that still sends a client_secret (form or HTTP Basic) must be rejected.
+	for _, tc := range []struct {
+		name  string
+		basic bool
+	}{
+		{name: "form client_secret"},
+		{name: "http basic", basic: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			form := url.Values{
+				"grant_type":   {"authorization_code"},
+				"code":         {"any-code"},
+				"client_id":    {"minicrm-client"},
+				"redirect_uri": {"http://127.0.0.1/callback"},
+			}
+			if !tc.basic {
+				form.Set("client_secret", "unexpected-secret")
+			}
+			req, _ := http.NewRequest(http.MethodPost, idmSrv.URL+"/token", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if tc.basic {
+				req.SetBasicAuth("minicrm-client", "unexpected-secret")
+			}
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST /token: %v", err)
+			}
+			defer res.Body.Close()
+			var body struct {
+				Error string `json:"error"`
+			}
+			_ = json.NewDecoder(res.Body).Decode(&body)
+			if body.Error != "invalid_client" {
+				t.Fatalf("public client with credentials: got error %q, want invalid_client", body.Error)
+			}
+		})
+	}
 }
 
 func TestDevIDMWithRealOIDCProviderAndPKCE(t *testing.T) {

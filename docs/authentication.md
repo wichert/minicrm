@@ -122,12 +122,12 @@ Because `dev-oidc` implements the real protocol rather than bypassing authentica
 1. **Ephemeral RSA Signing Key**:
    - On startup, `devidm.NewServer` generates a 2048-bit RSA keypair in memory (`kid = "dev-key-1"`, `alg = "RS256"`) and exposes the public key at `GET /jwks`.
 2. **Discovery (`GET /.well-known/openid-configuration`)**:
-   - Returns the standard OIDC metadata JSON pointing to `{issuer}/authorize`, `{issuer}/token`, and `{issuer}/jwks`.
+   - Returns the standard OIDC metadata JSON pointing to `{issuer}/authorize`, `{issuer}/token`, and `{issuer}/jwks`. Advertises `token_endpoint_auth_methods_supported: ["none"]` when no client secret is configured (public client), otherwise `["client_secret_basic", "client_secret_post"]`.
 3. **Zero-Click Authorization (`GET /authorize`)**:
    - Validates `client_id` (if `-client-id` is configured), `redirect_uri`, and `code_challenge_method=S256`.
    - Generates a single-use cryptographic authorization code bound to `{clientID, redirectURI, nonce, codeChallenge}` (5-minute TTL) and immediately responds with `302 Found` redirecting back to `redirect_uri?code=<code>&state=<state>`.
 4. **PKCE Verification & ID Token Issuance (`POST /token`)**:
-   - Consumes the single-use authorization code, verifies `client_secret` (if configured), and validates the PKCE `code_verifier` (`base64RawURL(sha256(code_verifier)) == code_challenge`).
+   - Consumes the single-use authorization code, verifies `client_secret` (if configured), and validates the PKCE `code_verifier` (`base64RawURL(sha256(code_verifier)) == code_challenge`). When no client secret is configured the endpoint emulates a public client and rejects requests that send client credentials (`Authorization` header or `client_secret` parameter) with `invalid_client`.
    - Signs an RS256 JWT `id_token` containing the configured fixed user identity (`sub`, `email`, `email_verified: true`, `name`) along with `iss`, `aud`, `iat`, `exp`, and `nonce`.
 
 ### CLI Flags & Environment Variables for `cmd/dev-oidc`
@@ -137,7 +137,7 @@ Because `dev-oidc` implements the real protocol rather than bypassing authentica
 | `-addr` | `DEV_OIDC_ADDR` | `127.0.0.1:9000` | TCP address for the dummy OIDC HTTP server to listen on. |
 | `-issuer` | `DEV_OIDC_ISSUER_URL` | `http://<addr>` | Public issuer URL placed in discovery metadata and the `iss` JWT claim. |
 | `-client-id` | `DEV_OIDC_CLIENT_ID` | *(empty — accepts any)* | Optional expected OAuth2 `client_id`. |
-| `-client-secret` | `DEV_OIDC_CLIENT_SECRET` | *(empty — accepts any)* | Optional expected OAuth2 `client_secret`. |
+| `-client-secret` | `DEV_OIDC_CLIENT_SECRET` | *(empty — public client)* | Optional expected OAuth2 `client_secret`. Leave empty for a public client: discovery then advertises auth method `none` and `/token` rejects any client credentials. |
 | `-sub` | `DEV_OIDC_SUB` | `dev-admin-sub` | Fixed `sub` claim returned in the signed ID Token. |
 | `-email` | `DEV_OIDC_EMAIL` | `admin@example.com` | Fixed `email` claim returned in the signed ID Token. |
 | `-name` | `DEV_OIDC_NAME` | `Dev Admin` | Fixed `name` claim returned in the signed ID Token. |
@@ -388,12 +388,13 @@ Each group may contribute one or more values, and values from several groups are
 1. In your Zitadel project, create a new **Application**:
    - **Type**: `Web` (server-side web application).
    - **Authentication method**: `NONE` (public client). Do **not** choose `BASIC`/`POST` — those issue a client secret. (`Native`/`USER_AGENT` also works if you prefer a fully public client profile.)
-   - **Grant types**: `Authorization Code` (enable `Refresh Token` as well if you want long-lived sessions; MiniCRM uses refresh tokens to keep sessions alive).
+   - **Grant types**: `Authorization Code` (enable `Refresh Token` as well if you want long-lived sessions; MiniCRM uses refresh tokens to keep sessions alive — also add the `offline_access` scope, see below).
    - **PKCE**: Zitadel requires `S256` for public clients automatically.
 2. **Redirect URIs**: add `https://<your-minicrm-domain>/auth/callback` exactly (scheme, host, port, path must match `MINICRM_OIDC_REDIRECT_URL`). For local development also add `http://127.0.0.1:8080/auth/callback`.
 3. **Post-logout redirect URIs** (optional): `https://<your-minicrm-domain>/`.
-4. Note the **Client ID** shown after creation. No client secret exists for `NONE` clients — this is expected.
-5. Assign users to the project via **Authorizations** (project roles) so they may log in.
+4. Enable **User Info inside ID Token** in the application's token settings. Zitadel does not place `profile`/`email` claims in the ID token by default, and MiniCRM requires the `email` claim in the ID token at login — without this setting the callback fails with `oidc id_token missing email claim`.
+5. Note the **Client ID** shown after creation. No client secret exists for `NONE` clients — this is expected.
+6. Assign users to the project via **Authorizations** (project roles) so they may log in.
 
 ### 7.2 Expose group/role membership to MiniCRM
 
@@ -424,7 +425,10 @@ MINICRM_OIDC_REDIRECT_URL=https://crm.example.com/auth/callback
 # Generate once and keep stable, e.g.: openssl rand -base64 32
 MINICRM_SESSION_ENCRYPTION_KEY=<stable random secret>
 
-MINICRM_OIDC_SCOPES=openid,profile,email
+# openid,profile,email are sufficient for login. Add offline_access AND enable the
+# Refresh Token grant in Zitadel if you want long-lived sessions (Zitadel only
+# issues refresh tokens when both are present).
+MINICRM_OIDC_SCOPES=openid,profile,email,offline_access
 MINICRM_OIDC_GROUPS_CLAIM=urn:zitadel:iam:org:project:roles
 
 MINICRM_BOOTSTRAP_ADMIN_EMAIL=alice@example.com
@@ -444,6 +448,8 @@ MINICRM_ACCOUNT_1_OIDC_GROUP=crm_support
 | Symptom | Cause & fix |
 |---|---|
 | `401 Unauthorized` at callback, Zitadel `invalid_client` | The application is configured with `BASIC`/`POST` authentication (expects a secret). Switch to `NONE` (public client) or configure the issued secret. |
+| `401 Unauthorized` at callback, log `oidc id_token missing email claim` | Enable **User Info inside ID Token** in the Zitadel application token settings (section 7.1). |
+| Users are logged out when the ID token expires | No refresh token was issued: enable the Refresh Token grant in Zitadel and add `offline_access` to `MINICRM_OIDC_SCOPES`. |
 | `403 Forbidden` / `no_account_access` | The roles claim is missing. Enable role assertion on the application and check `MINICRM_OIDC_GROUPS_CLAIM` matches `urn:zitadel:iam:org:project:roles`; verify roles are granted via project Authorizations. |
 | MiniCRM refuses to start: `MINICRM_SESSION_ENCRYPTION_KEY is required ...` | Set `MINICRM_SESSION_ENCRYPTION_KEY` — mandatory when no client secret is configured. |
 | `invalid oauth2 state` after redirect back | Redirect URI mismatch between Zitadel and `MINICRM_OIDC_REDIRECT_URL` (must match exactly). |
