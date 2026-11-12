@@ -112,9 +112,23 @@ func (m *memStore) InsertThreadEvent(_ context.Context, ev sqlc.ThreadEvent) err
 }
 
 func TestDevIDMWithRealOIDCProviderAndPKCE(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		clientSecret string
+	}{
+		{name: "confidential client", clientSecret: "minicrm-secret"},
+		{name: "public client without secret", clientSecret: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testDevIDMWithRealOIDCProviderAndPKCE(t, tc.clientSecret)
+		})
+	}
+}
+
+func testDevIDMWithRealOIDCProviderAndPKCE(t *testing.T, clientSecret string) {
 	idm, err := devidm.NewServer(devidm.Config{
 		ClientID:     "minicrm-client",
-		ClientSecret: "minicrm-secret",
+		ClientSecret: clientSecret,
 		Subject:      "dev-admin-sub",
 		Email:        "admin@example.com",
 		Name:         "Dev Admin",
@@ -141,7 +155,7 @@ func TestDevIDMWithRealOIDCProviderAndPKCE(t *testing.T) {
 		ctx,
 		idmSrv.URL,
 		"minicrm-client",
-		"minicrm-secret",
+		clientSecret,
 		appSrv.URL+"/auth/callback",
 		"groups",
 		[]string{"openid", "profile", "email", "groups"},

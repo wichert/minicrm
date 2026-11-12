@@ -78,9 +78,10 @@ type Config struct {
 	Accounts []MailAccountConfig `env:"-"`
 
 	// OAuth2 / OIDC Identity Server configuration
-	OIDCIssuerURL    string `env:"MINICRM_OIDC_ISSUER_URL,required"`
-	OIDCClientID     string `env:"MINICRM_OIDC_CLIENT_ID,required"`
-	OIDCClientSecret string `env:"MINICRM_OIDC_CLIENT_SECRET,required"`
+	OIDCIssuerURL string `env:"MINICRM_OIDC_ISSUER_URL,required"`
+	OIDCClientID  string `env:"MINICRM_OIDC_CLIENT_ID,required"`
+	// OIDCClientSecret is optional: public clients authenticate with PKCE (S256) only.
+	OIDCClientSecret string `env:"MINICRM_OIDC_CLIENT_SECRET"`
 	OIDCRedirectURL  string `env:"MINICRM_OIDC_REDIRECT_URL,required"`
 	// OIDCGroupsClaim names the ID token claim carrying the user's group memberships.
 	OIDCGroupsClaim string `env:"MINICRM_OIDC_GROUPS_CLAIM" envDefault:"groups"`
@@ -150,6 +151,11 @@ func (c *Config) Validate() error {
 	}
 	if c.SessionIdleTimeout > c.SessionLifetime {
 		return errors.New("MINICRM_SESSION_IDLE_TIMEOUT must not exceed MINICRM_SESSION_LIFETIME")
+	}
+	// Without a client secret (public PKCE client) a stable encryption key is the only
+	// way to keep stored refresh tokens decryptable across restarts.
+	if strings.TrimSpace(c.OIDCClientSecret) == "" && strings.TrimSpace(c.SessionEncryptionKey) == "" {
+		return errors.New("MINICRM_SESSION_ENCRYPTION_KEY is required when MINICRM_OIDC_CLIENT_SECRET is unset (public PKCE client)")
 	}
 	if c.DisplayTimezone == "" {
 		return errors.New("display timezone must not be empty")

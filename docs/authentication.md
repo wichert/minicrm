@@ -35,13 +35,15 @@ In your identity server, create a confidential OAuth2/OIDC client with:
 - **Scopes**: `openid`, `profile`, `email`, plus your groups scope (e.g. `groups` or `groups_name`)
 - **Token signing**: `RS256` or `ES256` (MiniCRM verifies both via OIDC discovery / JWKS)
 
+**Public clients (no client secret)** are also supported: because MiniCRM always uses PKCE (`S256`), the client secret can be omitted entirely. Register the application as a *public* client (e.g. Zitadel "Native"/`USER_AGENT` or "Web" with `NONE` authentication) with PKCE required, leave `MINICRM_OIDC_CLIENT_SECRET` unset, and set `MINICRM_SESSION_ENCRYPTION_KEY` to a stable random secret (required in this mode so encrypted refresh tokens survive restarts). Confidential clients may keep using a secret; PKCE is always sent either way.
+
 ### MiniCRM OIDC Environment Variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `MINICRM_OIDC_ISSUER_URL` | **Yes** | — | Exact issuer URL of the OIDC provider (must match the `iss` claim in ID tokens and serve `/.well-known/openid-configuration`). |
 | `MINICRM_OIDC_CLIENT_ID` | **Yes** | — | OAuth2 Client ID registered in the IdP. |
-| `MINICRM_OIDC_CLIENT_SECRET` | **Yes** | — | OAuth2 Client Secret registered in the IdP. |
+| `MINICRM_OIDC_CLIENT_SECRET` | No | — | OAuth2 Client Secret registered in the IdP. Leave unset for public PKCE-only clients (e.g. Zitadel); `MINICRM_SESSION_ENCRYPTION_KEY` is then required. |
 | `MINICRM_OIDC_REDIRECT_URL` | **Yes** | — | Full callback URL pointing to MiniCRM's `/auth/callback` endpoint. |
 | `MINICRM_OIDC_GROUPS_CLAIM` | No | `groups` | ID token claim holding the user's group/role memberships; used to derive mail account access. |
 | `MINICRM_OIDC_SCOPES` | No | `openid,profile,email` | Comma-separated scopes requested from the IdP. Must include `openid`. Add `groups`/`groups_name` (Kanidm) so group membership is returned. |
@@ -51,7 +53,7 @@ In your identity server, create a confidential OAuth2/OIDC client with:
 | `MINICRM_COOKIE_SECURE` | No | `true` | When `true` (default), session cookies use the `__Host-minicrm_session` name, `Secure`, `HttpOnly`, and `SameSite=Lax`. Set to `false` only for plain `http://localhost` development. |
 | `MINICRM_SESSION_LIFETIME` | No | `168h` | Default session lifetime when the OIDC provider does not issue a refresh token with an explicit expiry. |
 | `MINICRM_SESSION_IDLE_TIMEOUT` | No | `0s` | Optional session inactivity timeout (`0s` disables idle expiry so session lifetime aligns with the OAuth2 refresh token). |
-| `MINICRM_SESSION_ENCRYPTION_KEY` | No | — | Key material used (via HKDF-SHA256) to encrypt OAuth2 refresh tokens at rest with AES-256-GCM; falls back to `MINICRM_OIDC_CLIENT_SECRET` when unset. |
+| `MINICRM_SESSION_ENCRYPTION_KEY` | No | — | Key material used (via HKDF-SHA256) to encrypt OAuth2 refresh tokens at rest with AES-256-GCM; falls back to `MINICRM_OIDC_CLIENT_SECRET` when unset. **Required** when no client secret is configured (public PKCE client). |
 
 ---
 
@@ -377,7 +379,78 @@ Each group may contribute one or more values, and values from several groups are
 
 ---
 
-## 7. Other Providers
+## 7. Zitadel Setup (Public Client, PKCE without Client Secret)
+
+[Zitadel](https://zitadel.com) supports public OIDC clients that authenticate solely with PKCE (`S256`) — no client secret is generated or required. MiniCRM works with such an application out of the box.
+
+### 7.1 Create the application in Zitadel
+
+1. In your Zitadel project, create a new **Application**:
+   - **Type**: `Web` (server-side web application).
+   - **Authentication method**: `NONE` (public client). Do **not** choose `BASIC`/`POST` — those issue a client secret. (`Native`/`USER_AGENT` also works if you prefer a fully public client profile.)
+   - **Grant types**: `Authorization Code` (enable `Refresh Token` as well if you want long-lived sessions; MiniCRM uses refresh tokens to keep sessions alive).
+   - **PKCE**: Zitadel requires `S256` for public clients automatically.
+2. **Redirect URIs**: add `https://<your-minicrm-domain>/auth/callback` exactly (scheme, host, port, path must match `MINICRM_OIDC_REDIRECT_URL`). For local development also add `http://127.0.0.1:8080/auth/callback`.
+3. **Post-logout redirect URIs** (optional): `https://<your-minicrm-domain>/`.
+4. Note the **Client ID** shown after creation. No client secret exists for `NONE` clients — this is expected.
+5. Assign users to the project via **Authorizations** (project roles) so they may log in.
+
+### 7.2 Expose group/role membership to MiniCRM
+
+MiniCRM derives mail-account access from a claim (`groups` by default) in the ID token. Zitadel does not emit a `groups` claim by default; the simplest mapping is to use **project roles**:
+
+1. In the Zitadel project, create **Roles** whose keys match your account groups, e.g. `crm_support` and `crm_sales`.
+2. Grant those roles to users via **Authorizations**.
+3. On the MiniCRM application, enable **"Assert Roles on Authentication"** (and **"Include Project Roles in ID Token"** if shown). Zitadel then includes an `urn:zitadel:iam:org:project:roles` claim (and `urn:zitadel:iam:org:project:<project-id>:roles`) in the ID token.
+4. Point MiniCRM at that claim:
+
+```env
+MINICRM_OIDC_GROUPS_CLAIM=urn:zitadel:iam:org:project:roles
+MINICRM_ACCOUNT_1_OIDC_GROUP=crm_support
+MINICRM_ACCOUNT_2_OIDC_GROUP=crm_sales
+```
+
+MiniCRM reads the role keys of that object as the group values. If you prefer plain group names, configure a custom claim/action in Zitadel that emits `groups` instead and keep the default `MINICRM_OIDC_GROUPS_CLAIM`.
+
+### 7.3 MiniCRM configuration
+
+```env
+MINICRM_OIDC_ISSUER_URL=https://<your-instance>.zitadel.cloud   # or your self-hosted issuer
+MINICRM_OIDC_CLIENT_ID=<application client id>
+# No MINICRM_OIDC_CLIENT_SECRET — public client, PKCE only.
+MINICRM_OIDC_REDIRECT_URL=https://crm.example.com/auth/callback
+
+# Required without a client secret: encrypts refresh tokens at rest.
+# Generate once and keep stable, e.g.: openssl rand -base64 32
+MINICRM_SESSION_ENCRYPTION_KEY=<stable random secret>
+
+MINICRM_OIDC_SCOPES=openid,profile,email
+MINICRM_OIDC_GROUPS_CLAIM=urn:zitadel:iam:org:project:roles
+
+MINICRM_BOOTSTRAP_ADMIN_EMAIL=alice@example.com
+MINICRM_BOOTSTRAP_ADMIN_NAME="Alice Agent"
+
+MINICRM_ACCOUNT_1_ID=support
+MINICRM_ACCOUNT_1_NAME="Customer Support"
+MINICRM_ACCOUNT_1_OIDC_GROUP=crm_support
+# ... IMAP/SMTP settings for account 1 ...
+```
+
+### 7.4 Verify & troubleshoot
+
+1. `curl -s $MINICRM_OIDC_ISSUER_URL/.well-known/openid-configuration | jq '{issuer, code_challenge_methods_supported}'` — `issuer` must match `MINICRM_OIDC_ISSUER_URL` exactly and `S256` must be listed.
+2. Start MiniCRM, open `/threads`, sign in via Zitadel. `users.allowed_accounts` in PostgreSQL should list the accounts matching the user's Zitadel roles.
+
+| Symptom | Cause & fix |
+|---|---|
+| `401 Unauthorized` at callback, Zitadel `invalid_client` | The application is configured with `BASIC`/`POST` authentication (expects a secret). Switch to `NONE` (public client) or configure the issued secret. |
+| `403 Forbidden` / `no_account_access` | The roles claim is missing. Enable role assertion on the application and check `MINICRM_OIDC_GROUPS_CLAIM` matches `urn:zitadel:iam:org:project:roles`; verify roles are granted via project Authorizations. |
+| MiniCRM refuses to start: `MINICRM_SESSION_ENCRYPTION_KEY is required ...` | Set `MINICRM_SESSION_ENCRYPTION_KEY` — mandatory when no client secret is configured. |
+| `invalid oauth2 state` after redirect back | Redirect URI mismatch between Zitadel and `MINICRM_OIDC_REDIRECT_URL` (must match exactly). |
+
+---
+
+## 8. Other Providers
 
 Anything that supports OIDC Discovery, `authorization_code`, PKCE `S256`, and either `RS256` or `ES256` works without MiniCRM-specific code. Notable configuration points:
 
@@ -388,3 +461,4 @@ Anything that supports OIDC Discovery, `authorization_code`, PKCE `S256`, and ei
 | Authentik | `https://<host>/application/o/<slug>/` | `groups` | Add a scope mapping that emits `groups`. |
 | Entra ID | `https://login.microsoftonline.com/<tenant>/v2.0` | `groups` | Returns **group object IDs**, not names — set `MINICRM_ACCOUNT_<N>_OIDC_GROUP` to the GUID, or use app roles with `roles`. |
 | Kanidm | `https://<host>/oauth2/openid/<client>` | `groups` / `groups_name` | See [Kanidm Setup](#6-kanidm-setup); `ES256` and a per-client issuer. |
+| Zitadel | `https://<instance>.zitadel.cloud` | `urn:zitadel:iam:org:project:roles` | See [Zitadel Setup](#7-zitadel-setup-public-client-pkce-without-client-secret); public client with PKCE only (no secret). |
