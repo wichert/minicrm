@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -379,6 +381,105 @@ func TestLoginCallbackWithoutAccountAccessReturns403(t *testing.T) {
 	handler.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusForbidden {
 		t.Fatalf("got status %d, want 403", rec2.Code)
+	}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+	verifier.identity = &auth.VerifiedIdentity{
+		Subject: "sub-carol",
+		Email:   "carol@example.com",
+		Name:    "Carol",
+		Groups:  []string{"staff"},
+		Claims: map[string]any{
+			"sub": "sub-carol", "email": "carol@example.com", "groups": []string{"staff"},
+			"access_token": "token-value", "client_secret": "secret-value",
+			"nested": map[string]any{"refresh_token": "refresh-value"},
+			"list":   []any{map[string]any{"password": "password-value"}},
+		},
+	}
+	rec1 = httptest.NewRecorder()
+	handler.ServeHTTP(rec1, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	loc = rec1.Header().Get("Location")
+	stateVal = loc[strings.Index(loc, "state=")+len("state="):]
+	req2 = httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state="+stateVal, nil)
+	for _, c := range rec1.Result().Cookies() {
+		req2.AddCookie(c)
+	}
+	handler.ServeHTTP(httptest.NewRecorder(), req2)
+
+	var entry struct {
+		Message  string         `json:"msg"`
+		UserID   string         `json:"user_id"`
+		Claims   map[string]any `json:"jwt_claims"`
+		Accounts []string       `json:"accounts"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.Split(logs.String(), "\n")[1])), &entry); err != nil {
+		t.Fatalf("decode callback log %q: %v", logs.String(), err)
+	}
+	if entry.Message != "oidc_callback" || entry.UserID != "sub-carol" || entry.Claims["email"] != "carol@example.com" || len(entry.Accounts) != 0 {
+		t.Fatalf("unexpected callback log: %+v", entry)
+	}
+	for _, secret := range []string{"token-value", "secret-value", "refresh-value", "password-value"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("callback log contains credential %q: %s", secret, logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "[REDACTED]") {
+		t.Fatalf("callback log does not redact credentials: %s", logs.String())
+	}
+}
+
+func TestLoginCallbackAlwaysLogsRedactedClaims(t *testing.T) {
+	store := newMemUserStore()
+	auditLogger := audit.NewLogger(store, nil)
+	sm := auth.NewSessionManager(false)
+	verifier := &fakeVerifier{identity: &auth.VerifiedIdentity{
+		Subject: "sub-alice", Email: "alice@example.com", Name: "Alice", Groups: []string{"crm-support"},
+		Claims: map[string]any{"sub": "sub-alice", "email": "alice@example.com", "authorization": "credential-value"},
+	}}
+	svc := auth.NewService(store, auditLogger, sm, verifier, "admin@example.com", testAccountRules()...)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/login", svc.HandleLogin)
+	mux.HandleFunc("/auth/callback", svc.HandleCallback)
+	handler := sm.LoadAndSave(mux)
+
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	stateVal := strings.SplitN(rec1.Header().Get("Location"), "state=", 2)[1]
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state="+stateVal, nil)
+	for _, cookie := range rec1.Result().Cookies() {
+		req.AddCookie(cookie)
+	}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	var entry struct {
+		Message  string         `json:"msg"`
+		UserID   string         `json:"user_id"`
+		Claims   map[string]any `json:"jwt_claims"`
+		Accounts []string       `json:"accounts"`
+	}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var candidate struct {
+			Message string `json:"msg"`
+		}
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Message == "oidc_callback" {
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				t.Fatalf("decode callback log: %v", err)
+			}
+		}
+	}
+	if entry.Message != "oidc_callback" || entry.UserID != "sub-alice" || len(entry.Accounts) != 1 || entry.Accounts[0] != "support" {
+		t.Fatalf("successful callback log missing identity or accounts: %+v; logs=%s", entry, logs.String())
+	}
+	if entry.Claims["authorization"] != "[REDACTED]" || strings.Contains(logs.String(), "credential-value") {
+		t.Fatalf("successful callback log exposed a credential: %s", logs.String())
 	}
 }
 
