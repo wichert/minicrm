@@ -18,9 +18,9 @@ import { resultsContainer, rerenderSelection, setupBulkForm } from "./selection.
 import { setupRowLinks, setupRowMenus } from "./rows.js";
 import { setupTabStrips } from "./tabs.js";
 
-export function hasPendingInlineEdit(doc = document) {
+export function hasPendingInlineEdit(doc = document, ignoreSelect) {
   const active = doc.activeElement;
-  if (!active) {
+  if (!active || active === ignoreSelect) {
     return false;
   }
   const tag = active.tagName;
@@ -40,7 +40,7 @@ export function hasPendingInlineEdit(doc = document) {
 /* A swap must never destroy work in progress. Pause while the tab is hidden,
    text is selected, a row menu or confirm dialog is open, any thread checkbox is
    checked, focus is inside the results region, or an inline edit is dirty. */
-export function isPaused(doc = document, win = window) {
+export function isPaused(doc = document, win = window, ignoreSelect) {
   if (doc.visibilityState === "hidden") {
     return true;
   }
@@ -61,7 +61,7 @@ export function isPaused(doc = document, win = window) {
   if (results && results.contains(doc.activeElement)) {
     return true;
   }
-  return hasPendingInlineEdit(doc);
+  return hasPendingInlineEdit(doc, ignoreSelect);
 }
 
 export function checkedThreadIDs(doc = document) {
@@ -178,7 +178,10 @@ export function setupInboxAutoRefresh() {
           menu.open = false;
         }
       }
-      if (isPaused()) {
+      // A filter's own htmx request is the action that consumes its selection;
+      // its focused select is not pending inline work for a background refresh.
+      const filterSelect = elt.tagName === "SELECT" && elt.hasAttribute("hx-get") ? elt : null;
+      if (isPaused(document, window, filterSelect)) {
         event.preventDefault();
         return;
       }
