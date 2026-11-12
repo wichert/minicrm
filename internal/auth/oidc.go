@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -99,6 +100,7 @@ type VerifiedIdentity struct {
 	// verified ID token or UserInfo response. On login this is always true; on token
 	// refresh, false indicates the provider omitted the groups claim.
 	GroupsPresent      bool
+	Claims             map[string]any
 	RefreshToken       string
 	IDTokenExpiry      time.Time
 	RefreshTokenExpiry time.Time
@@ -325,6 +327,7 @@ func (p *OIDCProvider) parseVerifiedIdentity(ctx context.Context, idToken *oidc.
 		Name:          displayName,
 		Groups:        groups,
 		GroupsPresent: true,
+		Claims:        claims,
 	}, nil
 }
 
@@ -817,6 +820,11 @@ func (s *Service) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := s.ResolveAndLoginUser(ctx, identity, r.RemoteAddr, r.UserAgent())
+	slog.InfoContext(ctx, "oidc_callback",
+		slog.String("user_id", identity.Subject),
+		slog.Any("jwt_claims", redactJWTClaims(identity.Claims)),
+		slog.Any("accounts", s.ResolveAccounts(identity.Groups)),
+	)
 	if errors.Is(err, ErrUserInactive) {
 		http.Error(w, "account is inactive", http.StatusForbidden)
 		return
@@ -867,6 +875,35 @@ func (s *Service) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		target = "/threads"
 	}
 	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+func redactJWTClaims(claims map[string]any) map[string]any {
+	redacted := make(map[string]any, len(claims))
+	for key, value := range claims {
+		redacted[key] = redactJWTClaim(key, value)
+	}
+	return redacted
+}
+
+func redactJWTClaim(key string, value any) any {
+	normalizedKey := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(key))
+	for _, sensitive := range []string{"token", "secret", "password", "credential", "authorization", "cookie", "session", "privatekey", "apikey", "assertion"} {
+		if strings.Contains(normalizedKey, sensitive) || normalizedKey == "code" || normalizedKey == "codeverifier" {
+			return "[REDACTED]"
+		}
+	}
+	switch value := value.(type) {
+	case map[string]any:
+		return redactJWTClaims(value)
+	case []any:
+		redacted := make([]any, len(value))
+		for i, item := range value {
+			redacted[i] = redactJWTClaim("", item)
+		}
+		return redacted
+	default:
+		return value
+	}
 }
 
 func (s *Service) revokeExistingUserAccountsOnLogin(ctx context.Context, id *VerifiedIdentity, ipAddr, userAgent string) {
